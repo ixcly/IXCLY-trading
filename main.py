@@ -2,7 +2,7 @@ import asyncio
 import os
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 import feedparser
 import json
 import requests
@@ -33,6 +33,25 @@ exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --- РУЧНОЙ РАСЧЕТ ИНДИКАТОРОВ (вместо pandas_ta) ---
+def calc_ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
+def calc_rsi(series, length=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calc_atr(df, length=14):
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    return true_range.rolling(length).mean()
+
 def get_coins_keyboard():
     buttons = [
         [InlineKeyboardButton(text="🟡 BTC", callback_data="BTCUSDT"), InlineKeyboardButton(text="🔷 ETH", callback_data="ETHUSDT")],
@@ -49,9 +68,11 @@ async def get_signal_data(symbol):
             return f"❌ Нет данных по тикеру {okx_symbol}."
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['ema20'] = ta.ema(df['close'], length=20)
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        
+        # Считаем индикаторы вручную
+        df['ema20'] = calc_ema(df['close'], 20)
+        df['rsi'] = calc_rsi(df['close'], 14)
+        df['atr'] = calc_atr(df, 14)
 
         current_price = df['close'].iloc[-1]
         current_ema = df['ema20'].iloc[-1]
