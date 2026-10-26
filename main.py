@@ -168,36 +168,49 @@ async def animate_loading(message: types.Message):
     except Exception:
         pass
 
-# --- ЗАПРОС К API С АВТОМАТИЧЕСКОЙ РОТАЦИЕЙ КЛЮЧЕЙ ---
+# --- ЗАПРОС К API С АВТОМАТИЧЕСКОЙ РОТАЦИЕЙ КЛЮЧЕЙ И МОДЕЛЕЙ ---
 async def fetch_analysis(prompt):
     if not GEMINI_API_KEYS:
         return "ERROR: Нет доступных API-ключей."
     
-    model_name = "gemini-3.8-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    # Список моделей для fallback (если одна перегружена, пробуем следующую)
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+    
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
     
     # Проходим по всем ключам по очереди
     for key in GEMINI_API_KEYS:
         headers['x-goog-api-key'] = key
-        try:
-            response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=(15, 90))
-            res_data = response.json()
-            
-            if 'error' in res_data:
-                error_msg = res_data['error'].get('message', '')
-                # Если лимит исчерпан, пробуем следующий ключ
-                if 'exceeded your current quota' in error_msg.lower() or 'quota' in error_msg.lower():
-                    print(f"Ключ ...{key[-4:]} исчерпан. Пробуем следующий.")
-                    continue
-                return f"ERROR: {error_msg}"
-            
-            return res_data['candidates'][0]['content']['parts'][0]['text']
-        except Exception as e:
-            print(f"Ошибка с ключом ...{key[-4:]}: {e}")
-            continue
-            
+        
+        # Для каждого ключа пробуем все модели
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            try:
+                response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=(15, 90))
+                res_data = response.json()
+                
+                if 'error' in res_data:
+                    error_msg = res_data['error'].get('message', '')
+                    
+                    # Если лимит исчерпан, переходим к следующему ключу
+                    if 'exceeded your current quota' in error_msg.lower() or 'quota' in error_msg.lower():
+                        print(f"Ключ ...{key[-4:]} исчерпан. Пробуем следующий.")
+                        break # Выходим из цикла моделей для этого ключа
+                        
+                    # Если модель перегружена (503), пробуем следующую модель
+                    if 'high demand' in error_msg.lower() or 'currently experiencing' in error_msg.lower() or 'overloaded' in error_msg.lower():
+                        print(f"Модель {model_name} перегружена. Пробуем запасную...")
+                        continue # Переходим к следующей модели
+                        
+                    return f"ERROR: {error_msg}"
+                
+                return res_data['candidates'][0]['content']['parts'][0]['text']
+                
+            except Exception as e:
+                print(f"Ошибка с ключом ...{key[-4:]} и моделью {model_name}: {e}")
+                continue
+                
     return "QUOTA_EXCEEDED_ALL"
 
 async def analyze_news(title, summary):
