@@ -40,53 +40,87 @@ dp = Dispatcher()
 active_chats = set()
 last_news_link = None
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ ---
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ (НОВЫЙ ДИЗАЙН) ---
 def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, tf, long_prob):
-    img = Image.new('RGB', (800, 800), color='#111111')
+    # Палитра TradingView Dark
+    bg_color = '#131722'
+    grid_color = '#2a2e39'
+    text_white = '#D1D4DC'
+    text_gray = '#787B86'
+    color_green = '#089981' # Приятный изумрудный
+    color_red = '#F23645'   # Приятный коралловый
+    
+    img = Image.new('RGB', (800, 800), color=bg_color)
     draw = ImageDraw.Draw(img)
     
     try:
-        font_logo = ImageFont.truetype("DejaVuSans-Bold.ttf", 40)
-        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 60)
-        font_text = ImageFont.truetype("DejaVuSans.ttf", 30)
-        font_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", 30)
+        font_logo = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 55)
+        font_text = ImageFont.truetype("DejaVuSans.ttf", 26)
+        font_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
     except:
         font_logo = font_title = font_text = font_bold = ImageFont.load_default()
 
-    color_green = '#00FF7F'
-    color_red = '#FF4500'
-    color_white = '#FFFFFF'
-    color_gray = '#888888'
-    
     main_color = color_green if "LONG" in direction else color_red
 
-    draw.text((40, 40), "ixcly trade", font=font_logo, fill=color_white)
-    draw.text((40, 120), f"{symbol}", font=font_title, fill=color_white)
-    draw.text((450, 135), f"{direction.split(' ')[1]}", font=font_logo, fill=main_color)
-    draw.text((40, 200), f"TF: {tf}  |  Вероятность: {long_prob}%", font=font_text, fill=color_gray)
+    # Рисуем сетку на фоне
+    for i in range(0, 800, 80):
+        draw.line([(i, 0), (i, 800)], fill=grid_color, width=1)
+        draw.line([(0, i), (800, i)], fill=grid_color, width=1)
 
-    graph_y = 250
-    draw.line((40, graph_y+40, 760, graph_y-40 if "LONG" in direction else graph_y+80), fill=main_color, width=4)
-    for i in range(10):
-        x = 40 + i * 75
-        y = graph_y + np.random.randint(-30, 30)
-        draw.rectangle([x, y-15, x+20, y+15], fill=main_color)
+    # Верхний блок с текстом
+    draw.text((40, 40), "ixcly trade", font=font_logo, fill=text_white)
+    draw.text((40, 110), f"{symbol}", font=font_title, fill=text_white)
+    
+    # Бейдж направления
+    dir_text = "LONG" if "LONG" in direction else "SHORT"
+    draw.text((500, 125), dir_text, font=font_title, fill=main_color)
+    
+    draw.text((40, 190), f"TF: {tf}  |  Вероятность: {long_prob}%", font=font_text, fill=text_gray)
 
-    y_offset = 400
-    draw.text((40, y_offset), "Точка входа:", font=font_text, fill=color_gray)
-    draw.text((280, y_offset), f"{entry:.4f}", font=font_bold, fill=color_white)
+    # --- ГРАФИК (Аккуратные свечи) ---
+    chart_top = 260
+    chart_bottom = 420
+    chart_height = chart_bottom - chart_top
     
-    y_offset += 60
-    draw.text((40, y_offset), "Тейк-профиты:", font=font_text, fill=color_gray)
-    draw.text((280, y_offset), f"TP1: {tp1:.4f}", font=font_bold, fill=color_green)
-    draw.text((280, y_offset+40), f"TP2: {tp2:.4f}", font=font_bold, fill=color_green)
-    draw.text((280, y_offset+80), f"TP3: {tp3:.4f}", font=font_bold, fill=color_green)
+    # Рисуем 25 свечей
+    for i in range(25):
+        x = 40 + i * 28
+        # Случайная генерация движения
+        body_height = np.random.randint(10, 40)
+        wick_height = body_height + np.random.randint(10, 30)
+        
+        # Определяем позицию (чтобы не вылезало за рамки)
+        center_y = chart_top + chart_height // 2 + np.random.randint(-50, 50)
+        
+        # Цвет свечи (чередуем для реализма)
+        candle_color = color_green if np.random.rand() > 0.5 else color_red
+        
+        # Тень (фитиль)
+        draw.line([(x + 6, center_y - wick_height//2), (x + 6, center_y + wick_height//2)], fill=candle_color, width=2)
+        # Тело
+        draw.rectangle([x, center_y - body_height//2, x + 12, center_y + body_height//2], fill=candle_color)
+
+    # --- УРОВНИ (Точки входа, TP, SL) ---
+    y_offset = 480
     
+    # Точка входа
+    draw.text((40, y_offset), "Цена входа:", font=font_text, fill=text_gray)
+    draw.text((250, y_offset-5), f"{entry:.4f}", font=font_bold, fill=text_white)
+    
+    # Тейк-профиты
+    y_offset += 70
+    draw.text((40, y_offset), "Take Profit:", font=font_text, fill=text_gray)
+    draw.text((250, y_offset), f"TP1: {tp1:.4f}", font=font_bold, fill=color_green)
+    draw.text((250, y_offset+40), f"TP2: {tp2:.4f}", font=font_bold, fill=color_green)
+    draw.text((250, y_offset+80), f"TP3: {tp3:.4f}", font=font_bold, fill=color_green)
+    
+    # Стоп-лоссы
     y_offset += 160
-    draw.text((40, y_offset), "Стоп-лоссы:", font=font_text, fill=color_gray)
-    draw.text((280, y_offset), f"SL1: {sl1:.4f}", font=font_bold, fill=color_red)
-    draw.text((280, y_offset+40), f"SL2: {sl2:.4f}", font=font_bold, fill=color_red)
-    draw.text((280, y_offset+80), f"SL3: {sl3:.4f}", font=font_bold, fill=color_red)
+    draw.text((40, y_offset), "Stop Loss:", font=font_text, fill=text_gray)
+    draw.text((250, y_offset), f"SL1: {sl1:.4f}", font=font_bold, fill=color_red)
+    draw.text((250, y_offset+40), f"SL2: {sl2:.4f}", font=font_bold, fill=color_red)
+    draw.text((250, y_offset+80), f"SL3: {sl3:.4f}", font=font_bold, fill=color_red)
 
     buf = io.BytesIO()
     img.save(buf, format='PNG')
@@ -122,14 +156,25 @@ def get_coins_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def get_main_menu():
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📰 Последние новости")],
+            [KeyboardButton(text="🚀 Открыть меню")]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+    return kb
+
 async def animate_loading(message: types.Message):
     phrases = [
-        "📡 Сканируем рыночные данные (15m, 1h, 4h, 1d)...",
-        "📰 Анализируем мировые новости и настроения...",
-        "📊 Рассчитываем индикаторы на всех таймфреймах...",
-        "⚙️ Система ищет точку входа и доминирующий тренд...",
-        "⚖️ Рассчитываем уровни риска (3 TP / 3 SL)...",
-        "📈 Завершаем глубокий анализ данных..."
+        "📡 Сканируем рыночные данные...",
+        "📰 Анализируем мировые новости...",
+        "📊 Рассчитываем индикаторы...",
+        "⚙️ Ищем точку входа...",
+        "⚖️ Рассчитываем TP и SL...",
+        "📈 Завершаем анализ..."
     ]
     try:
         i = 0
@@ -173,10 +218,9 @@ async def fetch_analysis(prompt):
             
     return f"ERROR: {last_error_message}"
 
-# --- АНАЛИЗ НОВОСТЕЙ (УБРАНО СЛОВО СУТЬ) ---
 async def analyze_news(title, summary):
     prompt = f"""
-    Ты профессиональный крито-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
+    Ты профессиональный крипто-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
     Заголовок: {title}
     Описание: {summary}
     
@@ -338,13 +382,41 @@ async def news_watcher():
 @dp.message(F.text == "🚀 Открыть меню")
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
-    reply_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🚀 Открыть меню")]],
-        resize_keyboard=True,
-        is_persistent=True
-    )
-    await message.answer("Привет! Нажми кнопку ниже, чтобы выбрать монету.", reply_markup=reply_kb)
+    await message.answer("👋 Главное меню активировано. Выбери действие на панели ниже:", reply_markup=get_main_menu())
     await message.answer("👋 Выбери монету для анализа:", reply_markup=get_coins_keyboard())
+
+@dp.message(F.text == "📰 Последние новости")
+async def handle_news_button(message: types.Message):
+    active_chats.add(message.chat.id)
+    msg = await message.answer("⏳ Запрашиваем и анализируем последнюю новость...")
+    
+    try:
+        feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
+        if feed.entries:
+            latest_news = feed.entries[0]
+            news_title = latest_news.title
+            news_summary = getattr(latest_news, 'summary', '')
+            news_link = latest_news.link
+            
+            image_url = None
+            if hasattr(latest_news, 'media_content'):
+                image_url = latest_news.media_content[0]['url']
+            elif hasattr(latest_news, 'enclosures') and latest_news.enclosures:
+                if 'image' in latest_news.enclosures[0].get('type', ''):
+                    image_url = latest_news.enclosures[0].get('href')
+            
+            ai_analysis_text = await analyze_news(news_title, news_summary)
+            final_text = f"{ai_analysis_text}\n\n🔗 <a href='{news_link}'>Читать источник</a>"
+            
+            await msg.delete()
+            if image_url:
+                await message.answer_photo(photo=image_url, caption=final_text, parse_mode='HTML')
+            else:
+                await message.answer(final_text, parse_mode='HTML', disable_web_page_preview=False)
+        else:
+            await msg.edit_text("❌ Свежих новостей пока нет.")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка при получении новостей: {e}")
 
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
