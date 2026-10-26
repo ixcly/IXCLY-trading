@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.2
+IXCLY Trading bot v2.3
 - Свечи: прямые публичные REST API (Binance Vision, MEXC, Gate, KuCoin, OKX, Bybit) + CryptoCompare как запасной вариант
 - ИИ: Gemini / Groq / OpenRouter параллельно, берётся первый валидный ответ; есть локальный fallback
 - Картинка: реальный график свечей с уровнями входа, TP и SL
@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("ixcly")
 
 # ----------------------------------------------------------------------------
-# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы сервис считался живым)
+# ВЕБ-СЕРВЕР ДЛЯ RENDER
 # ----------------------------------------------------------------------------
 app = Flask("")
 
@@ -50,7 +50,7 @@ def keep_alive():
 
 
 # ----------------------------------------------------------------------------
-# НАСТРОЙКИ (С ОЧИСТКОЙ КЛЮЧЕЙ)
+# НАСТРОЙКИ
 # ----------------------------------------------------------------------------
 def clean_key(key):
     if not key:
@@ -64,7 +64,7 @@ OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 
-# Модель оставлена ровно как ты просил
+# Модель строго как ты просил
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
@@ -75,8 +75,8 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-http: aiohttp.ClientSession = None  # создаётся в main()
-analysis_sem: asyncio.Semaphore = None  # создаётся в main()
+http: aiohttp.ClientSession = None
+analysis_sem: asyncio.Semaphore = None
 
 TFS = ["15m", "1h", "4h", "1d"]
 TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
@@ -93,7 +93,7 @@ USERS_FILE = "users.json"
 active_chats = set()
 busy_users = set()
 user_last_request = {}
-result_cache = {}  # coin -> (timestamp, text, png_bytes)
+result_cache = {}
 RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
@@ -185,7 +185,6 @@ def fmt(p):
 
 
 async def first_success(coros, timeout):
-    """Запускает корутины параллельно, возвращает первый не-None результат, остальные отменяет."""
     tasks = [asyncio.create_task(c) for c in coros]
     try:
         pending = set(tasks)
@@ -311,7 +310,7 @@ def build_tf_data(rows_by_tf):
 
 
 # ----------------------------------------------------------------------------
-# ИСТОЧНИКИ ДАННЫХ (публичные REST, без ключей, без ccxt)
+# ИСТОЧНИКИ ДАННЫХ
 # ----------------------------------------------------------------------------
 def _p_binance(j):
     if not isinstance(j, list):
@@ -448,7 +447,7 @@ async def get_market_data(coin):
 
 
 # ----------------------------------------------------------------------------
-# ИИ (параллельно, первый валидный ответ)
+# ИИ
 # ----------------------------------------------------------------------------
 async def _ask_gemini(prompt, json_mode):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -535,7 +534,7 @@ def ai_to_html(text):
 
 
 # ----------------------------------------------------------------------------
-# НОВОСТИ (С НОРМАЛЬНЫМ АНАЛИЗОМ И БЕЗ СЛОВА "СУТЬ")
+# НОВОСТИ (СТРОГО НА РУССКОМ ЯЗЫКЕ)
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 _news_cache = {"ts": 0.0, "entries": []}
@@ -591,14 +590,16 @@ async def fetch_and_analyze_news():
         summary = re.sub(r"<[^>]+>", "", getattr(news, "summary", ""))[:800]
         link = news.link
 
-        prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость и напиши краткий пост для Telegram на русском языке.
+        # ЖЕСТКИЙ ПРОМПТ: ТОЛЬКО РУССКИЙ ЯЗЫК
+        prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость и напиши краткий пост для Telegram СТРОГО НА РУССКОМ ЯЗЫКЕ.
 Заголовок: {title}
 Описание: {summary}
 
+ОБЯЗАТЕЛЬНО ПЕРЕВЕДИ ЗАГОЛОВОК И ТЕКСТ НА РУССКИЙ ЯЗЫК. НИКАКОГО АНГЛИЙСКОГО ТЕКСТА В ОТВЕТЕ.
 Ответ должен быть кратким, по делу, без воды и без слов "Суть" и "ИИ".
 Напиши:
-1. Что произошло (1-2 предложения).
-2. Как это влияет на рынок (позитив/негатив и почему).
+1. Что произошло (1-2 предложения на русском).
+2. Как это влияет на рынок (позитив/негатив и почему, на русском).
 3. Какие монеты затронуты (2-3 тикера, например BTC, ETH).
 """
         ai_text = await ask_ai(prompt, json_mode=False, timeout=20)
@@ -606,7 +607,7 @@ async def fetch_and_analyze_news():
         if ai_text:
             body = ai_to_html(ai_text)
         else:
-            # Умный Fallback: если ИИ лег, выдаем чистый текст без ошибок
+            # Умный Fallback: если ИИ лег, выдаем текст без ошибок (перевод заголовка невозможен без ИИ, оставляем оригинал)
             body = (
                 f"📌 <b>{html.escape(title)}</b>\n\n"
                 f"<i>{html.escape(summary[:400])}...</i>\n\n"
