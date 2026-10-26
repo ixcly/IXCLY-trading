@@ -39,7 +39,7 @@ exchange_list = [
     {'name': 'OKX', 'ex': ccxt.okx({'options': {'defaultType': 'swap'}})},
     {'name': 'Bybit', 'ex': ccxt.bybit({'options': {'defaultType': 'swap'}})},
     {'name': 'Binance', 'ex': ccxt.binance({'options': {'defaultType': 'swap'}})},
-    {'name': 'Gate.io', 'ex': ccxt.gateio({'options': {'defaultType': 'swap'}})},
+    {'name': 'Gate.io', 'ex': ccxt.gate({'options': {'defaultType': 'swap'}})}, # ИСПРАВЛЕНО: gate вместо gateio
     {'name': 'Bitget', 'ex': ccxt.bitget({'options': {'defaultType': 'swap'}})},
     {'name': 'KuCoin', 'ex': ccxt.kucoinfutures({'options': {'defaultType': 'swap'}})},
     {'name': 'MEXC', 'ex': ccxt.mexc({'options': {'defaultType': 'swap'}})},
@@ -52,7 +52,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 active_chats = set()
-waiting_for_search = set() # Пользователи, которые ждут ввода монеты
+waiting_for_search = set()
 last_news_link = None
 last_request_time = 0
 
@@ -83,7 +83,6 @@ def get_coins_keyboard(page=0):
     if page < total_pages - 1: nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
     buttons.append(nav_row)
     
-    # Кнопка поиска
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search_coin")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -422,12 +421,11 @@ async def handle_news_command(message: types.Message):
 @dp.message(F.text)
 async def handle_search_text(message: types.Message):
     if message.text.startswith('/'):
-        return # Игнорируем команды
+        return 
         
     if message.chat.id in waiting_for_search:
         waiting_for_search.remove(message.chat.id)
         
-        # Очищаем ввод от лишнего
         coin = message.text.upper().replace('USDT', '').replace('/', '').strip()
         
         if not coin.isalnum():
@@ -463,8 +461,7 @@ async def process_callback(callback_query: types.CallbackQuery):
         await callback_query.answer()
         return
         
-    # Если выбрана монета из списка
-    waiting_for_search.discard(chat_id) # Сбрасываем режим поиска
+    waiting_for_search.discard(chat_id)
     await callback_query.answer()
     
     symbol = data
