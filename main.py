@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.5 (FULL + Username instead of ID)
+IXCLY Trading bot v2.6 (FULL + 4 Translation Providers)
 """
 import asyncio
 import html
@@ -50,8 +50,8 @@ def clean_key(key):
     if not key: return None
     return key.strip().strip('"').strip("'")
 
-BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN")) # ГЛАВНЫЙ БОТ
-INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN")) # АДМИН БОТ
+BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
+INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
@@ -219,29 +219,58 @@ def normalize_ticker(text):
         t = t[:-4]
     return t
 
+# --- МУЛЬТИ-ПЕРЕВОДЧИК (4 ПРОВАЙДЕРА) ---
 async def translate_text(text, target="ru"):
     if not text: return text
+
+    # 1. Пытаемся через Lingva Translate (бесплатный прокси)
     try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text}
-        async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
+        url = f"https://lingva.ml/api/v1/auto/{target}/{text}"
+        async with http.get(url, timeout=aiohttp.ClientTimeout(total=6)) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
-                return "".join([item[0] for item in data[0]])
+                if "translation" in data:
+                    return data["translation"]
     except Exception:
         pass
-    
+
+    # 2. Пытаемся через LibreTranslate (открытый API)
+    try:
+        url = "https://translate.argosopentech.com/translate"
+        payload = {"q": text, "source": "auto", "target": target, "format": "text"}
+        async with http.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=6)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                if "translatedText" in data:
+                    return data["translatedText"]
+    except Exception:
+        pass
+
+    # 3. Пытаемся через MyMemory (запасной)
     try:
         url = "https://api.mymemory.translated.net/get"
         params = {"q": text, "langpair": f"en|{target}"}
-        async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
+        async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=6)) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
                 if data.get("responseStatus") == 200:
                     return data["responseData"]["translatedText"]
     except Exception:
         pass
-    return text
+
+    # 4. Пытаемся через стандартный Google (вдруг ожил)
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text}
+        async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=6)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                return "".join([item[0] for item in data[0]])
+    except Exception:
+        pass
+
+    return text # Если все упали, возвращаем оригинал
+# -----------------------------------------
 
 # ----------------------------------------------------------------------------
 # ИНДИКАТОРЫ
