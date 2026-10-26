@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.4
-- Новости: строгий перевод на русский (включая аварийный переводчик, если ИИ лег)
-- Свечи: прямые публичные REST API + CryptoCompare
-- ИИ: Gemini (2.5-flash) / Groq / OpenRouter
+IXCLY Trading bot v3.0
+- Мгновенная рассылка из второго (админского) бота
+- Новости: строгий перевод на русский
+- Свечи: Binance, MEXC, Gate, KuCoin, OKX, Bybit + CryptoCompare
 """
 import asyncio
 import html
@@ -50,18 +50,17 @@ def keep_alive():
 # НАСТРОЙКИ
 # ----------------------------------------------------------------------------
 def clean_key(key):
-    if not key:
-        return None
+    if not key: return None
     return key.strip().strip('"').strip("'")
 
 BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
+INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN")) # Токен для админ-бота
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 
-# Модель строго как ты просил
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
@@ -71,6 +70,10 @@ if not BOT_TOKEN:
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Инициализация админ-бота
+input_bot = Bot(token=INPUT_BOT_TOKEN) if INPUT_BOT_TOKEN else None
+input_dp = Dispatcher() if INPUT_BOT_TOKEN else None
 
 http: aiohttp.ClientSession = None
 analysis_sem: asyncio.Semaphore = None
@@ -222,7 +225,6 @@ def normalize_ticker(text):
         t = t[:-4]
     return t
 
-# --- ВСТРОЕННЫЙ ПЕРЕВОДЧИК (ЕСЛИ ИИ ЛЕГ) ---
 async def translate_text(text, target="ru"):
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -234,7 +236,6 @@ async def translate_text(text, target="ru"):
     except Exception:
         pass
     return text
-# ---------------------------------------------
 
 # ----------------------------------------------------------------------------
 # ИНДИКАТОРЫ
@@ -544,7 +545,7 @@ def ai_to_html(text):
 
 
 # ----------------------------------------------------------------------------
-# НОВОСТИ (С ПРИНУДИТЕЛЬНЫМ ПЕРЕВОДОМ)
+# НОВОСТИ
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 _news_cache = {"ts": 0.0, "entries": []}
@@ -590,7 +591,6 @@ async def download_bytes(url):
 
 
 async def fetch_and_analyze_news():
-    """Возвращает (html_text, image_url, ok)."""
     try:
         entries = await get_news_entries()
         if not entries:
@@ -611,13 +611,11 @@ async def fetch_and_analyze_news():
 2. Как это влияет на рынок (позитив/негатив и почему, на русском).
 3. Какие монеты затронуты (2-3 тикера, например BTC, ETH).
 """
-        # Увеличили таймаут для новостей, чтобы ИИ успел перевести
         ai_text = await ask_ai(prompt, json_mode=False, timeout=40)
         
         if ai_text:
             body = ai_to_html(ai_text)
         else:
-            # АВАРИЙНЫЙ ПЕРЕВОД, если ИИ лег
             ru_title = await translate_text(title)
             ru_summary = await translate_text(summary[:300])
             
@@ -636,7 +634,6 @@ async def fetch_and_analyze_news():
 
 
 async def send_with_image(chat_id, text, image_bytes, filename="img.png", markup=None):
-    """Фото + подпись; если подпись длиннее лимита Telegram (1024), текст уходит отдельным сообщением."""
     if image_bytes:
         photo = BufferedInputFile(image_bytes, filename=filename)
         if len(text) <= 1024:
@@ -917,7 +914,7 @@ async def process_signal(chat_id, user_id, coin, force=False):
 
 
 # ----------------------------------------------------------------------------
-# ХЕНДЛЕРЫ
+# ХЕНДЛЕРЫ ОСНОВНОГО БОТА
 # ----------------------------------------------------------------------------
 @dp.message(Command("start", "menu"))
 async def start_handler(message: types.Message):
@@ -994,6 +991,36 @@ async def callback_handler(cb: types.CallbackQuery):
 
 
 # ----------------------------------------------------------------------------
+# ХЕНДЛЕР ВТОРОГО (АДМИН) БОТА ДЛЯ РАССЫЛОК
+# ----------------------------------------------------------------------------
+if input_dp:
+    @input_dp.message()
+    async def handle_broadcast(message: types.Message):
+        # Игнорируем команды, если случайно напишешь /start
+        if message.text and message.text.startswith('/'):
+            return
+            
+        status_msg = await message.answer("⏳ Начинаю мгновенную рассылку...")
+        success = 0
+        
+        # Копируем сообщение (с текстом, фото или видео) всем пользователям
+        for chat_id in list(active_chats):
+            try:
+                await bot.copy_message(
+                    chat_id=chat_id, 
+                    from_chat_id=message.chat.id, 
+                    message_id=message.message_id
+                )
+                success += 1
+                await asyncio.sleep(0.05) # Задержка от бана Telegram
+            except Exception as e:
+                if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
+                    active_chats.discard(chat_id)
+                    
+        await status_msg.edit_text(f"✅ Рассылка завершена!\nДоставлено: {success} чел.")
+
+
+# ----------------------------------------------------------------------------
 # ЗАПУСК
 # ----------------------------------------------------------------------------
 async def main():
@@ -1010,6 +1037,12 @@ async def main():
             types.BotCommand(command="news", description="📰 Новости"),
         ])
         watcher = asyncio.create_task(news_watcher())
+        
+        # Запуск админ-бота параллельно с основным
+        if input_bot:
+            log.info("Админ-бот (рассылка) запущен...")
+            asyncio.create_task(input_dp.start_polling(input_bot))
+            
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
