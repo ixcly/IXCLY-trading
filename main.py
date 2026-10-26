@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v3.4 (FULL VERSION)
-- BOT_TOKEN: Главный бот (полный функционал)
-- INPUT_BOT_TOKEN: Админ-бот (рассылка)
+IXCLY Trading bot v2.2 (FULL + Entry Filter)
+- Финансовая рекомендация: Входить или Ждать (на основе волатильности и тренда)
+- Свечи: 6 бирж + CryptoCompare
+- Админ-бот: работает параллельно на токене INPUT_BOT_TOKEN
 """
 import asyncio
 import html
@@ -30,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("ixcly")
 
 # ----------------------------------------------------------------------------
-# ВЕБ-СЕРВЕР ДЛЯ RENDER
+# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы сервис считался живым)
 # ----------------------------------------------------------------------------
 app = Flask("")
 
@@ -45,7 +46,6 @@ def _run_web():
 def keep_alive():
     Thread(target=_run_web, daemon=True).start()
 
-
 # ----------------------------------------------------------------------------
 # НАСТРОЙКИ
 # ----------------------------------------------------------------------------
@@ -53,15 +53,15 @@ def clean_key(key):
     if not key: return None
     return key.strip().strip('"').strip("'")
 
-BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
-INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
+BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN")) # ГЛАВНЫЙ БОТ
+INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN")) # АДМИН БОТ
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
@@ -71,7 +71,6 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация админ-бота
 input_bot = None
 input_dp = None
 if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
@@ -80,8 +79,6 @@ if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
         input_dp = Dispatcher()
     except Exception as e:
         log.error(f"Ошибка инициализации админ-бота: {e}")
-        input_bot = None
-        input_dp = None
 
 http: aiohttp.ClientSession = None
 analysis_sem: asyncio.Semaphore = None
@@ -101,11 +98,10 @@ USERS_FILE = "users.json"
 active_chats = set()
 busy_users = set()
 user_last_request = {}
-result_cache = {}
+result_cache = {} 
 RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
-
 
 # ----------------------------------------------------------------------------
 # ПОЛЬЗОВАТЕЛИ
@@ -116,7 +112,6 @@ def _load_users():
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
-
 
 def save_user_data(user_id, username, first_name):
     users = _load_users()
@@ -135,7 +130,6 @@ def save_user_data(user_id, username, first_name):
         log.warning("Не удалось сохранить users.json: %s", e)
     return True
 
-
 def load_active_chats():
     for uid in _load_users():
         try:
@@ -143,7 +137,6 @@ def load_active_chats():
         except ValueError:
             pass
     log.info("Подписчиков на новости: %d", len(active_chats))
-
 
 # ----------------------------------------------------------------------------
 # КЛАВИАТУРЫ
@@ -169,13 +162,11 @@ def get_coins_keyboard(page=0):
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def result_keyboard(coin):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
         InlineKeyboardButton(text="📋 Меню", callback_data="menu"),
     ]])
-
 
 # ----------------------------------------------------------------------------
 # ВСПОМОГАТЕЛЬНОЕ
@@ -190,7 +181,6 @@ def fmt(p):
     if a >= 0.01:
         return f"{p:.5f}"
     return f"{p:.8f}"
-
 
 async def first_success(coros, timeout):
     tasks = [asyncio.create_task(c) for c in coros]
@@ -217,14 +207,12 @@ async def first_success(coros, timeout):
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-
 async def http_json(url, params=None, headers=None, timeout=8):
     async with http.get(url, params=params, headers=headers,
                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
         if r.status != 200:
             raise RuntimeError(f"HTTP {r.status}")
         return await r.json(content_type=None)
-
 
 def normalize_ticker(text):
     t = text.upper().strip()
@@ -273,7 +261,6 @@ def add_indicators(df):
     df["macd_hist"] = macd - signal
     return df
 
-
 def calc_probability(df):
     ema20 = float(df["ema20"].iloc[-1])
     ema50 = float(df["ema50"].iloc[-1]) or 1e-12
@@ -297,7 +284,6 @@ def calc_probability(df):
     long_prob = max(5.0, min(95.0, 50 + score / 2))
     return round(long_prob, 2), round(100 - long_prob, 2)
 
-
 def rows_to_df(rows):
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
     df = df.drop_duplicates("ts").sort_values("ts")
@@ -305,7 +291,6 @@ def rows_to_df(rows):
     if len(df) < MIN_CANDLES:
         raise ValueError("мало свечей")
     return add_indicators(df)
-
 
 def build_tf_data(rows_by_tf):
     out = {}
@@ -327,7 +312,6 @@ def build_tf_data(rows_by_tf):
         }
     return out
 
-
 # ----------------------------------------------------------------------------
 # ИСТОЧНИКИ ДАННЫХ
 # ----------------------------------------------------------------------------
@@ -336,12 +320,10 @@ def _p_binance(j):
         raise ValueError("bad response")
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
 
-
 def _p_gate(j):
     if not isinstance(j, list):
         raise ValueError("bad response")
     return [[float(x[0]) * 1000, float(x[5]), float(x[3]), float(x[4]), float(x[2]), float(x[6])] for x in j]
-
 
 def _p_kucoin(j):
     if j.get("code") != "200000" or not j.get("data"):
@@ -350,19 +332,16 @@ def _p_kucoin(j):
             for x in reversed(j["data"])]
     return rows[-200:]
 
-
 def _p_okx(j):
     if j.get("code") != "0" or not j.get("data"):
         raise ValueError("bad response")
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["data"])]
-
 
 def _p_bybit(j):
     if j.get("retCode") != 0 or not j.get("result", {}).get("list"):
         raise ValueError("bad response")
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])]
             for x in reversed(j["result"]["list"])]
-
 
 EXCHANGES = [
     {
@@ -409,14 +388,12 @@ EXCHANGES = [
     },
 ]
 
-
 async def _fetch_klines(ex, coin, tf):
     j = await http_json(ex["url"], params=ex["params"](coin, tf), timeout=8)
     rows = ex["parse"](j)
     if len(rows) < MIN_CANDLES:
         raise ValueError("мало свечей")
     return rows
-
 
 async def fetch_from_exchange(ex, coin):
     results = await asyncio.gather(*[_fetch_klines(ex, coin, tf) for tf in TFS], return_exceptions=True)
@@ -425,7 +402,6 @@ async def fetch_from_exchange(ex, coin):
             log.info("%s %s: %s", ex["name"], coin, r)
             return None
     return await asyncio.to_thread(build_tf_data, dict(zip(TFS, results))), ex["name"]
-
 
 async def fetch_cryptocompare(coin):
     specs = {"15m": ("histominute", 15), "1h": ("histohour", 1), "4h": ("histohour", 4), "1d": ("histoday", 1)}
@@ -454,7 +430,6 @@ async def fetch_cryptocompare(coin):
             return None
     return await asyncio.to_thread(build_tf_data, dict(zip(TFS, results))), "CRYPTOCOMPARE"
 
-
 async def get_market_data(coin):
     res = await first_success([fetch_from_exchange(ex, coin) for ex in EXCHANGES], timeout=12)
     if res:
@@ -463,7 +438,6 @@ async def get_market_data(coin):
     if res:
         return res
     raise LookupError(coin)
-
 
 # ----------------------------------------------------------------------------
 # ИИ
@@ -486,7 +460,6 @@ async def _ask_gemini(prompt, json_mode):
             log.warning("Gemini timeout/error: %s", e)
     return None
 
-
 async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_headers=None, use_json_format=False):
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:
@@ -506,7 +479,6 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_
     except Exception as e:
         log.warning("%s timeout/error: %s", base_url, e)
         return None
-
 
 async def ask_ai(prompt, json_mode=False, validate=None, timeout=30):
     providers = []
@@ -533,7 +505,6 @@ async def ask_ai(prompt, json_mode=False, validate=None, timeout=30):
         log.error("❌ ВСЕ ИИ ПРОВАЙДЕРЫ ОТКАЗАЛИ. Проверьте API-ключи и лимиты.")
     return res
 
-
 def parse_ai_json(text):
     try:
         m = re.search(r"\{.*\}", text, re.S)
@@ -544,20 +515,17 @@ def parse_ai_json(text):
         pass
     return None
 
-
 def ai_to_html(text):
     text = html.escape(text.strip())
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?m)^#+\s*", "", text)
     return text[:3500]
 
-
 # ----------------------------------------------------------------------------
 # НОВОСТИ
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 _news_cache = {"ts": 0.0, "entries": []}
-
 
 async def get_news_entries():
     if _news_cache["entries"] and time.time() - _news_cache["ts"] < 300:
@@ -577,7 +545,6 @@ async def get_news_entries():
             log.info("RSS %s: %s", url, e)
     return _news_cache["entries"]
 
-
 def extract_image(entry):
     mc = getattr(entry, "media_content", None)
     if mc and isinstance(mc, list) and mc[0].get("url"):
@@ -587,7 +554,6 @@ def extract_image(entry):
             return enc.get("href")
     return None
 
-
 async def download_bytes(url):
     try:
         async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
@@ -596,7 +562,6 @@ async def download_bytes(url):
     except Exception:
         pass
     return None
-
 
 async def fetch_and_analyze_news():
     try:
@@ -640,7 +605,6 @@ async def fetch_and_analyze_news():
         log.exception("news error")
         return f"⚠️ Ошибка при получении новостей: {html.escape(str(e))}", None, False
 
-
 async def send_with_image(chat_id, text, image_bytes, filename="img.png", markup=None):
     if image_bytes:
         photo = BufferedInputFile(image_bytes, filename=filename)
@@ -650,7 +614,6 @@ async def send_with_image(chat_id, text, image_bytes, filename="img.png", markup
         await bot.send_photo(chat_id, photo)
     await bot.send_message(chat_id, text[:4000], parse_mode="HTML", reply_markup=markup,
                            disable_web_page_preview=True)
-
 
 async def news_watcher():
     global last_news_link
@@ -680,9 +643,8 @@ async def news_watcher():
             log.warning("news_watcher: %s", e)
         await asyncio.sleep(600)
 
-
 # ----------------------------------------------------------------------------
-# КАРТИНКА
+# КАРТИНКА (С ДОБАВЛЕННЫМ СТАТУСОМ ВХОДА)
 # ----------------------------------------------------------------------------
 def get_font(size, bold=False):
     names = (["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf"]
@@ -698,16 +660,14 @@ def get_font(size, bold=False):
     except TypeError:
         return ImageFont.load_default()
 
-
 def _dashed(d, y, x0, x1, color, dash=10, gap=6):
     x = x0
     while x < x1:
         d.line([(x, y), (min(x + dash, x1), y)], fill=color, width=2)
         x += dash + gap
 
-
-def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, source):
-    W, H = 800, 1000
+def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, source, entry_status="WAIT", entry_reason=""):
+    W, H = 800, 1050  # Сделал чуть выше, чтобы влез статус входа
     green, red, gray, white, grid = "#089981", "#F23645", "#787B86", "#D1D4DC", "#2a2e39"
     img = Image.new("RGB", (W, H), "#131722")
     d = ImageDraw.Draw(img)
@@ -721,7 +681,16 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     d.text((W - 40 - d.textlength(side, font=f_title), 85), side, font=f_title, fill=main)
     d.text((40, 165), f"TF {tf}  |  Long prob {long_prob}%  |  {source}", font=f_text, fill=gray)
 
-    x0, x1, y0, y1 = 40, W - 40, 215, 610
+    # БАННЕР ВХОДА
+    status_color = green if entry_status == "ENTER" else "#F3A300" # Зеленый или Оранжевый
+    status_text = f"СТАТУС: {entry_status}"
+    d.rectangle([40, 210, W-40, 260], fill=status_color)
+    d.text((60, 218), status_text, font=f_bold, fill="#000000")
+    
+    # Причина входа мелким шрифтом под баннером
+    d.text((40, 270), entry_reason[:70], font=f_small, fill=gray)
+
+    x0, x1, y0, y1 = 40, W - 40, 310, 650 # Сдвинули график вниз
     cd = df.tail(40).reset_index(drop=True)
     vals = [float(cd["low"].min()), float(cd["high"].max()), tps[0], sls[0], entry]
     lo, hi = min(vals), max(vals)
@@ -758,20 +727,19 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
             _dashed(d, y, x0, plot_r, col)
             d.text((plot_r + 6, y - 10), name, font=f_small, fill=col)
 
-    d.text((40, 640), "Entry", font=f_text, fill=gray)
-    d.text((200, 636), fmt(entry), font=f_bold, fill=white)
-    d.text((40, 710), "Take Profit", font=f_text, fill=gray)
-    d.text((420, 710), "Stop Loss", font=f_text, fill=gray)
+    d.text((40, 680), "Entry", font=f_text, fill=gray)
+    d.text((200, 676), fmt(entry), font=f_bold, fill=white)
+    d.text((40, 750), "Take Profit", font=f_text, fill=gray)
+    d.text((420, 750), "Stop Loss", font=f_text, fill=gray)
     for i in range(3):
-        yy = 760 + i * 60
+        yy = 800 + i * 60
         d.text((40, yy), f"TP{i + 1}  {fmt(tps[i])}", font=f_bold, fill=green)
         d.text((420, yy), f"SL{i + 1}  {fmt(sls[i])}", font=f_bold, fill=red)
-    d.text((40, 950), "Not financial advice", font=f_small, fill=gray)
+    d.text((40, 1000), "Not financial advice", font=f_small, fill=gray)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
-
 
 # ----------------------------------------------------------------------------
 # АНАЛИЗ МОНЕТЫ
@@ -782,7 +750,6 @@ def local_reason(tf, i):
     zone = "перекупленность" if rsi >= 70 else "перепроданность" if rsi <= 30 else "нейтральная зона"
     macd = "бычий" if i["macd_hist"] > 0 else "медвежий"
     return f"На {tf}: {trend}, RSI {rsi:.0f} ({zone}), импульс MACD {macd}."
-
 
 def calc_levels(info, is_long):
     entry = info["price"]
@@ -799,14 +766,12 @@ def calc_levels(info, is_long):
     tps = [entry + sign * dist * m for m in (1, 2, 3)]
     return entry, tps, sls
 
-
 def strength_label(p):
     if p >= 70:
         return "сильный сигнал"
     if p >= 58:
         return "умеренный сигнал"
     return "слабый сигнал"
-
 
 async def build_signal(coin, status, force=False):
     cached = result_cache.get(coin)
@@ -816,7 +781,7 @@ async def build_signal(coin, status, force=False):
     await status(f"📡 Загружаю свечи {coin}...")
     tf_data, source = await get_market_data(coin)
 
-    await status("🧮 Считаю индикаторы и читаю новости...")
+    await status("🧮 Считаю индикаторы и анализирую волатильность...")
     try:
         entries = await asyncio.wait_for(get_news_entries(), timeout=6)
         news_titles = "\n".join(e.title for e in entries[:3]) or "Нет свежих новостей."
@@ -828,25 +793,36 @@ async def build_signal(coin, status, force=False):
         f"ATR {fmt(d['atr'])}, MACD hist {d['macd_hist']:.6g}, шанс лонга {d['long_prob']}%\n"
         for tf, d in tf_data.items()
     )
-    prompt = f"""Ты трейдинг-аналитик. Проанализируй {coin} по индикаторам:
+    
+    # НОВЫЙ ПРОМПТ: Требуем финансовую рекомендацию по входу
+    prompt = f"""Ты профессиональный трейдер-аналитик. Проанализируй {coin} по индикаторам:
 {tf_text}
 Последние новости (учти влияние):
 {news_titles}
 
-Выбери таймфрейм, на котором сигнал самый надёжный (один из 15m, 1h, 4h, 1d).
-Верни СТРОГО JSON без markdown: {{"dominant_tf": "4h", "reason": "Краткое обоснование на русском, 1-2 предложения, с учётом новостей."}}"""
+Выбери ОДИН доминирующий таймфрейм.
+Оцени волатильность. Если на рынке флет (низкая волатильность) или хаос (нет четкого тренда), рекомендуй "WAIT" (ЖДАТЬ). Если есть четкий тренд, хорошая волатильность (ATR), и новости поддерживают, рекомендуй "ENTER" (ВХОДИТЬ).
 
-    await status("🤖 Формирую вывод...")
+Верни СТРОГО JSON без markdown: 
+{{"dominant_tf": "4h", "reason": "Краткое обоснование на русском.", "entry_status": "ENTER" или "WAIT", "entry_reason": "Финансовая рекомендация: почему стоит входить или ждать (1 предложение)"}}"""
+
+    await status("🤖 Формирую рекомендацию...")
     raw = await ask_ai(prompt, json_mode=True, validate=lambda t: parse_ai_json(t) is not None)
     ai = parse_ai_json(raw) if raw else None
 
     if ai:
         tf = ai["dominant_tf"]
         reason = ai["reason"].strip()
+        entry_status = ai.get("entry_status", "WAIT").upper()
+        entry_reason = ai.get("entry_reason", "Ожидание лучших условий.")
     else:
         tf = "4h"
         reason = local_reason(tf, tf_data[tf])
+        entry_status = "WAIT"
+        entry_reason = "Нейросети недоступны. Локальный анализ показывает неопределенность."
+
     reason = reason[:350]
+    entry_reason = entry_reason[:100]
 
     info = tf_data[tf]
     long_prob, short_prob = calc_probability(info["df"])
@@ -855,10 +831,15 @@ async def build_signal(coin, status, force=False):
 
     direction = "🟢 LONG" if is_long else "🔴 SHORT"
     multi = " | ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
+    
+    # Добавили статус входа в текст
+    status_emoji = "✅" if entry_status == "ENTER" else "⏳"
     text = (
         f"<b>📊 {coin}/USDT</b> · {tf}\n"
         f"<i>Данные: {source}</i>\n\n"
-        f"🎯 <b>{direction}</b> ({strength_label(max(long_prob, short_prob))})\n"
+        f"{status_emoji} <b>Рекомендация: {entry_status}</b>\n"
+        f"<i>{html.escape(entry_reason)}</i>\n\n"
+        f"🎯 <b>Направление:</b> {direction} ({strength_label(max(long_prob, short_prob))})\n"
         f"Лонг: <b>{long_prob}%</b> · Шорт: <b>{short_prob}%</b>\n"
         f"<i>Шанс лонга по ТФ: {multi}</i>\n\n"
         f"💵 Вход: <code>{fmt(entry)}</code>\n\n"
@@ -873,10 +854,9 @@ async def build_signal(coin, status, force=False):
         f"📰 <i>{html.escape(reason)}</i>\n\n"
         f"⚠️ <i>Не является финансовой рекомендацией!</i>"
     )
-    png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls, tf, long_prob, source)
+    png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls, tf, long_prob, source, entry_status, entry_reason)
     result_cache[coin] = (time.time(), text, png)
     return text, png
-
 
 async def process_signal(chat_id, user_id, coin, force=False):
     now = time.time()
@@ -922,7 +902,6 @@ async def process_signal(chat_id, user_id, coin, force=False):
         except Exception:
             pass
 
-
 # ----------------------------------------------------------------------------
 # ХЕНДЛЕРЫ ОСНОВНОГО БОТА
 # ----------------------------------------------------------------------------
@@ -942,7 +921,6 @@ async def start_handler(message: types.Message):
     await message.answer("👋 Выбери монету из списка или просто напиши тикер (например: <code>WIF</code>):",
                          parse_mode="HTML", reply_markup=get_coins_keyboard(0))
 
-
 @dp.message(Command("news"))
 async def news_handler(message: types.Message):
     active_chats.add(message.chat.id)
@@ -957,7 +935,6 @@ async def news_handler(message: types.Message):
         except Exception:
             pass
 
-
 @dp.message(F.text)
 async def text_handler(message: types.Message):
     if message.text.startswith("/"):
@@ -969,7 +946,6 @@ async def text_handler(message: types.Message):
         return
     active_chats.add(message.chat.id)
     await process_signal(message.chat.id, message.from_user.id, coin)
-
 
 @dp.callback_query(F.data)
 async def callback_handler(cb: types.CallbackQuery):
@@ -998,7 +974,6 @@ async def callback_handler(cb: types.CallbackQuery):
         await process_signal(chat_id, cb.from_user.id, data[2:])
     elif data.startswith("r:"):
         await process_signal(chat_id, cb.from_user.id, data[2:], force=True)
-
 
 # ----------------------------------------------------------------------------
 # ХЕНДЛЕРЫ ВТОРОГО (АДМИН) БОТА ДЛЯ РАССЫЛОК
@@ -1043,7 +1018,6 @@ if input_dp:
                     
         await status_msg.edit_text(f"✅ Рассылка завершена!\nДоставлено: {success} чел.")
 
-
 # ----------------------------------------------------------------------------
 # ЗАПУСК
 # ----------------------------------------------------------------------------
@@ -1062,7 +1036,6 @@ async def main():
         ])
         watcher = asyncio.create_task(news_watcher())
         
-        # Запуск админ-бота с защитой от падения
         if input_bot:
             try:
                 log.info("Админ-бот (рассылка) запущен...")
@@ -1078,7 +1051,6 @@ async def main():
             watcher.cancel()
         await http.close()
         await bot.session.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
