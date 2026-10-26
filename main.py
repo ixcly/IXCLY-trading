@@ -109,11 +109,10 @@ async def get_signal_data(symbol):
         """
 
         # --- ЗАЩИТА ОТ 503 (ПЕРЕГРУЗКА МОДЕЛИ) И FALLBACK ---
-        # Сначала пробуем основную модель (high tier), затем запасные
         models_to_try = [
-            "gemini-3.8-flash",          # Основная (по алиасу это high)
+            "gemini-3.8-flash",          # Основная
             "gemini-3.8-flash-medium",   # Средняя нагрузка
-            "gemini-3.5-flash"           # Стабильная запасная
+            "gemini-3.5-flash"           # Запасная
         ]
 
         # Настраиваем сессию с повторными попытками
@@ -145,25 +144,21 @@ async def get_signal_data(symbol):
 
             try:
                 print(f"Пытаемся обратиться к модели: {model_name}")
-                # Таймаут: 15 сек на соединение, 90 сек на чтение (модель может "думать")
                 response = await asyncio.to_thread(
                     session.post, url, headers=headers, json=payload, timeout=(15, 90)
                 )
                 res_data = response.json()
 
-                # Если в ответе есть ошибка 503 (high demand), идем к следующей модели
                 if 'error' in res_data and res_data['error'].get('code') == 503:
                     last_error_message = res_data['error'].get('message', 'Модель перегружена')
                     print(f"Модель {model_name} перегружена (503). Пробуем следующую...")
-                    continue # Переходим к следующей модели в списке
+                    continue
 
-                # Если ошибка 404 (модель не найдена) или другая, тоже пробуем следующую
                 if 'error' in res_data:
                     last_error_message = res_data['error'].get('message', 'Неизвестная ошибка')
                     print(f"Ошибка при запросе к {model_name}: {last_error_message}")
                     continue
 
-                # Если дошли сюда и нет ошибки, значит ответ успешный
                 break
 
             except requests.exceptions.Timeout:
@@ -175,7 +170,6 @@ async def get_signal_data(symbol):
                 print(f"Системная ошибка при запросе к {model_name}: {e}")
                 continue
 
-        # Если все модели отказали
         if res_data is None or 'error' in res_data:
             return f"⚠️ Не удалось получить ответ от нейросети. Причина: {last_error_message}. Попробуйте позже."
 
@@ -237,7 +231,8 @@ async def start_handler(message: types.Message):
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
     symbol = callback_query.data
-    await callback_query.message.answer(f"⏳ Запрос {symbol}... Ожидайте примерно 5-10 секунд.")
+    # ТЕКСТ ОЖИДАНИЯ ЗАМЕНЕН НА 1 МИНУТУ
+    await callback_query.message.answer(f"⏳ Запрос {symbol}... Ожидайте около 1 минуты.")
     result = await get_signal_data(symbol)
     await callback_query.message.answer(result, parse_mode='HTML')
     await callback_query.answer()
