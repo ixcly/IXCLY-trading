@@ -13,8 +13,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardRemove
 from flask import Flask
 from threading import Thread
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask('')
@@ -31,7 +29,8 @@ def keep_alive():
 # ---------------------------------------------------------
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+# Читаем список ключей из переменной GEMINI_API_KEYS (через запятую)
+GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
@@ -140,11 +139,12 @@ def calc_atr(df, length=14):
     return true_range.rolling(length).mean()
 # ---------------------------------------------------------
 
+# --- НОВЫЕ ИКОНКИ ДЛЯ МОНЕТ ---
 def get_coins_keyboard():
     buttons = [
-        [InlineKeyboardButton(text="🟡 BTC", callback_data="BTCUSDT"), InlineKeyboardButton(text="🔷 ETH", callback_data="ETHUSDT")],
-        [InlineKeyboardButton(text="🟣 SOL", callback_data="SOLUSDT"), InlineKeyboardButton(text="🟡 BNB", callback_data="BNBUSDT")],
-        [InlineKeyboardButton(text="🐕 DOGE", callback_data="DOGEUSDT"), InlineKeyboardButton(text="🔵 XRP", callback_data="XRPUSDT")]
+        [InlineKeyboardButton(text="👑 BTC", callback_data="BTCUSDT"), InlineKeyboardButton(text="💎 ETH", callback_data="ETHUSDT")],
+        [InlineKeyboardButton(text="⚡ SOL", callback_data="SOLUSDT"), InlineKeyboardButton(text="🔶 BNB", callback_data="BNBUSDT")],
+        [InlineKeyboardButton(text="🐶 DOGE", callback_data="DOGEUSDT"), InlineKeyboardButton(text="🌊 XRP", callback_data="XRPUSDT")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -168,36 +168,37 @@ async def animate_loading(message: types.Message):
     except Exception:
         pass
 
+# --- ЗАПРОС К API С АВТОМАТИЧЕСКОЙ РОТАЦИЕЙ КЛЮЧЕЙ ---
 async def fetch_analysis(prompt):
-    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-medium", "gemini-3.5-flash"]
-    session = requests.Session()
-    retry_strategy = Retry(total=2, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-
-    last_error_message = "Неизвестная ошибка"
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        headers = {'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY}
-        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
-        
+    if not GEMINI_API_KEYS:
+        return "ERROR: Нет доступных API-ключей. Добавьте GEMINI_API_KEYS на Render."
+    
+    model_name = "gemini-3.8-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    headers = {'Content-Type': 'application/json'}
+    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
+    
+    # Проходим по всем ключам по очереди
+    for key in GEMINI_API_KEYS:
+        headers['x-goog-api-key'] = key
         try:
-            response = await asyncio.to_thread(session.post, url, headers=headers, json=payload, timeout=(15, 90))
+            response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=(15, 90))
             res_data = response.json()
             
-            if 'error' in res_data and res_data['error'].get('code') == 503:
-                last_error_message = res_data['error'].get('message', 'Сервер перегружен')
-                continue
             if 'error' in res_data:
-                last_error_message = res_data['error'].get('message', 'Неизвестная ошибка')
-                continue
+                error_msg = res_data['error'].get('message', '')
+                # Если лимит исчерпан, пробуем следующий ключ
+                if 'exceeded your current quota' in error_msg.lower() or 'quota' in error_msg.lower():
+                    print(f"Ключ ...{key[-4:]} исчерпан. Пробуем следующий.")
+                    continue
+                return f"ERROR: {error_msg}"
             
             return res_data['candidates'][0]['content']['parts'][0]['text']
         except Exception as e:
-            last_error_message = str(e)
+            print(f"Ошибка с ключом ...{key[-4:]}: {e}")
             continue
             
-    return f"ERROR: {last_error_message}"
+    return "QUOTA_EXCEEDED_ALL"
 
 async def analyze_news(title, summary):
     prompt = f"""
@@ -213,6 +214,8 @@ async def analyze_news(title, summary):
     В конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
     """
     result = await fetch_analysis(prompt)
+    if result == "QUOTA_EXCEEDED_ALL":
+        return "⚠️ Лимиты исчерпаны на всех доступных ключах. Добавьте новые ключи в GEMINI_API_KEYS."
     if result.startswith("ERROR:"):
         return f"📰 {title}\n\n(Не удалось получить разбор новости)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
     return result
@@ -267,6 +270,10 @@ async def get_signal_data(symbol):
         """
 
         raw_text = await fetch_analysis(prompt)
+        
+        if raw_text == "QUOTA_EXCEEDED_ALL":
+            return "⚠️ <b>Лимиты исчерпаны на всех ключах.</b>\n\nДобавьте новые ключи в переменную GEMINI_API_KEYS на Render.", None
+            
         if raw_text.startswith("ERROR:"):
             return f"⚠️ Ошибка получения данных: {raw_text}", None
 
@@ -350,7 +357,6 @@ async def news_watcher():
                     for chat_id in list(active_chats):
                         try:
                             if image_url:
-                                # Скачиваем картинку, чтобы отправить оригинал без обрезки
                                 img_resp = await asyncio.to_thread(requests.get, image_url, timeout=15)
                                 if img_resp.status_code == 200:
                                     photo_file = BufferedInputFile(img_resp.content, filename="news.jpg")
@@ -398,7 +404,6 @@ async def handle_news_command(message: types.Message):
             
             await msg.delete()
             if image_url:
-                # Скачиваем картинку, чтобы отправить оригинал без обрезки
                 img_resp = await asyncio.to_thread(requests.get, image_url, timeout=15)
                 if img_resp.status_code == 200:
                     photo_file = BufferedInputFile(img_resp.content, filename="news.jpg")
