@@ -120,12 +120,19 @@ TFS = ["15m", "1h", "4h", "1d"]
 TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 MIN_CANDLES = 25
 
-# --- ОБНОВЛЕННЫЙ СПИСОК ИЗ 40 МОНЕТ ---
+# --- ОБНОВЛЕННЫЙ СПИСОК: ТВОИ СТАРЫЕ 44 + 40 НОВЫХ МОНЕТ (ВСЕГО 84) ---
 POPULAR_COINS = [
-    "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "AVAX", "DOGE", "DOT", "LINK",
-    "MATIC", "LTC", "BCH", "UNI", "ATOM", "XLM", "ALGO", "FIL", "VET", "ICP",
-    "HBAR", "ETC", "XMR", "AAVE", "MKR", "SNX", "COMP", "SAND", "MANA", "AXS",
-    "GALA", "THETA", "EOS", "TRX", "NEO", "IOTA", "QTUM", "ZEC", "DASH", "CHZ"
+    # Твои изначальные монеты
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
+    "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
+    "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
+    "GALA", "PEPE", "WIF", "BONK", "ORDI", "JUP", "TIA", "SEI",
+    
+    # + 40 НОВЫХ монет
+    "TRX", "XLM", "ETC", "XMR", "AAVE", "ALGO", "EOS", "NEO", "IOTA", "ZEC", 
+    "DASH", "COMP", "SNX", "CRV", "LDO", "ENS", "1INCH", "CAKE", "RUNE", "KSM", 
+    "FLOW", "AXS", "CHZ", "BAT", "ENJ", "ZIL", "FTM", "KAVA", "EGLD", "ROSE", 
+    "AR", "FET", "WLD", "APE", "GMT", "CFX", "PYTH", "JTO", "ONDO", "FLOKI"
 ]
 
 USERS_FILE = "users.json"
@@ -1752,7 +1759,7 @@ async def main():
         
         background.append(asyncio.create_task(news_watcher()))
         background.append(asyncio.create_task(backup_loop()))
-        background.append(asyncio.create_task(alert_loop())) # <-- Добавлен часовой сканер
+        background.append(asyncio.create_task(alert_loop())) # <-- Часовой сканер
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
