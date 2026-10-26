@@ -245,7 +245,6 @@ async def fetch_gemini(prompt):
     return None
 
 async def fetch_analysis(prompt):
-    # Жесткий таймаут на ИИ: 4 секунды. Если не успел - используем математику.
     try:
         result = await asyncio.wait_for(fetch_gemini(prompt), timeout=4.0)
         if result: return result
@@ -279,10 +278,16 @@ async def check_exchange(ex_name, ex_instance, base_coin):
                 df['ema50'] = calc_ema(df['close'], 50)
                 df['rsi'] = calc_rsi(df['close'], 14)
                 df['atr'] = calc_atr(df, 14)
+                
                 tf_data[tf] = {
-                    'df': df, 'price': df['close'].iloc[-1], 'ema20': df['ema20'].iloc[-1],
-                    'ema50': df['ema50'].iloc[-1], 'rsi': df['rsi'].iloc[-1], 'atr': df['atr'].iloc[-1],
-                    'recent_low': df['low'].iloc[-24:].min(), 'recent_high': df['high'].iloc[-24:].max()
+                    'df': df, 
+                    'price': float(df['close'].iloc[-1]), 
+                    'ema20': float(df['ema20'].iloc[-1]),
+                    'ema50': float(df['ema50'].iloc[-1]), 
+                    'rsi': float(df['rsi'].iloc[-1]), 
+                    'atr': float(df['atr'].iloc[-1]),
+                    'recent_low': float(df['low'].iloc[-24:].min()), 
+                    'recent_high': float(df['high'].iloc[-24:].max())
                 }
             if tf_data: return tf_data, ex_name
         except Exception: continue
@@ -292,8 +297,7 @@ async def fetch_coingecko(base_coin):
     try:
         url = f"https://api.coingecko.com/api/v3/search?query={base_coin}"
         res = await asyncio.to_thread(requests.get, url, timeout=3)
-        # ВАЖНО: теперь возвращаем None, None, чтобы не было ошибки распаковки
-        if res.status_code != 200: return None, None 
+        if res.status_code != 200: return None, None
         coins = res.json().get('coins', [])
         if not coins: return None, None
         
@@ -317,7 +321,16 @@ async def fetch_coingecko(base_coin):
         df['atr'] = calc_atr(df, 14)
         
         last = df.iloc[-1]
-        return {'df': df, 'price': last['close'], 'ema20': last['ema20'], 'ema50': last['ema50'], 'rsi': last['rsi'], 'atr': last['atr'], 'recent_low': df['low'].iloc[-7:].min(), 'recent_high': df['high'].iloc[-7:].max()}, 'CoinGecko'
+        return {
+            'df': df, 
+            'price': float(last['close']), 
+            'ema20': float(last['ema20']), 
+            'ema50': float(last['ema50']), 
+            'rsi': float(last['rsi']), 
+            'atr': float(last['atr']), 
+            'recent_low': float(df['low'].iloc[-7:].min()), 
+            'recent_high': float(df['high'].iloc[-7:].max())
+        }, 'CoinGecko'
     except Exception: 
         return None, None
 
@@ -336,7 +349,6 @@ async def process_signal(chat_id, symbol):
         async def run_analysis():
             base_coin = symbol.replace('USDT', '')
             
-            # Запускаем поиск по 4 биржам одновременно
             tasks = [check_exchange(item['name'], item['ex'], base_coin) for item in exchange_list]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -346,7 +358,6 @@ async def process_signal(chat_id, symbol):
                     tf_data, found_exchange = res
                     break
             
-            # Если на биржах нет, идем в CoinGecko
             if not tf_data:
                 cg_result = await fetch_coingecko(base_coin)
                 if cg_result and cg_result[0]:
@@ -354,7 +365,7 @@ async def process_signal(chat_id, symbol):
                 else:
                     raise ValueError(f"Монета {base_coin} не найдена на биржах и в CoinGecko.")
                 
-            tf_text = "".join([f"[{tf}] RSI: {d['rsi']:.2f}, EMA20: {d['ema20']:.6f}, EMA50: {d['ema50']:.6f}, ATR: {d['atr']:.6f}\n" for tf, d in tf_data.items()])
+            tf_text = "".join([f"[{tf}] RSI: {float(d['rsi']):.2f}, EMA20: {float(d['ema20']):.6f}, EMA50: {float(d['ema50']):.6f}, ATR: {float(d['atr']):.6f}\n" for tf, d in tf_data.items()])
 
             prompt = f"""
             Проанализируй {base_coin}:
@@ -381,31 +392,33 @@ async def process_signal(chat_id, symbol):
 
             tf_info = tf_data[dominant_tf]
             df = tf_info['df']
-            entry = tf_info['price']
-            atr = tf_info['atr']
-            recent_low = tf_info['recent_low']
-            recent_high = tf_info['recent_high']
+            
+            # ПРИНУДИТЕЛЬНАЯ КОНВЕРТАЦИЯ В FLOAT
+            entry = float(tf_info['price'])
+            atr = float(tf_info['atr'])
+            recent_low = float(tf_info['recent_low'])
+            recent_high = float(tf_info['recent_high'])
 
             long_prob, short_prob = calc_exact_probability(df)
 
             if long_prob > 50:
                 direction = "🟢 LONG"
-                sl1 = recent_low - (0.2 * atr)
-                sl2 = entry - (1.5 * atr)
-                sl3 = entry - (2.0 * atr)
-                risk = entry - sl1
-                tp1 = entry + (1.0 * risk)
-                tp2 = entry + (2.0 * risk)
-                tp3 = entry + (3.0 * risk)
+                sl1 = float(recent_low - (0.2 * atr))
+                sl2 = float(entry - (1.5 * atr))
+                sl3 = float(entry - (2.0 * atr))
+                risk = float(entry - sl1)
+                tp1 = float(entry + (1.0 * risk))
+                tp2 = float(entry + (2.0 * risk))
+                tp3 = float(entry + (3.0 * risk))
             else:
                 direction = "🔴 SHORT"
-                sl1 = recent_high + (0.2 * atr)
-                sl2 = entry + (1.5 * atr)
-                sl3 = entry + (2.0 * atr)
-                risk = sl1 - entry
-                tp1 = entry - (1.0 * risk)
-                tp2 = entry - (2.0 * risk)
-                tp3 = entry - (3.0 * risk)
+                sl1 = float(recent_high + (0.2 * atr))
+                sl2 = float(entry + (1.5 * atr))
+                sl3 = float(entry + (2.0 * atr))
+                risk = float(sl1 - entry)
+                tp1 = float(entry - (1.0 * risk))
+                tp2 = float(entry - (2.0 * risk))
+                tp3 = float(entry - (3.0 * risk))
 
             formatted_text = (
                 f"<b>📊 Анализ: {symbol}</b>\n"
@@ -430,9 +443,7 @@ async def process_signal(chat_id, symbol):
             image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, long_prob)
             return formatted_text, image_buf
 
-        # Общий таймаут на всё: 15 секунд
         formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=15.0)
-        
         await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=formatted_text, parse_mode='HTML')
         
     except asyncio.TimeoutError:
@@ -442,7 +453,6 @@ async def process_signal(chat_id, symbol):
     except Exception as e:
         await bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}")
     finally:
-        # ГАРАНТИРОВАННОЕ УДАЛЕНИЕ СООБЩЕНИЯ О ПОИСКЕ
         animation_task.cancel()
         try: await loading_msg.delete()
         except Exception: pass
