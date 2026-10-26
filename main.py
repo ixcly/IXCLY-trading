@@ -36,7 +36,7 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 ADMIN_ID = os.getenv('ADMIN_ID') 
 
-# --- ТОЛЬКО САМЫЕ БЫСТРЫЕ И НАДЕЖНЫЕ БИРЖИ ---
+# --- ТОЛЬКО ТОП-4 БЫСТРЫЕ БИРЖИ ---
 ex_opts = {'defaultType': 'swap', 'timeout': 3000}
 exchange_list = [
     {'name': 'BINANCE', 'ex': ccxt.binance(ex_opts)},
@@ -203,7 +203,7 @@ def calc_atr(df, length=14):
 async def animate_loading(message: types.Message, symbol_name="Монета"):
     phrases = [
         f"📡 Сканируем {symbol_name}...",
-        "⚡ Мгновенный поиск по топ-биржам...",
+        "⚡ Мгновенный поиск...",
         "📊 Считаем индикаторы...",
         "⚖️ Готовим уровни..."
     ]
@@ -292,17 +292,18 @@ async def fetch_coingecko(base_coin):
     try:
         url = f"https://api.coingecko.com/api/v3/search?query={base_coin}"
         res = await asyncio.to_thread(requests.get, url, timeout=3)
-        if res.status_code != 200: return None
+        # ВАЖНО: теперь возвращаем None, None, чтобы не было ошибки распаковки
+        if res.status_code != 200: return None, None 
         coins = res.json().get('coins', [])
-        if not coins: return None
+        if not coins: return None, None
         
         coin_id = coins[0]['id']
         chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=7&interval=daily"
         chart_res = await asyncio.to_thread(requests.get, chart_url, timeout=3)
-        if chart_res.status_code != 200: return None
+        if chart_res.status_code != 200: return None, None
         
         prices = chart_res.json().get('prices', [])
-        if not prices: return None
+        if not prices: return None, None
         
         df = pd.DataFrame(prices, columns=['timestamp', 'close'])
         df['open'] = df['close'].shift(1).fillna(df['close'])
@@ -317,7 +318,8 @@ async def fetch_coingecko(base_coin):
         
         last = df.iloc[-1]
         return {'df': df, 'price': last['close'], 'ema20': last['ema20'], 'ema50': last['ema50'], 'rsi': last['rsi'], 'atr': last['atr'], 'recent_low': df['low'].iloc[-7:].min(), 'recent_high': df['high'].iloc[-7:].max()}, 'CoinGecko'
-    except Exception: return None, None
+    except Exception: 
+        return None, None
 
 async def process_signal(chat_id, symbol):
     global last_request_time
@@ -340,15 +342,17 @@ async def process_signal(chat_id, symbol):
             
             tf_data, found_exchange = None, None
             for res in results:
-                if isinstance(res, tuple) and res[0] is not None:
+                if isinstance(res, tuple) and len(res) == 2 and res[0] is not None:
                     tf_data, found_exchange = res
-                    break # Берем первую успешную
+                    break
             
             # Если на биржах нет, идем в CoinGecko
             if not tf_data:
-                tf_data, found_exchange = await fetch_coingecko(base_coin)
-                if not tf_data:
-                    raise ValueError(f"Монета {base_coin} не найдена.")
+                cg_result = await fetch_coingecko(base_coin)
+                if cg_result and cg_result[0]:
+                    tf_data, found_exchange = cg_result
+                else:
+                    raise ValueError(f"Монета {base_coin} не найдена на биржах и в CoinGecko.")
                 
             tf_text = "".join([f"[{tf}] RSI: {d['rsi']:.2f}, EMA20: {d['ema20']:.6f}, EMA50: {d['ema50']:.6f}, ATR: {d['atr']:.6f}\n" for tf, d in tf_data.items()])
 
@@ -426,7 +430,7 @@ async def process_signal(chat_id, symbol):
             image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, long_prob)
             return formatted_text, image_buf
 
-        # Общий таймаут на всё: 15 секунд (максимум)
+        # Общий таймаут на всё: 15 секунд
         formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=15.0)
         
         await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=formatted_text, parse_mode='HTML')
@@ -438,7 +442,7 @@ async def process_signal(chat_id, symbol):
     except Exception as e:
         await bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}")
     finally:
-        # 100% удаление сообщения о поиске
+        # ГАРАНТИРОВАННОЕ УДАЛЕНИЕ СООБЩЕНИЯ О ПОИСКЕ
         animation_task.cancel()
         try: await loading_msg.delete()
         except Exception: pass
