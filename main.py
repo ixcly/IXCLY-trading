@@ -196,12 +196,17 @@ async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_header
             print(f"Ошибка от {base_url}: {res_data['error']}", flush=True)
             return None
             
+        # Защита от нестандартного ответа Cerebras
+        if 'choices' not in res_data:
+            print(f"Неожиданный ответ от {base_url}: {res_data}", flush=True)
+            return None
+            
         return res_data['choices'][0]['message']['content']
     except Exception as e:
         print(f"Сбой соединения с {base_url}: {e}", flush=True)
         return None
 
-# --- ЗАПРОС К GEMINI (СПЕЦИАЛЬНЫЙ ФОРМАТ) ---
+# --- ЗАПРОС К GEMINI ---
 async def fetch_gemini(prompt):
     if not GEMINI_API_KEYS:
         print("Пропуск Gemini: нет API-ключей.", flush=True)
@@ -242,24 +247,24 @@ async def fetch_analysis(prompt):
         print("✅ Успешный ответ от Google Gemini", flush=True)
         return result
 
-    # 2. Groq
-    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
+    # 2. Groq (Исправлена модель на llama3-8b-8192)
+    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama3-8b-8192")
     if result:
         print("✅ Успешный ответ от Groq", flush=True)
         return result
 
-    # 3. Cerebras
+    # 3. Cerebras (Модель llama3.1-8b)
     result = await fetch_openai_compatible(prompt, "https://api.cerebras.ai/v1", CEREBRAS_API_KEY, "llama3.1-8b")
     if result:
         print("✅ Успешный ответ от Cerebras", flush=True)
         return result
 
-    # 4. OpenRouter
+    # 4. OpenRouter (Исправлена модель на llama-3.1-8b)
     or_headers = {
         "HTTP-Referer": "https://t.me/ixcly_trade_bot", 
         "X-Title": "IXCLY Trade Bot"
     }
-    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3-8b-instruct:free", or_headers)
+    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3.1-8b-instruct:free", or_headers)
     if result:
         print("✅ Успешный ответ от OpenRouter", flush=True)
         return result
