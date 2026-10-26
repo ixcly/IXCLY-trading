@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v3.2
-- Безопасная рассылка из второго (админского) бота (через скачивание медиа)
+IXCLY Trading bot v3.3
+- Защита от падения при неверном токене админ-бота
 - Новости: строгий перевод на русский
 - Свечи: Binance, MEXC, Gate, KuCoin, OKX, Bybit + CryptoCompare
 """
@@ -71,12 +71,17 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация админ-бота (только если токен задан и не совпадает с основным)
+# Инициализация админ-бота (с защитой от ошибок)
 input_bot = None
 input_dp = None
 if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
-    input_bot = Bot(token=INPUT_BOT_TOKEN)
-    input_dp = Dispatcher()
+    try:
+        input_bot = Bot(token=INPUT_BOT_TOKEN)
+        input_dp = Dispatcher()
+    except Exception as e:
+        log.error(f"Ошибка инициализации админ-бота (возможно неверный токен): {e}")
+        input_bot = None
+        input_dp = None
 
 http: aiohttp.ClientSession = None
 analysis_sem: asyncio.Semaphore = None
@@ -1009,7 +1014,6 @@ if input_dp:
         status_msg = await message.answer("⏳ Начинаю мгновенную рассылку...")
         success = 0
         
-        # Скачиваем фото, если оно есть
         photo_bytes = None
         if message.photo:
             try:
@@ -1027,7 +1031,7 @@ if input_dp:
                     await bot.send_message(chat_id, text=message.html_text, parse_mode="HTML")
                 
                 success += 1
-                await asyncio.sleep(0.05) # Задержка от бана Telegram
+                await asyncio.sleep(0.05)
             except Exception as e:
                 if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
                     active_chats.discard(chat_id)
@@ -1053,12 +1057,14 @@ async def main():
         ])
         watcher = asyncio.create_task(news_watcher())
         
-        # Запуск админ-бота параллельно с основным
+        # Запуск админ-бота с защитой от падения
         if input_bot:
-            log.info("Админ-бот (рассылка) запущен...")
-            # Очищаем вебхук админ-бота, чтобы не было конфликтов
-            await input_bot.delete_webhook(drop_pending_updates=True)
-            asyncio.create_task(input_dp.start_polling(input_bot))
+            try:
+                log.info("Админ-бот (рассылка) запущен...")
+                await input_bot.delete_webhook(drop_pending_updates=True)
+                asyncio.create_task(input_dp.start_polling(input_bot))
+            except Exception as e:
+                log.error(f"ОШИБКА ЗАПУСКА АДМИН-БОТА: {e}. Основной бот продолжит работу.")
             
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
