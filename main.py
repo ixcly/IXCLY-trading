@@ -31,7 +31,6 @@ def keep_alive():
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 
-# Ключи для оставшихся провайдеров
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 CEREBRAS_API_KEY = os.getenv('CEREBRAS_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
@@ -172,7 +171,7 @@ async def animate_loading(message: types.Message):
         pass
 
 # --- УНИВЕРСАЛЬНЫЙ ЗАПРОС К OPENAI-СОВМЕСТИМЫМ API ---
-async def fetch_openai_compatible(prompt, base_url, api_key, model):
+async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_headers=None):
     if not api_key:
         return None
     url = f"{base_url}/chat/completions"
@@ -180,6 +179,9 @@ async def fetch_openai_compatible(prompt, base_url, api_key, model):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+    if extra_headers:
+        headers.update(extra_headers)
+        
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -188,10 +190,15 @@ async def fetch_openai_compatible(prompt, base_url, api_key, model):
     try:
         response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=(15, 90))
         res_data = response.json()
+        
+        # Выводим ошибку в консоль Render для отладки
         if 'error' in res_data:
+            print(f"Ошибка от {base_url}: {res_data['error']}")
             return None
+            
         return res_data['choices'][0]['message']['content']
-    except Exception:
+    except Exception as e:
+        print(f"Сбой соединения с {base_url}: {e}")
         return None
 
 # --- ЗАПРОС К GEMINI (СПЕЦИАЛЬНЫЙ ФОРМАТ) ---
@@ -213,8 +220,10 @@ async def fetch_gemini(prompt):
                 if 'error' in res_data:
                     error_msg = res_data['error'].get('message', '')
                     if 'exceeded your current quota' in error_msg.lower() or 'quota' in error_msg.lower():
+                        print(f"Ключ Gemini ...{key[-4:]} исчерпан.")
                         break
                     if 'high demand' in error_msg.lower() or 'overloaded' in error_msg.lower():
+                        print(f"Модель {model_name} перегружена.")
                         continue
                     return None
                 
@@ -223,33 +232,38 @@ async def fetch_gemini(prompt):
                 continue
     return None
 
-# --- ГЛАВНАЯ ФУНКЦИЯ СБОРА АНАЛИЗА (ПЕРЕБОР ОСТАВШИХСЯ ПРОВАЙДЕРОВ) ---
+# --- ГЛАВНАЯ ФУНКЦИЯ СБОРА АНАЛИЗА ---
 async def fetch_analysis(prompt):
-    # 1. Пытаемся использовать Google Gemini
+    # 1. Google Gemini
     result = await fetch_gemini(prompt)
     if result:
-        print("Успешный ответ от Google Gemini")
+        print("✅ Успешный ответ от Google Gemini")
         return result
 
-    # 2. Пытаемся использовать Groq
+    # 2. Groq
     result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
     if result:
-        print("Успешный ответ от Groq")
+        print("✅ Успешный ответ от Groq")
         return result
 
-    # 3. Пытаемся использовать Cerebras
-    result = await fetch_openai_compatible(prompt, "https://api.cerebras.ai/v1", CEREBRAS_API_KEY, "llama3.3-70b")
+    # 3. Cerebras
+    result = await fetch_openai_compatible(prompt, "https://api.cerebras.ai/v1", CEREBRAS_API_KEY, "llama3.1-8b")
     if result:
-        print("Успешный ответ от Cerebras")
+        print("✅ Успешный ответ от Cerebras")
         return result
 
-    # 4. Пытаемся использовать OpenRouter
-    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "openrouter/free")
+    # 4. OpenRouter (Исправленная модель и добавлены обязательные заголовки)
+    or_headers = {
+        "HTTP-Referer": "https://t.me/ixcly_trade_bot", 
+        "X-Title": "IXCLY Trade Bot"
+    }
+    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3-8b-instruct:free", or_headers)
     if result:
-        print("Успешный ответ от OpenRouter")
+        print("✅ Успешный ответ от OpenRouter")
         return result
 
     # Если все провайдеры отказали
+    print("❌ Все провайдеры отказали.")
     return "ERROR: Все доступные нейросети перегружены или исчерпали лимиты. Попробуйте позже."
 
 async def analyze_news(title, summary):
