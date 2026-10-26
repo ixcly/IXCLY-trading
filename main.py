@@ -80,13 +80,52 @@ async def animate_loading(message: types.Message):
     try:
         i = 0
         while True:
-            await asyncio.sleep(5) # Ждем 5 секунд
+            await asyncio.sleep(5)
             await message.edit_text(phrases[i % len(phrases)])
             i += 1
     except asyncio.CancelledError:
-        pass # Задача отменена (анализ завершен)
+        pass
     except Exception as e:
-        print(f"Ошибка при обновлении текста: {e}")
+        pass
+
+# --- АНАЛИЗ НОВОСТЕЙ ЧЕРЕЗ GEMINI ---
+async def analyze_news_with_ai(title, summary):
+    prompt = f"""
+    Ты профессиональный крипто-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
+    
+    Заголовок: {title}
+    Описание: {summary}
+    
+    В ответе напиши (без лишнего текста, сразу по делу):
+    📌 Суть: (что произошло, 1-2 предложения)
+    📉 Влияние на рынок: (позитив/негатив и почему)
+    🎯 Затронутые монеты: (выбери из списка: BTC, ETH, SOL, BNB, DOGE, XRP, на какие монеты это повлияет больше всего и почему)
+    
+    В самом конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
+    Пиши с эмодзи, кратко и понятно для трейдера.
+    """
+    
+    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-medium", "gemini-3.5-flash"]
+    session = requests.Session()
+    
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY}
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
+        
+        try:
+            response = await asyncio.to_thread(session.post, url, headers=headers, json=payload, timeout=(15, 60))
+            res_data = response.json()
+            
+            if 'candidates' in res_data:
+                return res_data['candidates'][0]['content']['parts'][0]['text']
+        except Exception as e:
+            print(f"Ошибка при анализе новости через {model_name}: {e}")
+            continue
+            
+    # Если ИИ не справился, возвращаем базовый текст
+    return f"📰 {title}\n\n(Не удалось получить разбор от ИИ)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
+# ---------------------------------------------------------
 
 # --- ФОНОВАЯ ЗАДАЧА ДЛЯ НОВОСТЕЙ ---
 async def news_watcher():
@@ -100,6 +139,8 @@ async def news_watcher():
                 latest_news = feed.entries[0]
                 news_link = latest_news.link
                 news_title = latest_news.title
+                # Берем описание новости для более точного анализа
+                news_summary = getattr(latest_news, 'summary', '')
                 
                 if news_link != last_news_link:
                     last_news_link = news_link
@@ -111,21 +152,23 @@ async def news_watcher():
                         if 'image' in latest_news.enclosures[0].get('type', ''):
                             image_url = latest_news.enclosures[0].get('href')
                     
-                    text = f"📰 <b>Срочные новости:</b>\n\n{news_title}\n\n💰<b>ВРЕМЯ ТОРГОВАТЬ</b>💸\n\n🔗 <a href='{news_link}'>Читать полностью</a>"
+                    # Отправляем новость в ИИ на переработку
+                    ai_analysis_text = await analyze_news_with_ai(news_title, news_summary)
+                    final_text = f"{ai_analysis_text}\n\n🔗 <a href='{news_link}'>Читать источник</a>"
                     
                     for chat_id in list(active_chats):
                         try:
                             if image_url:
-                                await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode='HTML')
+                                await bot.send_photo(chat_id=chat_id, photo=image_url, caption=final_text, parse_mode='HTML')
                             else:
-                                await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', disable_web_page_preview=False)
+                                await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML', disable_web_page_preview=False)
                         except Exception as e:
                             print(f"Не удалось отправить новость в чат {chat_id}: {e}")
                             
         except Exception as e:
             print(f"Ошибка при чтении новостей: {e}")
             
-        await asyncio.sleep(900) # Ждем 15 минут
+        await asyncio.sleep(900) # Проверка каждые 15 минут
 # ---------------------------------------------------------
 
 async def get_signal_data(symbol):
@@ -264,30 +307,16 @@ async def start_handler(message: types.Message):
 
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
-    # Сразу убираем "часики" с кнопки в Telegram
     await callback_query.answer()
-    
     symbol = callback_query.data
-    
-    # Отправляем первое сообщение о поиске
     loading_msg = await callback_query.message.answer(f"⏳ Запрос {symbol}...")
-    
-    # Запускаем задачу, которая будет менять текст каждые 5 секунд
     animation_task = asyncio.create_task(animate_loading(loading_msg))
-    
-    # Ждем, пока нейросеть и биржа выдадут результат
     result = await get_signal_data(symbol)
-    
-    # Останавливаем анимацию текста
     animation_task.cancel()
-    
-    # Удаляем сообщение с поиском
     try:
         await loading_msg.delete()
-    except Exception as e:
-        print(f"Не удалось удалить сообщение: {e}")
-        
-    # Отправляем чистый финальный результат
+    except Exception:
+        pass
     await callback_query.message.answer(result, parse_mode='HTML')
 
 async def main():
