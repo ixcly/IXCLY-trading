@@ -34,20 +34,21 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-ADMIN_ID = os.getenv('ADMIN_ID') # Твой ID для уведомлений
+ADMIN_ID = os.getenv('ADMIN_ID') 
 
-# --- ПОДКЛЮЧАЕМ ТОП-10 БИРЖ ---
+# --- НАСТРОЙКА БИРЖ С ТАЙМАУТОМ ---
+ex_opts = {'defaultType': 'swap', 'timeout': 5000} # Ждем максимум 5 секунд
 exchange_list = [
-    {'name': 'OKX', 'ex': ccxt.okx({'options': {'defaultType': 'swap'}})},
-    {'name': 'Bybit', 'ex': ccxt.bybit({'options': {'defaultType': 'swap'}})},
-    {'name': 'Binance', 'ex': ccxt.binance({'options': {'defaultType': 'swap'}})},
-    {'name': 'Gate.io', 'ex': ccxt.gate({'options': {'defaultType': 'swap'}})},
-    {'name': 'Bitget', 'ex': ccxt.bitget({'options': {'defaultType': 'swap'}})},
-    {'name': 'KuCoin', 'ex': ccxt.kucoinfutures({'options': {'defaultType': 'swap'}})},
-    {'name': 'MEXC', 'ex': ccxt.mexc({'options': {'defaultType': 'swap'}})},
-    {'name': 'HTX', 'ex': ccxt.htx({'options': {'defaultType': 'swap'}})}, # ИСПРАВЛЕНО: htx вместо huobi
-    {'name': 'Phemex', 'ex': ccxt.phemex({'options': {'defaultType': 'swap'}})},
-    {'name': 'BingX', 'ex': ccxt.bingx({'options': {'defaultType': 'swap'}})}
+    {'name': 'OKX', 'ex': ccxt.okx(ex_opts)},
+    {'name': 'Bybit', 'ex': ccxt.bybit(ex_opts)},
+    {'name': 'Binance', 'ex': ccxt.binance(ex_opts)},
+    {'name': 'Gate.io', 'ex': ccxt.gate(ex_opts)},
+    {'name': 'Bitget', 'ex': ccxt.bitget(ex_opts)},
+    {'name': 'KuCoin', 'ex': ccxt.kucoinfutures(ex_opts)},
+    {'name': 'MEXC', 'ex': ccxt.mexc(ex_opts)},
+    {'name': 'HTX', 'ex': ccxt.htx(ex_opts)},
+    {'name': 'Phemex', 'ex': ccxt.phemex(ex_opts)},
+    {'name': 'BingX', 'ex': ccxt.bingx(ex_opts)}
 ]
 
 bot = Bot(token=BOT_TOKEN)
@@ -67,7 +68,6 @@ POPULAR_COINS = [
 
 USERS_FILE = 'users.json'
 
-# --- СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЕЙ ---
 def save_user_data(user_id, username, first_name):
     try:
         with open(USERS_FILE, 'r', encoding='utf-8') as f:
@@ -89,7 +89,6 @@ def save_user_data(user_id, username, first_name):
             json.dump(users, f, ensure_ascii=False, indent=4)
             
     return is_new
-# ---------------------------------------------------------
 
 def get_coins_keyboard(page=0):
     per_page = 12
@@ -211,15 +210,15 @@ def calc_atr(df, length=14):
 
 async def animate_loading(message: types.Message, symbol_name="Монета"):
     phrases = [
-        f"📡 Ищем {symbol_name} на OKX, Bybit, Binance...",
-        "🔍 Сканируем остальные 7 бирж...",
-        "📊 Рассчитываем точную математику...",
-        "⚖️ Рассчитываем TP и SL..."
+        f"📡 Ищем {symbol_name} на биржах...",
+        "🔍 Проверяем OKX, Bybit, Binance...",
+        "📊 Считаем индикаторы...",
+        "⚖️ Готовим уровни..."
     ]
     try:
         i = 0
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
             await message.edit_text(phrases[i % len(phrases)])
             i += 1
     except Exception: pass
@@ -231,7 +230,7 @@ async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_header
     if extra_headers: headers.update(extra_headers)
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     try:
-        response = await asyncio.to_thread(requests.post, f"{base_url}/chat/completions", headers=headers, json=payload, timeout=(15, 60))
+        response = await asyncio.to_thread(requests.post, f"{base_url}/chat/completions", headers=headers, json=payload, timeout=(10, 40))
         res_data = response.json()
         if 'error' in res_data or 'choices' not in res_data: return None
         return res_data['choices'][0]['message']['content']
@@ -245,7 +244,7 @@ async def fetch_gemini(prompt):
         headers['x-goog-api-key'] = key
         for model_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
             try:
-                res = await asyncio.to_thread(requests.post, f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent", headers=headers, json=payload, timeout=(15, 60))
+                res = await asyncio.to_thread(requests.post, f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent", headers=headers, json=payload, timeout=(10, 40))
                 res_data = res.json()
                 if 'error' in res_data: continue 
                 return res_data['candidates'][0]['content']['parts'][0]['text']
@@ -261,24 +260,24 @@ async def fetch_analysis(prompt):
     if result: return result
     return "ERROR"
 
-# --- МАКСИМАЛЬНЫЙ ПОИСК ПО 10 БИРЖАМ ---
+# --- БЫСТРЫЙ ПОИСК БЕЗ load_markets ---
 async def fetch_ohlcv_with_fallback(base_coin):
     for item in exchange_list:
         ex_name = item['name']
         ex_instance = item['ex']
+        symbol_to_try = f"{base_coin}/USDT:USDT"
         
         try:
-            markets = await asyncio.to_thread(ex_instance.load_markets)
-            symbol_to_try = f"{base_coin}/USDT:USDT"
-            
-            if symbol_to_try not in markets:
-                continue 
-            
-            print(f"✅ Монета {base_coin} найдена на {ex_name}. Запрашиваем данные...", flush=True)
             tf_data = {}
+            # Пробуем скачать хотя бы один таймфрейм, чтобы проверить наличие монеты
             for tf in ['15m', '1h', '4h', '1d']:
-                ohlcv = await asyncio.to_thread(ex_instance.fetch_ohlcv, symbol_to_try, tf, limit=100)
-                if not ohlcv: continue
+                # Ждем максимум 5 секунд на ответ от биржи
+                ohlcv = await asyncio.wait_for(
+                    asyncio.to_thread(ex_instance.fetch_ohlcv, symbol_to_try, tf, limit=100),
+                    timeout=5.0 
+                )
+                if not ohlcv: raise Exception("No data")
+                
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['ema20'] = calc_ema(df['close'], 20)
                 df['ema50'] = calc_ema(df['close'], 50)
@@ -295,8 +294,13 @@ async def fetch_ohlcv_with_fallback(base_coin):
                     'recent_high': df['high'].iloc[-24:].max()
                 }
             if tf_data:
+                print(f"✅ {base_coin} найдена на {ex_name}", flush=True)
                 return tf_data, ex_name
+        except asyncio.TimeoutError:
+            print(f"⏳ Таймаут на {ex_name}", flush=True)
+            continue
         except Exception:
+            # Если монеты нет, биржа выдаст ошибку, и мы просто идем дальше
             continue
             
     return None, None
@@ -338,7 +342,7 @@ async def process_signal(chat_id, symbol):
         
         if raw_text == "ERROR":
             dominant_tf = "4h"
-            reason = "Анализ выполнен локальной математической моделью на основе тренда EMA, RSI и MACD."
+            reason = "Анализ выполнен локальной математической моделью."
         else:
             try:
                 clean = raw_text.replace('```json', '').replace('```', '').strip()
@@ -439,7 +443,6 @@ async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
     waiting_for_search.discard(message.chat.id)
     
-    # Сохраняем пользователя и уведомляем админа
     is_new = save_user_data(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if is_new and ADMIN_ID:
         try:
@@ -453,7 +456,6 @@ async def handle_news_command(message: types.Message):
     active_chats.add(message.chat.id)
     await message.answer("⏳ Запрашиваем последнюю новость...")
 
-# --- ОБРАБОТКА ТЕКСТА (ПОИСК) ---
 @dp.message(F.text)
 async def handle_search_text(message: types.Message):
     if message.text.startswith('/'):
