@@ -52,6 +52,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 active_chats = set()
+waiting_for_search = set() # Пользователи, которые ждут ввода монеты
 last_news_link = None
 last_request_time = 0
 
@@ -81,6 +82,9 @@ def get_coins_keyboard(page=0):
     nav_row.append(InlineKeyboardButton(text=f"Стр. {page+1}/{total_pages}", callback_data="ignore"))
     if page < total_pages - 1: nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
     buttons.append(nav_row)
+    
+    # Кнопка поиска
+    buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search_coin")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def calc_exact_probability(df):
@@ -178,10 +182,10 @@ def calc_atr(df, length=14):
     tr = np.max(pd.concat([hl, hc, lc], axis=1), axis=1)
     return tr.rolling(length).mean()
 
-async def animate_loading(message: types.Message):
+async def animate_loading(message: types.Message, symbol_name="Монета"):
     phrases = [
-        "📡 Сканируем биржи (OKX, Bybit, Binance)...",
-        "🔍 Ищем ликвидность и пару...",
+        f"📡 Ищем {symbol_name} на OKX, Bybit, Binance...",
+        "🔍 Сканируем остальные 7 бирж...",
         "📊 Рассчитываем точную математику...",
         "⚖️ Рассчитываем TP и SL..."
     ]
@@ -265,20 +269,32 @@ async def fetch_ohlcv_with_fallback(base_coin):
                 }
             if tf_data:
                 return tf_data, ex_name
-        except Exception as e:
-            # Игнорируем ошибки (таймауты, блокировки Cloudflare) и идем к следующей бирже
+        except Exception:
             continue
             
     return None, None
 
-async def get_signal_data(symbol):
+async def process_signal(chat_id, symbol):
+    global last_request_time
+    now = time.time()
+    if now - last_request_time < 3:
+        await bot.send_message(chat_id, "⏳ Подождите пару секунд...")
+        return
+    last_request_time = now
+    
+    loading_msg = await bot.send_message(chat_id, f"⏳ Ищем {symbol}...")
+    animation_task = asyncio.create_task(animate_loading(loading_msg, symbol))
+    
     try:
         base_coin = symbol.replace('USDT', '')
-        
         tf_data, found_exchange = await fetch_ohlcv_with_fallback(base_coin)
         
         if not tf_data:
-            return f"❌ Монета {base_coin} не найдена ни на одной из 10 крупнейших бирж.", None
+            animation_task.cancel()
+            try: await loading_msg.delete()
+            except Exception: pass
+            await bot.send_message(chat_id, f"❌ Монета {base_coin} не найдена ни на одной из 10 бирж.")
+            return
             
         tf_text = ""
         for tf, data in tf_data.items():
@@ -295,7 +311,7 @@ async def get_signal_data(symbol):
         
         if raw_text == "ERROR":
             dominant_tf = "4h"
-            reason = "Анализ выполнен локальной математической моделью на основе тренда EMA, RSI и MACD. Рынок показывает локальное движение."
+            reason = "Анализ выполнен локальной математической моделью на основе тренда EMA, RSI и MACD."
         else:
             try:
                 clean = raw_text.replace('```json', '').replace('```', '').strip()
@@ -357,9 +373,18 @@ async def get_signal_data(symbol):
         )
         
         image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, long_prob)
-        return formatted_text, image_buf
+        
+        animation_task.cancel()
+        try: await loading_msg.delete()
+        except Exception: pass
+        
+        await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=formatted_text, parse_mode='HTML')
+        
     except Exception as e:
-        return f"⚠️ Системная ошибка: {str(e)}", None
+        animation_task.cancel()
+        try: await loading_msg.delete()
+        except Exception: pass
+        await bot.send_message(chat_id, f"⚠️ Системная ошибка: {str(e)}")
 
 async def news_watcher():
     global last_news_link
@@ -385,46 +410,65 @@ async def news_watcher():
 @dp.message(Command('start', 'menu'))
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
-    await message.answer("👋 Выбери монету для анализа:", reply_markup=get_coins_keyboard(0))
+    waiting_for_search.discard(message.chat.id)
+    await message.answer("👋 Выбери монету из списка или нажми «🔍 Поиск монеты»:", reply_markup=get_coins_keyboard(0))
 
 @dp.message(Command('news'))
 async def handle_news_command(message: types.Message):
     active_chats.add(message.chat.id)
     await message.answer("⏳ Запрашиваем последнюю новость...")
 
+# --- ОБРАБОТКА ТЕКСТА (ПОИСК) ---
+@dp.message(F.text)
+async def handle_search_text(message: types.Message):
+    if message.text.startswith('/'):
+        return # Игнорируем команды
+        
+    if message.chat.id in waiting_for_search:
+        waiting_for_search.remove(message.chat.id)
+        
+        # Очищаем ввод от лишнего
+        coin = message.text.upper().replace('USDT', '').replace('/', '').strip()
+        
+        if not coin.isalnum():
+            await message.answer("⚠️ Неверный формат. Введите тикер (например: BTC или WIF).", reply_markup=get_coins_keyboard(0))
+            return
+            
+        await process_signal(message.chat.id, f"{coin}USDT")
+        await message.answer("Выбери следующую монету:", reply_markup=get_coins_keyboard(0))
+    else:
+        await message.answer("Используй кнопки для выбора монеты или нажми /menu.", reply_markup=get_coins_keyboard(0))
+
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
-    global last_request_time
     data = callback_query.data
+    chat_id = callback_query.message.chat.id
     
-    if data == "ignore": await callback_query.answer(); return
+    if data == "ignore": 
+        await callback_query.answer()
+        return
+        
     if data.startswith("page_"):
         page = int(data.split("_")[1])
         await callback_query.message.edit_reply_markup(reply_markup=get_coins_keyboard(page))
         await callback_query.answer()
         return
         
-    now = time.time()
-    if now - last_request_time < 3:
-        await callback_query.answer("⏳ Подождите пару секунд...", show_alert=True)
+    if data == "search_coin":
+        waiting_for_search.add(chat_id)
+        await callback_query.message.answer(
+            "🔍 <b>Режим поиска</b>\n\nНапиши тикер монеты (например: <code>WIF</code>, <code>PEPE</code>, <code>TON</code>), и я найду её на биржах.",
+            parse_mode='HTML'
+        )
+        await callback_query.answer()
         return
-    last_request_time = now
         
+    # Если выбрана монета из списка
+    waiting_for_search.discard(chat_id) # Сбрасываем режим поиска
     await callback_query.answer()
+    
     symbol = data
-    loading_msg = await callback_query.message.answer(f"⏳ Ищем {symbol} на биржах...")
-    animation_task = asyncio.create_task(animate_loading(loading_msg))
-    
-    text_result, image_buf = await get_signal_data(symbol)
-    
-    animation_task.cancel()
-    try: await loading_msg.delete()
-    except Exception: pass
-
-    if image_buf:
-        await callback_query.message.answer_photo(photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=text_result, parse_mode='HTML')
-    else:
-        await callback_query.message.answer(text_result, parse_mode='HTML')
+    await process_signal(chat_id, symbol)
 
 async def main():
     keep_alive()
