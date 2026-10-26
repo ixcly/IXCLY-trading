@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v3.0
+IXCLY Trading bot v3.1
 - Мгновенная рассылка из второго (админского) бота
 - Новости: строгий перевод на русский
 - Свечи: Binance, MEXC, Gate, KuCoin, OKX, Bybit + CryptoCompare
@@ -991,12 +991,16 @@ async def callback_handler(cb: types.CallbackQuery):
 
 
 # ----------------------------------------------------------------------------
-# ХЕНДЛЕР ВТОРОГО (АДМИН) БОТА ДЛЯ РАССЫЛОК
+# ХЕНДЛЕРЫ ВТОРОГО (АДМИН) БОТА ДЛЯ РАССЫЛОК
 # ----------------------------------------------------------------------------
 if input_dp:
+    @input_dp.message(Command("start"))
+    async def admin_start_handler(message: types.Message):
+        await message.answer("👋 Привет, админ! Отправь сюда любой текст или фото, и я мгновенно разошлю это всем пользователям основного бота.")
+
     @input_dp.message()
     async def handle_broadcast(message: types.Message):
-        # Игнорируем команды, если случайно напишешь /start
+        # Игнорируем команды
         if message.text and message.text.startswith('/'):
             return
             
@@ -1041,6 +1045,8 @@ async def main():
         # Запуск админ-бота параллельно с основным
         if input_bot:
             log.info("Админ-бот (рассылка) запущен...")
+            # Очищаем вебхук админ-бота, чтобы не было конфликтов
+            await input_bot.delete_webhook(drop_pending_updates=True)
             asyncio.create_task(input_dp.start_polling(input_bot))
             
         await bot.delete_webhook(drop_pending_updates=True)
