@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.9
+IXCLY Trading bot v2.9.1
 - Цепочка ИИ: Gemini/Groq/OpenRouter (с ключами) -> бесплатный GPT без ключа (Pollinations) -> локальный движок
 - Локальный движок работает ВСЕГДА (мульти-ТФ + волатильность + новостной сентимент) и даёт ENTER/WAIT
 - Мировые + крипто-новости идут в анализ каждой монеты
@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from collections import Counter
 from datetime import datetime
@@ -26,10 +27,10 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
-from flask import Flask
+from flask import Flask, jsonify
 from PIL import Image, ImageDraw, ImageFont
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout, force=True)
 log = logging.getLogger("ixcly")
 
 # ----------------------------------------------------------------------------
@@ -41,6 +42,21 @@ app = Flask("")
 @app.route("/")
 def home():
     return "Bot is alive!"
+
+
+@app.route("/status")
+def status_page():
+    """Открой https://<твой-сервис>.onrender.com/status в браузере: покажет, что реально запущено."""
+    return jsonify({
+        "version": VERSION,
+        "uptime_s": int(time.time() - stats["started"]),
+        "main_bot": runtime["main_bot"],
+        "admin_bot": runtime["admin_bot"],
+        "admin_ids_count": len(ADMIN_IDS),
+        "input_token_set": bool(INPUT_BOT_TOKEN),
+        "tokens_are_same": bool(INPUT_BOT_TOKEN) and INPUT_BOT_TOKEN == BOT_TOKEN,
+        "recipients": len(active_chats),
+    })
 
 
 def _run_web():
@@ -82,6 +98,17 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
+
+VERSION = "2.9.1"
+runtime = {"main_bot": "?", "admin_bot": "не запущен"}
+
+
+def _bot_id(t):
+    return t.split(":")[0] if t and ":" in t else ("не задан" if not t else "неверный формат")
+
+
+print(f"=== IXCLY v{VERSION} | BOT_TOKEN id={_bot_id(BOT_TOKEN)} | INPUT_BOT_TOKEN id={_bot_id(INPUT_BOT_TOKEN)} "
+      f"| совпадают={bool(INPUT_BOT_TOKEN) and INPUT_BOT_TOKEN == BOT_TOKEN} | ADMIN_IDS={len(ADMIN_IDS)} ===", flush=True)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -1844,6 +1871,13 @@ async def main():
             types.BotCommand(command="menu", description="🚀 Меню"),
             types.BotCommand(command="news", description="📰 Новости"),
         ])
+        try:
+            me = await bot.get_me()
+            runtime["main_bot"] = f"@{me.username}"
+            log.info("Основной бот: @%s", me.username)
+        except Exception as e:
+            runtime["main_bot"] = f"ошибка: {e}"
+            log.error("Основной бот: get_me не удался: %s (проверьте BOT_TOKEN)", e)
         background.append(asyncio.create_task(news_watcher()))
         background.append(asyncio.create_task(backup_loop()))
 
@@ -1851,6 +1885,9 @@ async def main():
             if not ADMIN_IDS:
                 log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки (покажет ваш ID)")
             try:
+                me = await input_bot.get_me()
+                runtime["admin_bot"] = f"@{me.username}"
+                log.info("Админ-бот: @%s (id %s)", me.username, me.id)
                 await input_bot.delete_webhook(drop_pending_updates=True)
                 await input_bot.set_my_commands([
                     types.BotCommand(command="panel", description="🛠 Панель"),
@@ -1861,13 +1898,26 @@ async def main():
                                                                close_bot_session=False))
                 t.add_done_callback(_log_task_result)
                 background.append(t)
-                log.info("Админ-бот запущен (админов: %d)", len(ADMIN_IDS))
+                await asyncio.sleep(2)
+                if t.done():
+                    runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
+                else:
+                    log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
                 if ADMIN_IDS:
                     await startup_notice()
             except Exception as e:
-                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s. Основной бот продолжит работу.", e, exc_info=True)
+                runtime["admin_bot"] = f"ошибка: {e}"
+                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "nauthorized" in str(e) else ""
+                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
         else:
-            log.warning("Админ-бот выключен: задайте INPUT_BOT_TOKEN (токен ВТОРОГО бота, отличный от BOT_TOKEN)")
+            if not INPUT_BOT_TOKEN:
+                reason = "переменная INPUT_BOT_TOKEN не задана"
+            elif INPUT_BOT_TOKEN == BOT_TOKEN:
+                reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
+            else:
+                reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
+            runtime["admin_bot"] = f"выключен: {reason}"
+            log.warning("Админ-бот выключен: %s", reason)
 
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
