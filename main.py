@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.3
-- Свечи: прямые публичные REST API (Binance Vision, MEXC, Gate, KuCoin, OKX, Bybit) + CryptoCompare как запасной вариант
-- ИИ: Gemini / Groq / OpenRouter параллельно, берётся первый валидный ответ; есть локальный fallback
-- Картинка: реальный график свечей с уровнями входа, TP и SL
+IXCLY Trading bot v2.4
+- Новости: строгий перевод на русский (включая аварийный переводчик, если ИИ лег)
+- Свечи: прямые публичные REST API + CryptoCompare
+- ИИ: Gemini (2.5-flash) / Groq / OpenRouter
 """
 import asyncio
 import html
@@ -34,16 +34,13 @@ log = logging.getLogger("ixcly")
 # ----------------------------------------------------------------------------
 app = Flask("")
 
-
 @app.route("/")
 def home():
     return "Bot is alive!"
 
-
 def _run_web():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
 
 def keep_alive():
     Thread(target=_run_web, daemon=True).start()
@@ -225,6 +222,19 @@ def normalize_ticker(text):
         t = t[:-4]
     return t
 
+# --- ВСТРОЕННЫЙ ПЕРЕВОДЧИК (ЕСЛИ ИИ ЛЕГ) ---
+async def translate_text(text, target="ru"):
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "en", "tl": target, "dt": "t", "q": text}
+        async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                return "".join([item[0] for item in data[0]])
+    except Exception:
+        pass
+    return text
+# ---------------------------------------------
 
 # ----------------------------------------------------------------------------
 # ИНДИКАТОРЫ
@@ -457,7 +467,7 @@ async def _ask_gemini(prompt, json_mode):
     for key in GEMINI_API_KEYS:
         try:
             async with http.post(url, json=payload, headers={"x-goog-api-key": key},
-                                 timeout=aiohttp.ClientTimeout(total=14)) as r:
+                                 timeout=aiohttp.ClientTimeout(total=20)) as r:
                 j = await r.json(content_type=None)
                 if r.status != 200:
                     log.warning(f"Gemini API Error ({r.status}): {str(j)[:100]}")
@@ -478,7 +488,7 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_
         payload["response_format"] = {"type": "json_object"}
     try:
         async with http.post(f"{base_url}/chat/completions", json=payload, headers=headers,
-                             timeout=aiohttp.ClientTimeout(total=14)) as r:
+                             timeout=aiohttp.ClientTimeout(total=20)) as r:
             j = await r.json(content_type=None)
             if r.status != 200 or "choices" not in j:
                 log.warning(f"{base_url} Error ({r.status}): {str(j)[:100]}")
@@ -489,7 +499,7 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_
         return None
 
 
-async def ask_ai(prompt, json_mode=False, validate=None, timeout=16):
+async def ask_ai(prompt, json_mode=False, validate=None, timeout=30):
     providers = []
     if GEMINI_API_KEYS:
         providers.append(lambda: _ask_gemini(prompt, json_mode))
@@ -534,7 +544,7 @@ def ai_to_html(text):
 
 
 # ----------------------------------------------------------------------------
-# НОВОСТИ (СТРОГО НА РУССКОМ ЯЗЫКЕ)
+# НОВОСТИ (С ПРИНУДИТЕЛЬНЫМ ПЕРЕВОДОМ)
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 _news_cache = {"ts": 0.0, "entries": []}
@@ -590,7 +600,6 @@ async def fetch_and_analyze_news():
         summary = re.sub(r"<[^>]+>", "", getattr(news, "summary", ""))[:800]
         link = news.link
 
-        # ЖЕСТКИЙ ПРОМПТ: ТОЛЬКО РУССКИЙ ЯЗЫК
         prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость и напиши краткий пост для Telegram СТРОГО НА РУССКОМ ЯЗЫКЕ.
 Заголовок: {title}
 Описание: {summary}
@@ -602,16 +611,20 @@ async def fetch_and_analyze_news():
 2. Как это влияет на рынок (позитив/негатив и почему, на русском).
 3. Какие монеты затронуты (2-3 тикера, например BTC, ETH).
 """
-        ai_text = await ask_ai(prompt, json_mode=False, timeout=20)
+        # Увеличили таймаут для новостей, чтобы ИИ успел перевести
+        ai_text = await ask_ai(prompt, json_mode=False, timeout=40)
         
         if ai_text:
             body = ai_to_html(ai_text)
         else:
-            # Умный Fallback: если ИИ лег, выдаем текст без ошибок (перевод заголовка невозможен без ИИ, оставляем оригинал)
+            # АВАРИЙНЫЙ ПЕРЕВОД, если ИИ лег
+            ru_title = await translate_text(title)
+            ru_summary = await translate_text(summary[:300])
+            
             body = (
-                f"📌 <b>{html.escape(title)}</b>\n\n"
-                f"<i>{html.escape(summary[:400])}...</i>\n\n"
-                f"📉 <b>Влияние:</b> Требуется ручная оценка (сервисы анализа временно перегружены).\n"
+                f"📌 <b>{html.escape(ru_title)}</b>\n\n"
+                f"<i>{html.escape(ru_summary)}...</i>\n\n"
+                f"📉 <b>Влияние:</b> Требуется ручная оценка (нейросети перегружены).\n"
                 f"🎯 <b>Монеты:</b> Общий фон рынка."
             )
 
@@ -695,14 +708,12 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     f_text, f_bold, f_small = get_font(24), get_font(30, True), get_font(18)
     main = green if is_long else red
 
-    # шапка (только латиница)
     d.text((40, 30), "ixcly trade", font=f_logo, fill=white)
     d.text((40, 85), f"{coin}/USDT", font=f_title, fill=white)
     side = "LONG" if is_long else "SHORT"
     d.text((W - 40 - d.textlength(side, font=f_title), 85), side, font=f_title, fill=main)
     d.text((40, 165), f"TF {tf}  |  Long prob {long_prob}%  |  {source}", font=f_text, fill=gray)
 
-    # график
     x0, x1, y0, y1 = 40, W - 40, 215, 610
     cd = df.tail(40).reset_index(drop=True)
     vals = [float(cd["low"].min()), float(cd["high"].max()), tps[0], sls[0], entry]
@@ -740,7 +751,6 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
             _dashed(d, y, x0, plot_r, col)
             d.text((plot_r + 6, y - 10), name, font=f_small, fill=col)
 
-    # уровни текстом
     d.text((40, 640), "Entry", font=f_text, fill=gray)
     d.text((200, 636), fmt(entry), font=f_bold, fill=white)
     d.text((40, 710), "Take Profit", font=f_text, fill=gray)
