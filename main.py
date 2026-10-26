@@ -35,7 +35,6 @@ exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилище пользователей и последняя новость
 active_chats = set()
 last_news_link = None
 
@@ -67,28 +66,26 @@ def get_coins_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- УМНЫЙ ТЕКСТ ДЛЯ ОЖИДАНИЯ ---
 async def animate_loading(message: types.Message):
     phrases = [
-        "📡 Сканируем рыночные данные...",
+        "📡 Сканируем рыночные данные (15m, 1h, 4h, 1d)...",
         "📰 Анализируем мировые новости и настроения...",
-        "📊 Рассчитываем индикаторы RSI, EMA и ATR...",
-        "🧠 Нейросеть формирует среднесрочный вердикт...",
-        "⚖️ Оцениваем риски и потенциальную доходность...",
+        "📊 Рассчитываем индикаторы на всех таймфреймах...",
+        "🧠 Нейросеть ищет точку входа и доминирующий тренд...",
+        "⚖️ Рассчитываем уровни риска (3 TP / 3 SL)...",
         "⚙️ Завершаем глубокий анализ данных..."
     ]
     try:
         i = 0
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(4)
             await message.edit_text(phrases[i % len(phrases)])
             i += 1
     except asyncio.CancelledError:
         pass
-    except Exception as e:
+    except Exception:
         pass
 
-# --- АНАЛИЗ НОВОСТЕЙ ЧЕРЕЗ GEMINI ---
 async def analyze_news_with_ai(title, summary):
     prompt = f"""
     Ты профессиональный крипто-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
@@ -104,7 +101,6 @@ async def analyze_news_with_ai(title, summary):
     В самом конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
     Пиши с эмодзи, кратко и понятно для трейдера.
     """
-    
     models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-medium", "gemini-3.5-flash"]
     session = requests.Session()
     
@@ -116,22 +112,17 @@ async def analyze_news_with_ai(title, summary):
         try:
             response = await asyncio.to_thread(session.post, url, headers=headers, json=payload, timeout=(15, 60))
             res_data = response.json()
-            
             if 'candidates' in res_data:
                 return res_data['candidates'][0]['content']['parts'][0]['text']
         except Exception as e:
             print(f"Ошибка при анализе новости через {model_name}: {e}")
             continue
             
-    # Если ИИ не справился, возвращаем базовый текст
     return f"📰 {title}\n\n(Не удалось получить разбор от ИИ)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
-# ---------------------------------------------------------
 
-# --- ФОНОВАЯ ЗАДАЧА ДЛЯ НОВОСТЕЙ ---
 async def news_watcher():
     global last_news_link
     await asyncio.sleep(10)
-    
     while True:
         try:
             feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
@@ -139,12 +130,10 @@ async def news_watcher():
                 latest_news = feed.entries[0]
                 news_link = latest_news.link
                 news_title = latest_news.title
-                # Берем описание новости для более точного анализа
                 news_summary = getattr(latest_news, 'summary', '')
                 
                 if news_link != last_news_link:
                     last_news_link = news_link
-                    
                     image_url = None
                     if hasattr(latest_news, 'media_content'):
                         image_url = latest_news.media_content[0]['url']
@@ -152,7 +141,6 @@ async def news_watcher():
                         if 'image' in latest_news.enclosures[0].get('type', ''):
                             image_url = latest_news.enclosures[0].get('href')
                     
-                    # Отправляем новость в ИИ на переработку
                     ai_analysis_text = await analyze_news_with_ai(news_title, news_summary)
                     final_text = f"{ai_analysis_text}\n\n🔗 <a href='{news_link}'>Читать источник</a>"
                     
@@ -164,62 +152,84 @@ async def news_watcher():
                                 await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML', disable_web_page_preview=False)
                         except Exception as e:
                             print(f"Не удалось отправить новость в чат {chat_id}: {e}")
-                            
         except Exception as e:
             print(f"Ошибка при чтении новостей: {e}")
+        await asyncio.sleep(900)
+
+# --- СБОР ДАННЫХ СО ВСЕХ ТАЙМФРЕЙМОВ ---
+async def get_multi_tf_data(symbol):
+    timeframes = ['15m', '1h', '4h', '1d']
+    data_summary = {}
+    
+    for tf in timeframes:
+        try:
+            ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, tf, limit=100)
+            if not ohlcv: continue
             
-        await asyncio.sleep(900) # Проверка каждые 15 минут
-# ---------------------------------------------------------
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['ema20'] = calc_ema(df['close'], 20)
+            df['ema50'] = calc_ema(df['close'], 50)
+            df['rsi'] = calc_rsi(df['close'], 14)
+            df['atr'] = calc_atr(df, 14)
+            
+            data_summary[tf] = {
+                'price': df['close'].iloc[-1],
+                'ema20': df['ema20'].iloc[-1],
+                'ema50': df['ema50'].iloc[-1],
+                'rsi': df['rsi'].iloc[-1],
+                'atr': df['atr'].iloc[-1]
+            }
+        except Exception as e:
+            print(f"Ошибка при получении данных {tf}: {e}")
+            
+    return data_summary
 
 async def get_signal_data(symbol):
-    okx_symbol = f"{symbol[:-4]}/USDT:USDT"
     try:
-        ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, okx_symbol, '4h', limit=100)
-        if not ohlcv:
-            return f"❌ Нет данных по тикеру {okx_symbol}."
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        # Приводим тикер к формату OKX (например, BTC/USDT:USDT)
+        okx_symbol = f"{symbol[:-4]}/USDT:USDT" if symbol.endswith('USDT') else symbol
         
-        df['ema20'] = calc_ema(df['close'], 20)
-        df['ema50'] = calc_ema(df['close'], 50)
-        df['rsi'] = calc_rsi(df['close'], 14)
-        df['atr'] = calc_atr(df, 14)
-
-        current_price = df['close'].iloc[-1]
-        current_ema20 = df['ema20'].iloc[-1]
-        current_ema50 = df['ema50'].iloc[-1]
-        current_rsi = df['rsi'].iloc[-1]
-        current_atr = df['atr'].iloc[-1]
+        # Получаем данные по всем ТФ
+        tf_data = await get_multi_tf_data(okx_symbol)
+        if not tf_data:
+            return "❌ Не удалось получить данные с биржи."
+            
+        # Формируем строку для промпта
+        tf_text = ""
+        for tf, data in tf_data.items():
+            tf_text += f"""
+            [{tf}] Цена: {data['price']:.4f}, RSI: {data['rsi']:.2f}, EMA20: {data['ema20']:.4f}, EMA50: {data['ema50']:.4f}, ATR: {data['atr']:.4f}
+            """
 
         news_feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
         news_titles = [entry.title for entry in news_feed.entries[:5]]
         news_text = "\n".join(news_titles) if news_titles else "Новостей нет."
 
         prompt = f"""
-        Ты профессиональный среднесрочный трейдер (свинг-трейдер). Твоя задача — дать стабильный прогноз на 4-часовом таймфрейме (4H).
-        Игнорируй краткосрочный рыночный шум и мелкие откаты. Оценивай общий тренд.
+        Ты профессиональный трейдер. Проанализируй данные по монете {symbol} на РАЗНЫХ таймфреймах.
         
-        Монета: {symbol}
-        Текущая цена: {current_price}
-        RSI (14): {current_rsi:.2f}
-        EMA20 (быстрая): {current_ema20:.2f}
-        EMA50 (медленная): {current_ema50:.2f}
-        ATR (волатильность): {current_atr:.2f}
+        Данные:
+        {tf_text}
         
-        Последние новости (общий фон):
+        Последние новости:
         {news_text}
         
-        Верни ТОЛЬКО JSON без лишнего текста: 
-        {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
+        Твоя задача: сделать общую оценку и выбрать ОДИН доминирующий таймфрейм, который сейчас наиболее точно показывает направление движения цены.
+        
+        Верни СТРОГО JSON без лишнего текста:
+        {{
+            "long_prob": 70, 
+            "short_prob": 30, 
+            "dominant_tf": "1h", 
+            "reason": "Краткое обоснование на русском (1-2 предложения), учитывая выбранный таймфрейм, общий тренд и новости."
+        }}
         """
 
         models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-medium", "gemini-3.5-flash"]
-
         session = requests.Session()
         retry_strategy = Retry(total=2, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
-        session.mount("http://", adapter)
 
         res_data = None
         last_error_message = ""
@@ -232,7 +242,6 @@ async def get_signal_data(symbol):
             try:
                 response = await asyncio.to_thread(session.post, url, headers=headers, json=payload, timeout=(15, 90))
                 res_data = response.json()
-
                 if 'error' in res_data and res_data['error'].get('code') == 503:
                     last_error_message = res_data['error'].get('message', 'Модель перегружена')
                     continue
@@ -240,94 +249,35 @@ async def get_signal_data(symbol):
                     last_error_message = res_data['error'].get('message', 'Неизвестная ошибка')
                     continue
                 break
-            except requests.exceptions.Timeout:
-                last_error_message = "Таймаут ожидания ответа (90 секунд)."
-                continue
             except Exception as e:
                 last_error_message = str(e)
                 continue
 
         if res_data is None or 'error' in res_data:
-            return f"⚠️ Не удалось получить ответ. Причина: {last_error_message}. Попробуйте позже."
+            return f"⚠️ Не удалось получить ответ. Причина: {last_error_message}"
 
         try:
             raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
-        except (KeyError, IndexError):
-            return "⚠️ Нейросеть вернула пустой ответ. Попробуйте позже。"
-
-        clean_response = raw_text.replace('```json', '').replace('```', '').strip()
-        try:
+            clean_response = raw_text.replace('```json', '').replace('```', '').strip()
             ai_data = json.loads(clean_response)
-        except json.JSONDecodeError:
+        except Exception:
             return "⚠️ Нейросеть вернула некорректный формат."
 
         long_prob = ai_data.get("long_prob", 50)
         short_prob = ai_data.get("short_prob", 50)
-        reason = ai_data.get("reason", "Анализ завершен。")
+        dominant_tf = ai_data.get("dominant_tf", "4h")
+        reason = ai_data.get("reason", "Анализ завершен.")
 
+        # Проверка, что ИИ вернул существующий ТФ (чтобы не сломать математику)
+        if dominant_tf not in tf_data:
+            dominant_tf = "4h" if "4h" in tf_data else list(tf_data.keys())[-1]
+
+        # Берем данные именно того таймфрейма, который выбрал ИИ
+        tf_info = tf_data[dominant_tf]
+        entry = tf_info['price']
+        atr = tf_info['atr']
+
+        # Расчет уровней: 3 TP и 3 SL
         if long_prob > short_prob:
             direction = "🟢 LONG"
-            entry = current_price
-            sl = entry - (1.5 * current_atr)
-            tp = entry + (3.0 * current_atr)
-        else:
-            direction = "🔴 SHORT"
-            entry = current_price
-            sl = entry + (1.5 * current_atr)
-            tp = entry - (3.0 * current_atr)
-
-        return (
-            f"📊 <b>Среднесрочный анализ по {symbol} (4H)</b>\n\n"
-            f"🤖 <b>Вердикт:</b> {direction}\n"
-            f"Вероятность Лонга: <b>{long_prob}%</b>\n"
-            f"Вероятность Шорта: <b>{short_prob}%</b>\n\n"
-            f"Текущая цена: <code>{current_price:.4f}</code>\n"
-            f"Точка входа: <code>{entry:.4f}</code>\n"
-            f"🛑 Стоп-лосс: <code>{sl:.4f}</code>\n"
-            f"🎯 Тейк-профит: <code>{tp:.4f}</code>\n\n"
-            f"📰 <b>Обоснование:</b> <i>{reason}</i>\n\n"
-            f"<i>Не является финансовой рекомендацией!</i>"
-        )
-    except Exception as e:
-        print(f"ERROR: {str(e)}")
-        return f"⚠️ Системная ошибка: {str(e)}"
-
-@dp.message(Command('start', 'menu'))
-@dp.message(F.text == "🚀 Открыть меню")
-async def start_handler(message: types.Message):
-    active_chats.add(message.chat.id)
-    
-    reply_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🚀 Открыть меню")]],
-        resize_keyboard=True,
-        is_persistent=True
-    )
-    await message.answer("Привет! Нажми кнопку ниже, чтобы выбрать монету.", reply_markup=reply_kb)
-    await message.answer("👋 Выбери монету для анализа:", reply_markup=get_coins_keyboard())
-
-@dp.callback_query(F.data)
-async def process_callback(callback_query: types.CallbackQuery):
-    await callback_query.answer()
-    symbol = callback_query.data
-    loading_msg = await callback_query.message.answer(f"⏳ Запрос {symbol}...")
-    animation_task = asyncio.create_task(animate_loading(loading_msg))
-    result = await get_signal_data(symbol)
-    animation_task.cancel()
-    try:
-        await loading_msg.delete()
-    except Exception:
-        pass
-    await callback_query.message.answer(result, parse_mode='HTML')
-
-async def main():
-    keep_alive()
-    print("Бот запущен...")
-    asyncio.create_task(news_watcher())
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    except Exception as e:
-        print(f"Критическая ошибка при запуске: {e}")
-
-if __name__ == '__main__':
-    asyncio.run(main())
+            # Для Лонга стопы
