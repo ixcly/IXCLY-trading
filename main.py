@@ -31,12 +31,10 @@ def keep_alive():
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 
-# Ключи для других провайдеров
+# Ключи для оставшихся провайдеров
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 CEREBRAS_API_KEY = os.getenv('CEREBRAS_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-MISTRAL_API_KEY = os.getenv('MISTRAL_API_KEY')
-NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY')
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
@@ -225,7 +223,7 @@ async def fetch_gemini(prompt):
                 continue
     return None
 
-# --- ГЛАВНАЯ ФУНКЦИЯ СБОРА АНАЛИЗА (ПЕРЕБОР ВСЕХ ПРОВАЙДЕРОВ) ---
+# --- ГЛАВНАЯ ФУНКЦИЯ СБОРА АНАЛИЗА (ПЕРЕБОР ОСТАВШИХСЯ ПРОВАЙДЕРОВ) ---
 async def fetch_analysis(prompt):
     # 1. Пытаемся использовать Google Gemini
     result = await fetch_gemini(prompt)
@@ -249,18 +247,6 @@ async def fetch_analysis(prompt):
     result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "openrouter/free")
     if result:
         print("Успешный ответ от OpenRouter")
-        return result
-
-    # 5. Пытаемся использовать Mistral AI
-    result = await fetch_openai_compatible(prompt, "https://api.mistral.ai/v1", MISTRAL_API_KEY, "mistral-small-latest")
-    if result:
-        print("Успешный ответ от Mistral AI")
-        return result
-
-    # 6. Пытаемся использовать NVIDIA NIM
-    result = await fetch_openai_compatible(prompt, "https://integrate.api.nvidia.com/v1", NVIDIA_API_KEY, "meta/llama-3.1-8b-instruct")
-    if result:
-        print("Успешный ответ от NVIDIA NIM")
         return result
 
     # Если все провайдеры отказали
