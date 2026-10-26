@@ -7,6 +7,7 @@ import feedparser
 import json
 import requests
 import io
+import time
 from PIL import Image, ImageDraw, ImageFont
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -32,9 +33,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-AION_API_KEY = os.getenv('AION_API_KEY')
-CLOUDFLARE_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
-CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID')
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
@@ -42,6 +40,7 @@ dp = Dispatcher()
 
 active_chats = set()
 last_news_link = None
+last_request_time = 0 # Защита от спама
 
 # --- СПИСОК МОНЕТ ---
 POPULAR_COINS = [
@@ -79,7 +78,6 @@ def calc_exact_probability(df):
     ema50 = df['ema50'].iloc[-1]
     rsi = df['rsi'].iloc[-1]
     
-    # Считаем MACD
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
@@ -87,8 +85,6 @@ def calc_exact_probability(df):
     macd_hist = macd.iloc[-1] - signal.iloc[-1]
 
     score = 0
-    
-    # 1. Тренд по EMA (Вес: до 40 очков)
     if ema20 > ema50:
         diff_pct = ((ema20 - ema50) / ema50) * 100
         score += 20 + min(20, diff_pct * 15)
@@ -96,25 +92,17 @@ def calc_exact_probability(df):
         diff_pct = ((ema50 - ema20) / ema50) * 100
         score -= 20 + min(20, diff_pct * 15)
         
-    # 2. RSI (Вес: до 30 очков)
-    if rsi > 50:
-        score += min(30, (rsi - 50) * 1.2)
-    else:
-        score -= min(30, (50 - rsi) * 1.2)
+    if rsi > 50: score += min(30, (rsi - 50) * 1.2)
+    else: score -= min(30, (50 - rsi) * 1.2)
         
-    # 3. MACD (Вес: до 30 очков)
-    if macd_hist > 0:
-        score += 30
-    else:
-        score -= 30
+    if macd_hist > 0: score += 30
+    else: score -= 30
         
-    # Переводим score от -100..100 в вероятность 0..100% с двумя знаками
     long_prob = 50 + (score / 2)
-    long_prob = max(5.0, min(95.0, long_prob)) # Ограничиваем от 5% до 95%
+    long_prob = max(5.0, min(95.0, long_prob))
     short_prob = 100 - long_prob
     
     return round(long_prob, 2), round(short_prob, 2)
-# ---------------------------------------------------------
 
 def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, tf, long_prob):
     width, height = 800, 1000
@@ -168,7 +156,6 @@ def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3,
     buf.seek(0)
     return buf
 
-# --- РАСЧЕТ ИНДИКАТОРОВ ---
 def calc_ema(series, length): return series.ewm(span=length, adjust=False).mean()
 def calc_rsi(series, length=14):
     delta = series.diff()
@@ -200,9 +187,10 @@ async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_header
     if extra_headers: headers.update(extra_headers)
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     try:
-        response = await asyncio.to_thread(requests.post, f"{base_url}/chat/completions", headers=headers, json=payload, timeout=(15, 90))
+        response = await asyncio.to_thread(requests.post, f"{base_url}/chat/completions", headers=headers, json=payload, timeout=(15, 60))
         res_data = response.json()
-        if 'error' in res_data or 'choices' not in res_data: return None
+        if 'error' in res_data or 'choices' not in res_data: 
+            return None
         return res_data['choices'][0]['message']['content']
     except Exception: return None
 
@@ -212,25 +200,29 @@ async def fetch_gemini(prompt):
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     for key in GEMINI_API_KEYS:
         headers['x-goog-api-key'] = key
-        for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+        for model_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
             try:
-                res = await asyncio.to_thread(requests.post, f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent", headers=headers, json=payload, timeout=(15, 90))
+                res = await asyncio.to_thread(requests.post, f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent", headers=headers, json=payload, timeout=(15, 60))
                 res_data = res.json()
                 if 'error' in res_data:
-                    if 'quota' in res_data['error'].get('message', '').lower(): break
-                    continue
+                    continue # Если лимит, пробуем следующий ключ
                 return res_data['candidates'][0]['content']['parts'][0]['text']
             except Exception: continue
     return None
 
 async def fetch_analysis(prompt):
+    # Пытаемся получить ответ по очереди
     result = await fetch_gemini(prompt)
     if result: return result
-    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
+    
+    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.1-8b-instant")
     if result: return result
-    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "google/gemini-2.0-flash-exp:free", {"HTTP-Referer": "https://t.me/bot", "X-Title": "Bot"})
+
+    # OpenRouter - самая стабильная бесплатная модель
+    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3.1-8b-instruct:free", {"HTTP-Referer": "https://t.me/bot", "X-Title": "Bot"})
     if result: return result
-    return "ERROR: Все системы отказали."
+    
+    return "ERROR"
 
 async def get_multi_tf_data(symbol):
     timeframes = ['15m', '1h', '4h', '1d']
@@ -261,26 +253,26 @@ async def get_signal_data(symbol):
     try:
         okx_symbol = f"{symbol[:-4]}/USDT:USDT" if symbol.endswith('USDT') else symbol
         tf_data = await get_multi_tf_data(okx_symbol)
-        if not tf_data: return f"❌ Нет данных для {symbol}.", None
+        if not tf_data: return f"❌ Нет данных для {symbol}. Возможно, пара недоступна на OKX.", None
             
         tf_text = ""
         for tf, data in tf_data.items():
             tf_text += f"[{tf}] Цена: {data['price']:.6f}, RSI: {data['rsi']:.2f}, EMA20: {data['ema20']:.6f}, EMA50: {data['ema50']:.6f}, ATR: {data['atr']:.6f}\n"
 
         prompt = f"""
-        Проанализируй данные {symbol} на разных таймфреймах:
+        Проанализируй данные {symbol}:
         {tf_text}
         Выбери ОДИН доминирующий таймфрейм.
-        Верни СТРОГО JSON без лишнего текста:
-        {{"dominant_tf": "1h", "reason": "Краткое обоснование на русском (1-2 предложения)."}}
+        Верни СТРОГО JSON: {{"dominant_tf": "1h", "reason": "Краткое обоснование (1 предложение)."}}
         """
+        
         raw_text = await fetch_analysis(prompt)
-        if raw_text.startswith("ERROR:"): return f"⚠️ Ошибка: {raw_text}", None
+        if raw_text == "ERROR": return "⚠️ Ошибка: API перегружены. Подождите 10 секунд.", None
 
         try:
             clean = raw_text.replace('```json', '').replace('```', '').strip()
             ai_data = json.loads(clean)
-        except Exception: return "⚠️ Ошибка парсинга данных.", None
+        except Exception: return "⚠️ Ошибка парсинга.", None
 
         dominant_tf = ai_data.get("dominant_tf", "4h")
         reason = ai_data.get("reason", "Анализ завершен.")
@@ -293,7 +285,6 @@ async def get_signal_data(symbol):
         recent_low = tf_info['recent_low']
         recent_high = tf_info['recent_high']
 
-        # --- ПОЛУЧАЕМ ТОЧНУЮ ВЕРОЯТНОСТЬ ИЗ МАТЕМАТИКИ ---
         long_prob, short_prob = calc_exact_probability(df)
 
         if long_prob > 50:
@@ -349,20 +340,13 @@ async def news_watcher():
                 latest_news = feed.entries[0]
                 if latest_news.link != last_news_link:
                     last_news_link = latest_news.link
-                    prompt = f"Напиши пост для Telegram на русском по новости: {latest_news.title}. Описание: {getattr(latest_news, 'summary', '')}. Укажи влияние на рынок и 2-3 затронутые монеты. В конце добавь 💰ВРЕМЯ ТОРГОВАТЬ💸."
+                    prompt = f"Напиши пост для Telegram на русском по новости: {latest_news.title}. Описание: {getattr(latest_news, 'summary', '')}. Укажи влияние и 2-3 монеты. В конце добавь 💰ВРЕМЯ ТОРГОВАТЬ💸."
                     ai_text = await fetch_analysis(prompt)
-                    final_text = f"{ai_text}\n\n🔗 <a href='{latest_news.link}'>Источник</a>"
-                    image_url = latest_news.media_content[0]['url'] if hasattr(latest_news, 'media_content') else None
-                    
-                    for chat_id in list(active_chats):
-                        try:
-                            if image_url:
-                                img_resp = await asyncio.to_thread(requests.get, image_url, timeout=15)
-                                if img_resp.status_code == 200:
-                                    await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(img_resp.content, filename="news.jpg"), caption=final_text, parse_mode='HTML')
-                                else: await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML')
-                            else: await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML')
-                        except Exception: pass
+                    if ai_text != "ERROR":
+                        final_text = f"{ai_text}\n\n🔗 <a href='{latest_news.link}'>Источник</a>"
+                        for chat_id in list(active_chats):
+                            try: await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML')
+                            except Exception: pass
         except Exception: pass
         await asyncio.sleep(900)
 
@@ -379,13 +363,22 @@ async def handle_news_command(message: types.Message):
 
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
+    global last_request_time
     data = callback_query.data
+    
     if data == "ignore": await callback_query.answer(); return
     if data.startswith("page_"):
         page = int(data.split("_")[1])
         await callback_query.message.edit_reply_markup(reply_markup=get_coins_keyboard(page))
         await callback_query.answer()
         return
+        
+    # ЗАЩИТА ОТ СПАМА (кулдаун 5 секунд)
+    now = time.time()
+    if now - last_request_time < 5:
+        await callback_query.answer("⏳ Подождите 5 секунд, API перегружен запросами.", show_alert=True)
+        return
+    last_request_time = now
         
     await callback_query.answer()
     symbol = data
