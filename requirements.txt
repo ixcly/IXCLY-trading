@@ -1,0 +1,7 @@
+aiogram
+ccxt
+pandas
+pandas_ta
+feedparser
+requests
+flask
