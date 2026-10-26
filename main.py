@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v3.1
-- Мгновенная рассылка из второго (админского) бота
+IXCLY Trading bot v3.2
+- Безопасная рассылка из второго (админского) бота (через скачивание медиа)
 - Новости: строгий перевод на русский
 - Свечи: Binance, MEXC, Gate, KuCoin, OKX, Bybit + CryptoCompare
 """
@@ -54,7 +54,7 @@ def clean_key(key):
     return key.strip().strip('"').strip("'")
 
 BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
-INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN")) # Токен для админ-бота
+INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
@@ -71,9 +71,12 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация админ-бота
-input_bot = Bot(token=INPUT_BOT_TOKEN) if INPUT_BOT_TOKEN else None
-input_dp = Dispatcher() if INPUT_BOT_TOKEN else None
+# Инициализация админ-бота (только если токен задан и не совпадает с основным)
+input_bot = None
+input_dp = None
+if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
+    input_bot = Bot(token=INPUT_BOT_TOKEN)
+    input_dp = Dispatcher()
 
 http: aiohttp.ClientSession = None
 analysis_sem: asyncio.Semaphore = None
@@ -1000,21 +1003,29 @@ if input_dp:
 
     @input_dp.message()
     async def handle_broadcast(message: types.Message):
-        # Игнорируем команды
         if message.text and message.text.startswith('/'):
             return
             
         status_msg = await message.answer("⏳ Начинаю мгновенную рассылку...")
         success = 0
         
-        # Копируем сообщение (с текстом, фото или видео) всем пользователям
+        # Скачиваем фото, если оно есть
+        photo_bytes = None
+        if message.photo:
+            try:
+                file_info = await input_bot.get_file(message.photo[-1].file_id)
+                file_data = await input_bot.download_file(file_info.file_path)
+                photo_bytes = file_data.read()
+            except Exception as e:
+                log.error(f"Ошибка скачивания фото: {e}")
+
         for chat_id in list(active_chats):
             try:
-                await bot.copy_message(
-                    chat_id=chat_id, 
-                    from_chat_id=message.chat.id, 
-                    message_id=message.message_id
-                )
+                if photo_bytes:
+                    await bot.send_photo(chat_id, photo=BufferedInputFile(photo_bytes, "photo.jpg"), caption=message.html_text, parse_mode="HTML")
+                elif message.text:
+                    await bot.send_message(chat_id, text=message.html_text, parse_mode="HTML")
+                
                 success += 1
                 await asyncio.sleep(0.05) # Задержка от бана Telegram
             except Exception as e:
