@@ -350,7 +350,13 @@ async def news_watcher():
                     for chat_id in list(active_chats):
                         try:
                             if image_url:
-                                await bot.send_photo(chat_id=chat_id, photo=image_url, caption=final_text, parse_mode='HTML')
+                                # Скачиваем картинку, чтобы отправить оригинал без обрезки
+                                img_resp = await asyncio.to_thread(requests.get, image_url, timeout=15)
+                                if img_resp.status_code == 200:
+                                    photo_file = BufferedInputFile(img_resp.content, filename="news.jpg")
+                                    await bot.send_photo(chat_id=chat_id, photo=photo_file, caption=final_text, parse_mode='HTML')
+                                else:
+                                    await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML', disable_web_page_preview=False)
                             else:
                                 await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML', disable_web_page_preview=False)
                         except Exception as e:
@@ -364,7 +370,6 @@ async def news_watcher():
 @dp.message(Command('start', 'menu'))
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
-    # Убираем нижнюю клавиатуру, если она осталась с прошлых версий
     await message.answer("👋 Главное меню активировано. Выбери монету для анализа:", reply_markup=ReplyKeyboardRemove())
     await message.answer("👇 Нажми на кнопку ниже:", reply_markup=get_coins_keyboard())
 
@@ -393,7 +398,13 @@ async def handle_news_command(message: types.Message):
             
             await msg.delete()
             if image_url:
-                await message.answer_photo(photo=image_url, caption=final_text, parse_mode='HTML')
+                # Скачиваем картинку, чтобы отправить оригинал без обрезки
+                img_resp = await asyncio.to_thread(requests.get, image_url, timeout=15)
+                if img_resp.status_code == 200:
+                    photo_file = BufferedInputFile(img_resp.content, filename="news.jpg")
+                    await message.answer_photo(photo=photo_file, caption=final_text, parse_mode='HTML')
+                else:
+                    await message.answer(final_text, parse_mode='HTML', disable_web_page_preview=False)
             else:
                 await message.answer(final_text, parse_mode='HTML', disable_web_page_preview=False)
         else:
@@ -426,8 +437,6 @@ async def main():
     keep_alive()
     print("Бот запущен...")
     
-    # Устанавливаем нативное меню команд в Telegram
-    # "menu" будет стоять выше, так как добавлена первой
     await bot.set_my_commands([
         types.BotCommand(command="menu", description="🚀 Открыть меню"),
         types.BotCommand(command="news", description="📰 Последние новости")
