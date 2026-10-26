@@ -139,7 +139,7 @@ def calc_atr(df, length=14):
     return true_range.rolling(length).mean()
 # ---------------------------------------------------------
 
-# --- НОВЫЕ ИКОНКИ ДЛЯ МОНЕТ ---
+# --- ИКОНКИ ДЛЯ МОНЕТ ---
 def get_coins_keyboard():
     buttons = [
         [InlineKeyboardButton(text="👑 BTC", callback_data="BTCUSDT"), InlineKeyboardButton(text="💎 ETH", callback_data="ETHUSDT")],
@@ -171,7 +171,7 @@ async def animate_loading(message: types.Message):
 # --- ЗАПРОС К API С АВТОМАТИЧЕСКОЙ РОТАЦИЕЙ КЛЮЧЕЙ ---
 async def fetch_analysis(prompt):
     if not GEMINI_API_KEYS:
-        return "ERROR: Нет доступных API-ключей. Добавьте GEMINI_API_KEYS на Render."
+        return "ERROR: Нет доступных API-ключей."
     
     model_name = "gemini-3.8-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
@@ -215,7 +215,7 @@ async def analyze_news(title, summary):
     """
     result = await fetch_analysis(prompt)
     if result == "QUOTA_EXCEEDED_ALL":
-        return "⚠️ Лимиты исчерпаны на всех доступных ключах. Добавьте новые ключи в GEMINI_API_KEYS."
+        return "Ошибка Лимита"
     if result.startswith("ERROR:"):
         return f"📰 {title}\n\n(Не удалось получить разбор новости)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
     return result
@@ -272,7 +272,7 @@ async def get_signal_data(symbol):
         raw_text = await fetch_analysis(prompt)
         
         if raw_text == "QUOTA_EXCEEDED_ALL":
-            return "⚠️ <b>Лимиты исчерпаны на всех ключах.</b>\n\nДобавьте новые ключи в переменную GEMINI_API_KEYS на Render.", None
+            return "Ошибка Лимита", None
             
         if raw_text.startswith("ERROR:"):
             return f"⚠️ Ошибка получения данных: {raw_text}", None
