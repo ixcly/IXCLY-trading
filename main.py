@@ -8,6 +8,7 @@ import json
 import requests
 import io
 import time
+from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -33,17 +34,18 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+ADMIN_ID = os.getenv('ADMIN_ID') # Твой ID для уведомлений
 
 # --- ПОДКЛЮЧАЕМ ТОП-10 БИРЖ ---
 exchange_list = [
     {'name': 'OKX', 'ex': ccxt.okx({'options': {'defaultType': 'swap'}})},
     {'name': 'Bybit', 'ex': ccxt.bybit({'options': {'defaultType': 'swap'}})},
     {'name': 'Binance', 'ex': ccxt.binance({'options': {'defaultType': 'swap'}})},
-    {'name': 'Gate.io', 'ex': ccxt.gate({'options': {'defaultType': 'swap'}})}, # ИСПРАВЛЕНО: gate вместо gateio
+    {'name': 'Gate.io', 'ex': ccxt.gate({'options': {'defaultType': 'swap'}})},
     {'name': 'Bitget', 'ex': ccxt.bitget({'options': {'defaultType': 'swap'}})},
     {'name': 'KuCoin', 'ex': ccxt.kucoinfutures({'options': {'defaultType': 'swap'}})},
     {'name': 'MEXC', 'ex': ccxt.mexc({'options': {'defaultType': 'swap'}})},
-    {'name': 'HTX', 'ex': ccxt.huobi({'options': {'defaultType': 'swap'}})},
+    {'name': 'HTX', 'ex': ccxt.htx({'options': {'defaultType': 'swap'}})}, # ИСПРАВЛЕНО: htx вместо huobi
     {'name': 'Phemex', 'ex': ccxt.phemex({'options': {'defaultType': 'swap'}})},
     {'name': 'BingX', 'ex': ccxt.bingx({'options': {'defaultType': 'swap'}})}
 ]
@@ -62,6 +64,32 @@ POPULAR_COINS = [
     "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
     "GALA", "PEPE", "WIF", "BONK", "ORDI", "JUP", "TIA", "SEI"
 ]
+
+USERS_FILE = 'users.json'
+
+# --- СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЕЙ ---
+def save_user_data(user_id, username, first_name):
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            users = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        users = {}
+
+    user_id_str = str(user_id)
+    is_new = False
+    
+    if user_id_str not in users:
+        is_new = True
+        users[user_id_str] = {
+            "username": username,
+            "first_name": first_name,
+            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(users, f, ensure_ascii=False, indent=4)
+            
+    return is_new
+# ---------------------------------------------------------
 
 def get_coins_keyboard(page=0):
     per_page = 12
@@ -410,6 +438,14 @@ async def news_watcher():
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
     waiting_for_search.discard(message.chat.id)
+    
+    # Сохраняем пользователя и уведомляем админа
+    is_new = save_user_data(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    if is_new and ADMIN_ID:
+        try:
+            await bot.send_message(int(ADMIN_ID), f"👤 <b>Новый пользователь!</b>\n\nID: <code>{message.from_user.id}</code>\nИмя: {message.from_user.first_name}\nЮзернейм: @{message.from_user.username if message.from_user.username else 'нет'}")
+        except Exception: pass
+        
     await message.answer("👋 Выбери монету из списка или нажми «🔍 Поиск монеты»:", reply_markup=get_coins_keyboard(0))
 
 @dp.message(Command('news'))
