@@ -36,7 +36,7 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 ADMIN_ID = os.getenv('ADMIN_ID') 
 
-# --- ТОЛЬКО САМЫЕ НАДЕЖНЫЕ БИРЖИ ---
+# --- БИРЖИ ---
 ex_opts = {'defaultType': 'swap', 'timeout': 7000}
 exchange_list = [
     {'name': 'OKX', 'ex': ccxt.okx(ex_opts)},
@@ -213,18 +213,17 @@ async def animate_loading(message: types.Message, symbol_name="Монета"):
             await asyncio.sleep(1.5)
             await message.edit_text(phrases[i % len(phrases)])
             i += 1
-    except asyncio.CancelledError:
-        pass
+    except asyncio.CancelledError: pass
     except Exception: pass
 
-# --- API ЗАПРОСЫ С ЖЕСТКИМ ТАЙМАУТОМ ---
+# --- API ЗАПРОСЫ ---
 async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_headers=None):
     if not api_key: return None
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers: headers.update(extra_headers)
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     try:
-        response = await asyncio.to_thread(requests.post, f"{base_url}/chat/completions", headers=headers, json=payload, timeout=(5, 10))
+        response = await asyncio.to_thread(requests.post, f"{base_url}/chat/completions", headers=headers, json=payload, timeout=(10, 20))
         res_data = response.json()
         if 'error' in res_data or 'choices' not in res_data: return None
         return res_data['choices'][0]['message']['content']
@@ -237,26 +236,28 @@ async def fetch_gemini(prompt):
     for key in GEMINI_API_KEYS:
         headers['x-goog-api-key'] = key
         try:
-            res = await asyncio.to_thread(requests.post, "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent", headers=headers, json=payload, timeout=(5, 10))
+            res = await asyncio.to_thread(requests.post, "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent", headers=headers, json=payload, timeout=(10, 20))
             res_data = res.json()
             if 'error' in res_data: continue 
             return res_data['candidates'][0]['content']['parts'][0]['text']
         except Exception: continue
     return None
 
-async def fetch_analysis(prompt):
+async def fetch_analysis(prompt, is_news=False):
+    # Для новостей таймаут больше (15 сек), для сигналов меньше (5 сек)
+    timeout_val = 15.0 if is_news else 5.0
     try:
-        result = await asyncio.wait_for(fetch_gemini(prompt), timeout=4.0)
+        result = await asyncio.wait_for(fetch_gemini(prompt), timeout=timeout_val)
         if result: return result
     except asyncio.TimeoutError: pass
         
     try:
-        result = await asyncio.wait_for(fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.1-8b-instant"), timeout=4.0)
+        result = await asyncio.wait_for(fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.1-8b-instant"), timeout=timeout_val)
         if result: return result
     except asyncio.TimeoutError: pass
         
     try:
-        result = await asyncio.wait_for(fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3.1-8b-instruct:free", {"HTTP-Referer": "https://t.me/bot", "X-Title": "Bot"}), timeout=4.0)
+        result = await asyncio.wait_for(fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3.1-8b-instruct:free", {"HTTP-Referer": "https://t.me/bot", "X-Title": "Bot"}), timeout=timeout_val)
         if result: return result
     except asyncio.TimeoutError: pass
         
@@ -268,7 +269,6 @@ async def check_exchange(ex_name, ex_instance, base_coin):
         try:
             tf_data = {}
             for tf in ['15m', '1h', '4h', '1d']:
-                # Убрали fetch_ticker, сразу запрашиваем свечи. Timeout увеличен до 6 сек.
                 ohlcv = await asyncio.wait_for(asyncio.to_thread(ex_instance.fetch_ohlcv, symbol, tf, limit=100), timeout=6.0)
                 if not ohlcv: raise Exception("No data")
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -278,14 +278,9 @@ async def check_exchange(ex_name, ex_instance, base_coin):
                 df['atr'] = calc_atr(df, 14)
                 
                 tf_data[tf] = {
-                    'df': df, 
-                    'price': float(df['close'].iloc[-1]), 
-                    'ema20': float(df['ema20'].iloc[-1]),
-                    'ema50': float(df['ema50'].iloc[-1]), 
-                    'rsi': float(df['rsi'].iloc[-1]), 
-                    'atr': float(df['atr'].iloc[-1]),
-                    'recent_low': float(df['low'].iloc[-24:].min()), 
-                    'recent_high': float(df['high'].iloc[-24:].max())
+                    'df': df, 'price': float(df['close'].iloc[-1]), 'ema20': float(df['ema20'].iloc[-1]),
+                    'ema50': float(df['ema50'].iloc[-1]), 'rsi': float(df['rsi'].iloc[-1]), 'atr': float(df['atr'].iloc[-1]),
+                    'recent_low': float(df['low'].iloc[-24:].min()), 'recent_high': float(df['high'].iloc[-24:].max())
                 }
             if tf_data: return tf_data, ex_name
         except Exception: continue
@@ -293,7 +288,6 @@ async def check_exchange(ex_name, ex_instance, base_coin):
 
 async def fetch_coingecko(base_coin):
     try:
-        # Таймаут CoinGecko увеличен до 10 секунд
         url = f"https://api.coingecko.com/api/v3/search?query={base_coin}"
         res = await asyncio.to_thread(requests.get, url, timeout=10)
         if res.status_code != 200: return None, None
@@ -321,17 +315,11 @@ async def fetch_coingecko(base_coin):
         
         last = df.iloc[-1]
         return {
-            'df': df, 
-            'price': float(last['close']), 
-            'ema20': float(last['ema20']), 
-            'ema50': float(last['ema50']), 
-            'rsi': float(last['rsi']), 
-            'atr': float(last['atr']), 
-            'recent_low': float(df['low'].iloc[-7:].min()), 
-            'recent_high': float(df['high'].iloc[-7:].max())
+            'df': df, 'price': float(last['close']), 'ema20': float(last['ema20']), 
+            'ema50': float(last['ema50']), 'rsi': float(last['rsi']), 'atr': float(last['atr']), 
+            'recent_low': float(df['low'].iloc[-7:].min()), 'recent_high': float(df['high'].iloc[-7:].max())
         }, 'CoinGecko'
-    except Exception: 
-        return None, None
+    except Exception: return None, None
 
 async def process_signal(chat_id, symbol):
     global last_request_time
@@ -362,17 +350,25 @@ async def process_signal(chat_id, symbol):
                 if cg_result and cg_result[0]:
                     tf_data, found_exchange = cg_result
                 else:
-                    raise ValueError(f"Монета {base_coin} не найдена на биржах и в CoinGecko.")
+                    raise ValueError(f"Монета {base_coin} не найдена.")
                 
             tf_text = "".join([f"[{tf}] RSI: {d['rsi']:.2f}, EMA20: {d['ema20']:.6f}, EMA50: {d['ema50']:.6f}, ATR: {d['atr']:.6f}\n" for tf, d in tf_data.items()])
 
+            # Получаем новости для контекста
+            feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
+            news_titles = "\n".join([entry.title for entry in feed.entries[:3]]) if feed.entries else "Нет свежих новостей."
+
             prompt = f"""
-            Проанализируй {base_coin}:
+            Проанализируй {base_coin} на основе индикаторов:
             {tf_text}
-            Верни СТРОГО JSON: {{"dominant_tf": "1h", "reason": "Краткое обоснование (1 предложение)."}}
+            
+            Последние мировые новости (учти их влияние):
+            {news_titles}
+            
+            Верни СТРОГО JSON: {{"dominant_tf": "1h", "reason": "Краткое обоснование на русском, учитывая новости (1-2 предложения)."}}
             """
             
-            raw_text = await fetch_analysis(prompt)
+            raw_text = await fetch_analysis(prompt, is_news=False)
             
             if raw_text == "ERROR":
                 dominant_tf = "4h" if "4h" in tf_data else "1d"
@@ -434,14 +430,13 @@ async def process_signal(chat_id, symbol):
                 f"├ SL1: <code>{sl1:.6f}</code>\n"
                 f"├ SL2: <code>{sl2:.6f}</code>\n"
                 f"└ SL3: <code>{sl3:.6f}</code>\n\n"
-                f"📰 <b>Обоснование:</b>\n<i>{reason}</i>\n\n"
+                f"📰 <b>Обоснование (с учетом новостей):</b>\n<i>{reason}</i>\n\n"
                 f"⚠️ <i>Не является финансовой рекомендацией!</i>"
             )
             
             image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, long_prob)
             return formatted_text, image_buf
 
-        # Общий таймаут на всё: 25 секунд (с запасом для медленного Render)
         formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=25.0)
         await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=formatted_text, parse_mode='HTML')
         
@@ -456,6 +451,50 @@ async def process_signal(chat_id, symbol):
         try: await loading_msg.delete()
         except Exception: pass
 
+# --- НОВОСТИ С ПОЛНЫМ ОБОСНОВАНИЕМ ---
+async def fetch_and_analyze_news():
+    try:
+        feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
+        if not feed.entries: return "❌ Свежих новостей пока нет."
+        
+        latest_news = feed.entries[0]
+        title = latest_news.title
+        summary = getattr(latest_news, 'summary', '')
+        link = latest_news.link
+        
+        prompt = f"""
+        Прочитай новость и напиши разбор для трейдера.
+        Заголовок: {title}
+        Описание: {summary}
+        
+        Напиши на русском:
+        1. 📌 Суть (что произошло).
+        2. 📉 Влияние на рынок (позитив/негатив).
+        3. 🧠 Обоснование (почему это важно для трейдеров).
+        4. 🎯 Затронутые монеты (выбери 2-3 монеты из списка: BTC, ETH, SOL, BNB, XRP, DOGE, TON и т.д.).
+        
+        В конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
+        """
+        
+        ai_text = await fetch_analysis(prompt, is_news=True)
+        
+        if ai_text == "ERROR":
+            # Если ИИ упал, выдаем хотя бы базовую инфу
+            ai_text = f"📌 {title}\n\nНе удалось получить полный разбор от ИИ. Ознакомьтесь с источником.\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
+            
+        final_text = f"{ai_text}\n\n🔗 <a href='{link}'>Читать источник</a>"
+        
+        image_url = None
+        if hasattr(latest_news, 'media_content'):
+            image_url = latest_news.media_content[0]['url']
+        elif hasattr(latest_news, 'enclosures') and latest_news.enclosures:
+            if 'image' in latest_news.enclosures[0].get('type', ''):
+                image_url = latest_news.enclosures[0].get('href')
+
+        return final_text, image_url
+    except Exception as e:
+        return f"⚠️ Ошибка при получении новостей: {e}", None
+
 async def news_watcher():
     global last_news_link
     await asyncio.sleep(10)
@@ -466,12 +505,19 @@ async def news_watcher():
                 latest_news = feed.entries[0]
                 if latest_news.link != last_news_link:
                     last_news_link = latest_news.link
-                    prompt = f"Напиши пост для Telegram на русском по новости: {latest_news.title}. Описание: {getattr(latest_news, 'summary', '')}. Укажи влияние и 2-3 монеты. В конце добавь 💰ВРЕМЯ ТОРГОВАТЬ💸."
-                    ai_text = await fetch_analysis(prompt)
-                    if ai_text != "ERROR":
-                        final_text = f"{ai_text}\n\n🔗 <a href='{latest_news.link}'>Источник</a>"
+                    
+                    final_text, image_url = await fetch_and_analyze_news()
+                    if not final_text.startswith("⚠️"):
                         for chat_id in list(active_chats):
-                            try: await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML')
+                            try: 
+                                if image_url:
+                                    img_resp = await asyncio.to_thread(requests.get, image_url, timeout=10)
+                                    if img_resp.status_code == 200:
+                                        await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(img_resp.content, filename="news.jpg"), caption=final_text, parse_mode='HTML')
+                                    else:
+                                        await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML')
+                                else:
+                                    await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML')
                             except Exception: pass
         except Exception: pass
         await asyncio.sleep(900)
@@ -493,7 +539,21 @@ async def start_handler(message: types.Message):
 @dp.message(Command('news'))
 async def handle_news_command(message: types.Message):
     active_chats.add(message.chat.id)
-    await message.answer("⏳ Запрашиваем последнюю новость...")
+    loading_msg = await message.answer("⏳ Запрашиваем и анализируем последнюю новость...")
+    
+    final_text, image_url = await fetch_and_analyze_news()
+    
+    try: await loading_msg.delete()
+    except Exception: pass
+    
+    if image_url:
+        img_resp = await asyncio.to_thread(requests.get, image_url, timeout=10)
+        if img_resp.status_code == 200:
+            await message.answer_photo(photo=BufferedInputFile(img_resp.content, filename="news.jpg"), caption=final_text, parse_mode='HTML')
+        else:
+            await message.answer(final_text, parse_mode='HTML')
+    else:
+        await message.answer(final_text, parse_mode='HTML')
 
 @dp.message(F.text)
 async def handle_search_text(message: types.Message):
