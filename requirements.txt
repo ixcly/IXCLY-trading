@@ -5,3 +5,4 @@ pandas
 feedparser
 requests
 flask
+pillow
