@@ -764,7 +764,7 @@ def local_verdict(tf_data, news_text):
     label = NEWS_LABEL[ns][1]
     return {
         "dominant_tf": tf,
-        "reason": f"{local_reason(tf, d)} Новостной фон: {label}.",
+        "reason": local_reason(tf, d),
         "entry_status": "ENTER" if enter else "WAIT",
         "entry_reason": entry_reason,
         "news": ns,
@@ -1044,6 +1044,18 @@ def calc_levels(info, is_long):
     return entry, tps, sls
 
 
+def shorten(text, n):
+    """Обрезает по границе предложения/слова, без обрывов на полуслове."""
+    text = " ".join(str(text).split())
+    if len(text) <= n:
+        return text
+    cut = text[:n]
+    m = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if m >= n * 0.5:
+        return cut[:m + 1]
+    return cut.rsplit(" ", 1)[0].rstrip(",;:-— ") + "…"
+
+
 def strength_label(p):
     if p >= 70:
         return "сильный сигнал"
@@ -1095,7 +1107,7 @@ async def build_signal(coin, status, force=False):
 3. Оцени волатильность и согласованность таймфреймов. Флэт, хаос, расхождение ТФ или новости против тренда -> "WAIT". Чёткий тренд на большинстве ТФ, нормальная волатильность и новости не против -> "ENTER".
 
 Верни СТРОГО JSON без markdown:
-{{"dominant_tf": "4h", "reason": "Обоснование на русском, 1-2 предложения, с учётом новостей", "news_sentiment": "BULLISH или BEARISH или NEUTRAL", "entry_status": "ENTER или WAIT", "entry_reason": "Конкретный вывод по монете на русском, 1 предложение"}}"""
+{{"dominant_tf": "4h", "reason": "Простое обоснование на русском, максимум 150 символов, без перечисления индикаторов и цифр", "news_sentiment": "BULLISH или BEARISH или NEUTRAL", "entry_status": "ENTER или WAIT", "entry_reason": "Конкретный вывод на русском, одно короткое предложение, максимум 90 символов"}}"""
 
     await status("🧠 Формирую вывод...")
     raw, engine = await ask_ai_named(prompt, json_mode=True, validate=lambda t: parse_ai_json(t) is not None)
@@ -1117,39 +1129,48 @@ async def build_signal(coin, status, force=False):
         entry_reason = local["entry_reason"]
         ns = local["news"]
 
-    reason = reason[:350]
-    entry_reason = entry_reason[:160]
+    reason = shorten(reason, 180)
+    entry_reason = shorten(entry_reason, 100)
 
     info = tf_data[tf]
     long_prob, short_prob = calc_probability(info["df"])
     is_long = long_prob >= 50
     entry, tps, sls = calc_levels(info, is_long)
 
-    direction = "🟢 LONG" if is_long else "🔴 SHORT"
-    multi = " | ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
-    status_emoji = "✅" if entry_status == "ENTER" else "⏳"
+    direction = "🟢 <b>LONG</b>" if is_long else "🔴 <b>SHORT</b>"
+    green_n = max(0, min(10, round(long_prob / 10)))
+    bar = "🟩" * green_n + "🟥" * (10 - green_n)
+    multi = "  ·  ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
     n_emoji, n_label = NEWS_LABEL[ns]
+    tag = ENGINE_TAG.get(engine, "l")
+
+    if entry_status == "ENTER":
+        head, lv = "✅ <b>ВХОДИТЬ</b>", ""
+    else:
+        head, lv = "⏳ <b>ЖДАТЬ</b>", " <i>(если войти)</i>"
+
+    def pct(p):
+        return f"{(p - entry) / entry * 100:+.1f}%"
+
+    tp_lines = "\n".join(f"TP{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(tps))
+    sl_lines = "\n".join(f"SL{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls))
 
     text = (
-        f"<b>📊 {coin}/USDT</b> · {tf}\n"
+        f"📊 <b>{coin}/USDT</b> · {tf}\n"
         f"<i>Данные: {source}</i>\n\n"
-        f"{status_emoji} <b>Рекомендация: {entry_status}</b>\n"
-        f"<i>{html.escape(entry_reason)}</i>\n"
-        f"🌍 Новостной фон: {n_emoji} {n_label}\n\n"
-        f"🎯 <b>Направление:</b> {direction} ({strength_label(max(long_prob, short_prob))})\n"
-        f"Лонг: <b>{long_prob}%</b> · Шорт: <b>{short_prob}%</b>\n"
-        f"<i>Шанс лонга по ТФ: {multi}</i>\n\n"
-        f"💵 Вход: <code>{fmt(entry)}</code>\n\n"
-        f"🚀 <b>Цели:</b>\n"
-        f"├ TP1: <code>{fmt(tps[0])}</code>\n"
-        f"├ TP2: <code>{fmt(tps[1])}</code>\n"
-        f"└ TP3: <code>{fmt(tps[2])}</code>\n\n"
-        f"🛑 <b>Стопы:</b>\n"
-        f"├ SL1: <code>{fmt(sls[0])}</code>\n"
-        f"├ SL2: <code>{fmt(sls[1])}</code>\n"
-        f"└ SL3: <code>{fmt(sls[2])}</code>\n\n"
-        f"📰 <i>{html.escape(reason)}</i>\n\n"
-        f"⚠️ <i>Не является финансовой рекомендацией!</i> {ENGINE_TAG.get(engine, 'l')}"
+        f"{head}\n"
+        f"<i>{html.escape(entry_reason)}</i>\n\n"
+        f"{direction} · {strength_label(max(long_prob, short_prob))}\n"
+        f"{bar}\n"
+        f"Лонг <b>{long_prob:.0f}%</b>  ·  Шорт <b>{short_prob:.0f}%</b>\n\n"
+        f"🕐 <b>По таймфреймам</b> <i>(шанс лонга)</i>\n"
+        f"{multi}\n\n"
+        f"💵 <b>Вход</b> · <code>{fmt(entry)}</code>\n\n"
+        f"🎯 <b>Цели</b>{lv}\n{tp_lines}\n\n"
+        f"🛑 <b>Стопы</b>\n{sl_lines}\n\n"
+        f"🌍 Новости: {n_emoji} {n_label}\n\n"
+        f"💬 {html.escape(reason)}\n\n"
+        f"⚠️ <i>Не является финансовой рекомендацией</i> {tag}"
     )
     png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls,
                                   tf, long_prob, source, entry_status)
