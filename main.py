@@ -40,17 +40,18 @@ dp = Dispatcher()
 active_chats = set()
 last_news_link = None
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ (НОВЫЙ ДИЗАЙН) ---
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ (ИСПРАВЛЕНЫ РАЗМЕРЫ И ТРЕНД) ---
 def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, tf, long_prob):
-    # Палитра TradingView Dark
+    # Увеличиваем высоту до 1000, чтобы всё влезло
+    width, height = 800, 1000
     bg_color = '#131722'
     grid_color = '#2a2e39'
     text_white = '#D1D4DC'
     text_gray = '#787B86'
-    color_green = '#089981' # Приятный изумрудный
-    color_red = '#F23645'   # Приятный коралловый
+    color_green = '#089981'
+    color_red = '#F23645'
     
-    img = Image.new('RGB', (800, 800), color=bg_color)
+    img = Image.new('RGB', (width, height), color=bg_color)
     draw = ImageDraw.Draw(img)
     
     try:
@@ -63,64 +64,67 @@ def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3,
 
     main_color = color_green if "LONG" in direction else color_red
 
-    # Рисуем сетку на фоне
-    for i in range(0, 800, 80):
-        draw.line([(i, 0), (i, 800)], fill=grid_color, width=1)
-        draw.line([(0, i), (800, i)], fill=grid_color, width=1)
+    # Рисуем сетку
+    for i in range(0, width, 80):
+        draw.line([(i, 0), (i, height)], fill=grid_color, width=1)
+    for i in range(0, height, 80):
+        draw.line([(0, i), (width, i)], fill=grid_color, width=1)
 
-    # Верхний блок с текстом
+    # Шапка
     draw.text((40, 40), "ixcly trade", font=font_logo, fill=text_white)
     draw.text((40, 110), f"{symbol}", font=font_title, fill=text_white)
     
-    # Бейдж направления
     dir_text = "LONG" if "LONG" in direction else "SHORT"
     draw.text((500, 125), dir_text, font=font_title, fill=main_color)
     
     draw.text((40, 190), f"TF: {tf}  |  Вероятность: {long_prob}%", font=font_text, fill=text_gray)
 
-    # --- ГРАФИК (Аккуратные свечи) ---
-    chart_top = 260
-    chart_bottom = 420
+    # --- ГРАФИК (С ТРЕНДОМ) ---
+    chart_top = 240
+    chart_bottom = 450
     chart_height = chart_bottom - chart_top
+    mid_y = chart_top + chart_height // 2
     
-    # Рисуем 25 свечей
+    current_y = mid_y
+    # Если шорт, тренд идет вниз (прибавляем к Y), если лонг - вверх (отнимаем)
+    trend_step = 4 if "SHORT" in direction else -4
+
     for i in range(25):
         x = 40 + i * 28
-        # Случайная генерация движения
-        body_height = np.random.randint(10, 40)
-        wick_height = body_height + np.random.randint(10, 30)
         
-        # Определяем позицию (чтобы не вылезало за рамки)
-        center_y = chart_top + chart_height // 2 + np.random.randint(-50, 50)
+        # Добавляем случайный шум к тренду
+        current_y += trend_step + np.random.randint(-15, 15)
+        # Ограничиваем, чтобы свечи не вылетали за рамки графика
+        current_y = max(chart_top + 30, min(chart_bottom - 30, current_y))
         
-        # Цвет свечи (чередуем для реализма)
-        candle_color = color_green if np.random.rand() > 0.5 else color_red
+        body_height = np.random.randint(10, 35)
+        wick_height = body_height + np.random.randint(10, 25)
         
-        # Тень (фитиль)
-        draw.line([(x + 6, center_y - wick_height//2), (x + 6, center_y + wick_height//2)], fill=candle_color, width=2)
+        # Цвет свечи чередуем для реалистичности
+        candle_color = color_green if np.random.rand() > 0.4 else color_red
+        
+        # Тень
+        draw.line([(x + 6, current_y - wick_height//2), (x + 6, current_y + wick_height//2)], fill=candle_color, width=2)
         # Тело
-        draw.rectangle([x, center_y - body_height//2, x + 12, center_y + body_height//2], fill=candle_color)
+        draw.rectangle([x, current_y - body_height//2, x + 12, current_y + body_height//2], fill=candle_color)
 
-    # --- УРОВНИ (Точки входа, TP, SL) ---
-    y_offset = 480
+    # --- УРОВНИ (УВЕЛИЧЕНЫ ОТСТУПЫ) ---
+    y_offset = 520
     
-    # Точка входа
     draw.text((40, y_offset), "Цена входа:", font=font_text, fill=text_gray)
     draw.text((250, y_offset-5), f"{entry:.4f}", font=font_bold, fill=text_white)
     
-    # Тейк-профиты
-    y_offset += 70
+    y_offset += 80
     draw.text((40, y_offset), "Take Profit:", font=font_text, fill=text_gray)
     draw.text((250, y_offset), f"TP1: {tp1:.4f}", font=font_bold, fill=color_green)
-    draw.text((250, y_offset+40), f"TP2: {tp2:.4f}", font=font_bold, fill=color_green)
-    draw.text((250, y_offset+80), f"TP3: {tp3:.4f}", font=font_bold, fill=color_green)
+    draw.text((250, y_offset+45), f"TP2: {tp2:.4f}", font=font_bold, fill=color_green)
+    draw.text((250, y_offset+90), f"TP3: {tp3:.4f}", font=font_bold, fill=color_green)
     
-    # Стоп-лоссы
-    y_offset += 160
+    y_offset += 170
     draw.text((40, y_offset), "Stop Loss:", font=font_text, fill=text_gray)
     draw.text((250, y_offset), f"SL1: {sl1:.4f}", font=font_bold, fill=color_red)
-    draw.text((250, y_offset+40), f"SL2: {sl2:.4f}", font=font_bold, fill=color_red)
-    draw.text((250, y_offset+80), f"SL3: {sl3:.4f}", font=font_bold, fill=color_red)
+    draw.text((250, y_offset+45), f"SL2: {sl2:.4f}", font=font_bold, fill=color_red)
+    draw.text((250, y_offset+90), f"SL3: {sl3:.4f}", font=font_bold, fill=color_red)
 
     buf = io.BytesIO()
     img.save(buf, format='PNG')
