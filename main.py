@@ -5,6 +5,7 @@ IXCLY Trading bot v2.9.1
 - Локальный движок работает ВСЕГДА (мульти-ТФ + волатильность + новостной сентимент) и даёт ENTER/WAIT
 - Мировые + крипто-новости идут в анализ каждой монеты
 - ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
+- ПАМЯТЬ НОВОСТЕЙ: проверка сбывшихся прогнозов по кнопке /news
 """
 import asyncio
 import html
@@ -120,15 +121,12 @@ TFS = ["15m", "1h", "4h", "1d"]
 TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 MIN_CANDLES = 25
 
-# --- ОБНОВЛЕННЫЙ СПИСОК: ТВОИ СТАРЫЕ 44 + 40 НОВЫХ МОНЕТ (ВСЕГО 84) ---
+# --- СПИСОК МОНЕТ (84 шт) ---
 POPULAR_COINS = [
-    # Твои изначальные монеты
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
     "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
     "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
     "GALA", "PEPE", "WIF", "BONK", "ORDI", "JUP", "TIA", "SEI",
-    
-    # + 40 НОВЫХ монет
     "TRX", "XLM", "ETC", "XMR", "AAVE", "ALGO", "EOS", "NEO", "IOTA", "ZEC", 
     "DASH", "COMP", "SNX", "CRV", "LDO", "ENS", "1INCH", "CAKE", "RUNE", "KSM", 
     "FLOW", "AXS", "CHZ", "BAT", "ENJ", "ZIL", "FTM", "KAVA", "EGLD", "ROSE", 
@@ -136,6 +134,7 @@ POPULAR_COINS = [
 ]
 
 USERS_FILE = "users.json"
+NEWS_HISTORY_FILE = "news_history.json"
 active_chats = set()
 busy_users = set()
 user_last_request = {}
@@ -144,11 +143,12 @@ notified_users = set()
 RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
+news_history = []
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "alerts_sent": 0, "started": time.time(), "engines": Counter()}
 bot_flags = {"news_enabled": True, "instant": True, "alerts_enabled": True}
 
 # ----------------------------------------------------------------------------
-# ПОЛЬЗОВАТЕЛИ
+# ПОЛЬЗОВАТЕЛИ И ПАМЯТЬ НОВОСТЕЙ
 # ----------------------------------------------------------------------------
 def _load_users():
     try:
@@ -222,6 +222,23 @@ def user_counts():
         except Exception:
             pass
     return len(users), active, new_today, new_week
+
+def _load_news_history():
+    global news_history
+    try:
+        with open(NEWS_HISTORY_FILE, "r", encoding="utf-8") as f:
+            news_history = json.load(f)
+    except Exception:
+        news_history = []
+
+def _save_news_history():
+    global news_history
+    try:
+        news_history = news_history[-100:] # Храним только последние 100 новостей, чтобы не раздувать файл
+        with open(NEWS_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(news_history, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        log.warning("news_history.json не сохранён: %s", e)
 
 # ----------------------------------------------------------------------------
 # КЛАВИАТУРЫ
@@ -520,6 +537,18 @@ async def get_market_data(coin):
         return res
     raise LookupError(coin)
 
+async def get_simple_price(coin):
+    """Быстрая проверка текущей цены монеты для отслеживания новостей."""
+    try:
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/price", params={"symbol": f"{coin}USDT"}, timeout=5)
+        return float(j["price"])
+    except Exception:
+        try:
+            j = await http_json("https://api.bybit.com/v5/market/tickers", params={"category": "spot", "symbol": f"{coin}USDT"}, timeout=5)
+            return float(j["result"]["list"][0]["lastPrice"])
+        except Exception:
+            return None
+
 # ----------------------------------------------------------------------------
 # ИИ
 # ----------------------------------------------------------------------------
@@ -726,7 +755,7 @@ def local_verdict(tf_data, news_text):
     return {"dominant_tf": tf, "reason": local_reason(tf, d), "entry_status": "ENTER" if enter else "WAIT", "entry_reason": entry_reason, "news": ns}
 
 # ----------------------------------------------------------------------------
-# НОВОСТИ
+# НОВОСТИ И ПРОВЕРКА ПРОГНОЗОВ
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml", "https://feeds.bbci.co.uk/news/world/rss.xml"]
@@ -784,6 +813,78 @@ async def download_bytes(url):
         pass
     return None
 
+async def track_news(title, summary):
+    """Сохраняет новость в память для отслеживания."""
+    coins = mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"]
+    ns = news_sentiment(f"{title}. {summary}")
+    if ns == 0: return # Нейтральные новости не отслеживаем
+    
+    prices = {}
+    for c in coins:
+        p = await get_simple_price(c)
+        if p: prices[c] = p
+
+    if not prices: return
+
+    # Проверяем, нет ли уже такой новости
+    for item in news_history:
+        if item.get("title") == title:
+            return
+
+    news_history.append({
+        "ts": time.time(),
+        "title": title,
+        "coins": coins,
+        "sentiment": ns,
+        "prices": prices,
+        "status": "pending"
+    })
+    _save_news_history()
+
+async def check_past_news():
+    """Проверяет, сбылись ли прогнозы по прошлым новостям."""
+    if not news_history: return ""
+    lines = []
+    changed = False
+    now = time.time()
+
+    for item in news_history:
+        if item.get("status") == "resolved": continue
+        age = now - item["ts"]
+        
+        # Если новости больше 3 дней, закрываем её без отчета
+        if age > 3 * 24 * 3600: 
+            item["status"] = "resolved"
+            changed = True
+            continue
+
+        results = []
+        resolved = True
+        for c, entry_price in item["prices"].items():
+            cur_p = await get_simple_price(c)
+            if not cur_p:
+                resolved = False
+                continue
+            diff = (cur_p - entry_price) / entry_price * 100
+            results.append(f"{c} {diff:+.1f}%")
+
+            # Условие: позитивная новость -> цена выросла >1.5%, негативная -> упала >1.5%
+            if item["sentiment"] == 1 and diff < 1.5: resolved = False
+            if item["sentiment"] == -1 and diff > -1.5: resolved = False
+
+        if resolved and results:
+            item["status"] = "resolved"
+            changed = True
+            side = "🟢 Рост" if item["sentiment"] == 1 else "🔴 Падение"
+            lines.append(f"✅ <b>ПРОГНОЗ СБЫЛСЯ!</b> {side}\n<i>{html.escape(item['title'][:60])}...</i>\n📈 {', '.join(results)}\n")
+
+    if changed:
+        _save_news_history()
+
+    if lines:
+        return "📊 <b>Отчет по прошлым новостям:</b>\n\n" + "\n".join(lines) + "➖➖➖➖➖➖➖➖\n\n"
+    return ""
+
 async def fetch_and_analyze_news():
     try:
         entries = await get_news_entries()
@@ -817,6 +918,10 @@ async def fetch_and_analyze_news():
 
         tag = ENGINE_TAG.get(news_engine if ai_text else "local", "l")
         text = f"{body}\n\n💰ВРЕМЯ ТОРГОВАТЬ💸\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">Читать источник</a> {tag}"
+        
+        # Запоминаем новость
+        await track_news(title, summary)
+        
         return text, extract_image(news), True
     except Exception as e:
         log.exception("news error")
@@ -844,10 +949,12 @@ async def news_watcher():
                 elif link != last_news_link:
                     last_news_link = link
                     if bot_flags["news_enabled"]:
+                        check_text = await check_past_news()
                         text, image_url, ok = await fetch_and_analyze_news()
                         if ok:
+                            full_text = check_text + text if check_text else text
                             img = await download_bytes(image_url) if image_url else None
-                            payload = {"kind": "photo" if img else "text", "text": text, "data": img, "filename": "news.jpg"}
+                            payload = {"kind": "photo" if img else "text", "text": full_text, "data": img, "filename": "news.jpg"}
                             sent, failed, removed = await broadcast(payload)
                             stats["news_sent"] += sent
                             log.info("Новость разослана: доставлено %d, ошибок %d, убрано %d", sent, failed, removed)
@@ -1217,7 +1324,6 @@ async def build_signal(coin, status, force=False, meta_out=None):
     is_long = long_prob >= 50
     entry, tps, sls = calc_levels(info, is_long)
 
-    # --- СОХРАНЕНИЕ ДАННЫХ ДЛЯ СКАНЕРА ---
     if meta_out is not None:
         meta_out["entry_status"] = entry_status
         meta_out["is_long"] = is_long
@@ -1323,11 +1429,19 @@ async def start_handler(message: types.Message):
 @dp.message(Command("news"))
 async def news_handler(message: types.Message):
     active_chats.add(message.chat.id)
-    loading = await message.answer("⏳ Запрашиваю и анализирую последнюю новость...")
+    loading = await message.answer("⏳ Запрашиваю новость и проверяю прошлые прогнозы...")
     try:
+        # Сначала проверяем, сбылись ли прошлые прогнозы
+        check_text = await check_past_news()
+        
+        # Затем получаем свежую новость
         text, image_url, _ = await fetch_and_analyze_news()
+        
+        # Объединяем тексты, если есть сбывшиеся прогнозы
+        full_text = check_text + text if check_text else text
+        
         img = await download_bytes(image_url) if image_url else None
-        await send_with_image(message.chat.id, text, img, "news.jpg")
+        await send_with_image(message.chat.id, full_text, img, "news.jpg")
     finally:
         try: await loading.delete()
         except Exception: pass
@@ -1673,12 +1787,14 @@ if input_dp:
             await _edit(cb, panel_text(), panel_kb())
         elif action == "news":
             await _edit(cb, "⏳ Готовлю последнюю новость...", None)
+            check_text = await check_past_news()
             text, image_url, ok = await fetch_and_analyze_news()
             if not ok:
-                await _edit(cb, f"{text}", back_kb())
+                await _edit(cb, f"{check_text}{text}", back_kb())
                 return
+            full_text = check_text + text if check_text else text
             img = await download_bytes(image_url) if image_url else None
-            payload = {"kind": "photo" if img else "text", "text": text, "data": img, "filename": "news.jpg"}
+            payload = {"kind": "photo" if img else "text", "text": full_text, "data": img, "filename": "news.jpg"}
             await run_broadcast(cb.message.chat.id, payload)
         elif action == "diag":
             await _edit(cb, "⏳ Проверяю источники и анализ (до 30 секунд)...", None)
@@ -1742,6 +1858,7 @@ async def main():
     http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.9)"})
     analysis_sem = asyncio.Semaphore(4)
     load_active_chats()
+    _load_news_history() # Загружаем память новостей
     log.info("Бот запущен...")
     background = []
     try:
