@@ -317,12 +317,18 @@ async def get_multi_tf_data(symbol):
             df['rsi'] = calc_rsi(df['close'], 14)
             df['atr'] = calc_atr(df, 14)
             
+            # Ищем локальные минимумы и максимумы за последние 24 свечи
+            recent_low = df['low'].iloc[-24:].min()
+            recent_high = df['high'].iloc[-24:].max()
+            
             data_summary[tf] = {
                 'price': df['close'].iloc[-1],
                 'ema20': df['ema20'].iloc[-1],
                 'ema50': df['ema50'].iloc[-1],
                 'rsi': df['rsi'].iloc[-1],
-                'atr': df['atr'].iloc[-1]
+                'atr': df['atr'].iloc[-1],
+                'recent_low': recent_low,
+                'recent_high': recent_high
             }
         except Exception as e:
             print(f"Ошибка при получении данных {tf}: {e}", flush=True)
@@ -373,15 +379,44 @@ async def get_signal_data(symbol):
         tf_info = tf_data[dominant_tf]
         entry = tf_info['price']
         atr = tf_info['atr']
+        recent_low = tf_info['recent_low']
+        recent_high = tf_info['recent_high']
 
+        # --- УЛУЧШЕННАЯ ЛОГИКА РАССТАНОВКИ УРОВНЕЙ ---
         if long_prob > short_prob:
             direction = "🟢 LONG"
-            sl1, sl2, sl3 = entry - (0.5 * atr), entry - (1.0 * atr), entry - (1.5 * atr)
-            tp1, tp2, tp3 = entry + (1.0 * atr), entry + (2.0 * atr), entry + (3.0 * atr)
+            
+            # SL1 ставим за локальный минимум, отступая 0.2 ATR для защиты от ложного пробоя
+            sl1 = recent_low - (0.2 * atr)
+            # SL2 и SL3 ставим на расстоянии 1.5 и 2.0 ATR от входа
+            sl2 = entry - (1.5 * atr)
+            sl3 = entry - (2.0 * atr)
+            
+            # Определяем риск как разницу между входом и SL1
+            risk = entry - sl1
+            
+            # TP ставим по системе Risk/Reward: 1:1, 1:2, 1:3
+            tp1 = entry + (1.0 * risk)
+            tp2 = entry + (2.0 * risk)
+            tp3 = entry + (3.0 * risk)
+            
         else:
             direction = "🔴 SHORT"
-            sl1, sl2, sl3 = entry + (0.5 * atr), entry + (1.0 * atr), entry + (1.5 * atr)
-            tp1, tp2, tp3 = entry - (1.0 * atr), entry - (2.0 * atr), entry - (3.0 * atr)
+            
+            # SL1 ставим за локальный максимум, отступая 0.2 ATR для защиты от ложного пробоя
+            sl1 = recent_high + (0.2 * atr)
+            # SL2 и SL3 ставим на расстоянии 1.5 и 2.0 ATR от входа
+            sl2 = entry + (1.5 * atr)
+            sl3 = entry + (2.0 * atr)
+            
+            # Определяем риск как разницу между SL1 и входом
+            risk = sl1 - entry
+            
+            # TP ставим по системе Risk/Reward: 1:1, 1:2, 1:3
+            tp1 = entry - (1.0 * risk)
+            tp2 = entry - (2.0 * risk)
+            tp3 = entry - (3.0 * risk)
+        # ------------------------------------------------
 
         formatted_text = (
             f"<b>📊 Анализ монеты: {symbol}</b>\n\n"
@@ -393,7 +428,7 @@ async def get_signal_data(symbol):
             f"├ TP2: <code>{tp2:.4f}</code>\n"
             f"└ TP3: <code>{tp3:.4f}</code>\n\n"
             f"🛑 <b>Стоп-лоссы (Stop Loss):</b>\n"
-            f"├ SL1: <code>{sl1:.4f}</code>\n"
+            f"├ SL1: <code>{sl1:.4f}</code> (За локальным уровнем)\n"
             f"├ SL2: <code>{sl2:.4f}</code>\n"
             f"└ SL3: <code>{sl3:.4f}</code>\n\n"
             f"📰 <b>Обоснование:</b>\n"
