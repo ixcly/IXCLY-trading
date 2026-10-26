@@ -35,6 +35,11 @@ exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Хранилище пользователей, которым нужно присылать новости
+active_chats = set()
+# Ссылка на последнюю отправленную новость, чтобы не спамить одинаковыми
+last_news_link = None
+
 # --- РУЧНОЙ РАСЧЕТ ИНДИКАТОРОВ ---
 def calc_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -63,10 +68,54 @@ def get_coins_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# --- ФОНОВАЯ ЗАДАЧА ДЛЯ НОВОСТЕЙ ---
+async def news_watcher():
+    global last_news_link
+    await asyncio.sleep(10) # Небольшая пауза при старте бота
+    
+    while True:
+        try:
+            # Загружаем новости в фоновом режиме
+            feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
+            if feed.entries:
+                latest_news = feed.entries[0] # Берем самую свежую новость
+                news_link = latest_news.link
+                news_title = latest_news.title
+                
+                # Если это новая новость, которой мы еще не делились
+                if news_link != last_news_link:
+                    last_news_link = news_link
+                    
+                    # Ищем картинку (иногда она лежит в media_content, иногда в enclosures)
+                    image_url = None
+                    if hasattr(latest_news, 'media_content'):
+                        image_url = latest_news.media_content[0]['url']
+                    elif hasattr(latest_news, 'enclosures') and latest_news.enclosures:
+                        if 'image' in latest_news.enclosures[0].get('type', ''):
+                            image_url = latest_news.enclosures[0].get('href')
+                    
+                    text = f"📰 <b>Срочные новости:</b>\n\n{news_title}\n\n💰<b>ВРЕМЯ ТОРГОВАТЬ</b>💸\n\n🔗 <a href='{news_link}'>Читать полностью</a>"
+                    
+                    # Рассылаем всем, кто нажал /start
+                    for chat_id in list(active_chats):
+                        try:
+                            if image_url:
+                                await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode='HTML')
+                            else:
+                                await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', disable_web_page_preview=False)
+                        except Exception as e:
+                            print(f"Не удалось отправить новость в чат {chat_id}: {e}")
+                            
+        except Exception as e:
+            print(f"Ошибка при чтении новостей: {e}")
+            
+        # Ждем 15 минут (900 секунд) до следующей проверки
+        await asyncio.sleep(900)
+# ---------------------------------------------------------
+
 async def get_signal_data(symbol):
     okx_symbol = f"{symbol[:-4]}/USDT:USDT"
     try:
-        # Берем 100 свечей по 4 часа (среднесрочный тренд)
         ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, okx_symbol, '4h', limit=100)
         if not ohlcv:
             return f"❌ Нет данных по тикеру {okx_symbol}."
@@ -84,12 +133,10 @@ async def get_signal_data(symbol):
         current_rsi = df['rsi'].iloc[-1]
         current_atr = df['atr'].iloc[-1]
 
-        # Получаем новости
         news_feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
         news_titles = [entry.title for entry in news_feed.entries[:5]]
         news_text = "\n".join(news_titles) if news_titles else "Новостей нет."
 
-        # Промпт для среднесрочного анализа
         prompt = f"""
         Ты профессиональный среднесрочный трейдер (свинг-трейдер). Твоя задача — дать стабильный прогноз на 4-часовом таймфрейме (4H).
         Игнорируй краткосрочный рыночный шум и мелкие откаты. Оценивай общий тренд.
@@ -108,20 +155,14 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
         """
 
-        # --- ЗАЩИТА ОТ 503 (ПЕРЕГРУЗКА МОДЕЛИ) И FALLBACK ---
         models_to_try = [
-            "gemini-3.8-flash",          # Основная
-            "gemini-3.8-flash-medium",   # Средняя нагрузка
-            "gemini-3.5-flash"           # Запасная
+            "gemini-3.8-flash",
+            "gemini-3.8-flash-medium",
+            "gemini-3.5-flash"
         ]
 
-        # Настраиваем сессию с повторными попытками
         session = requests.Session()
-        retry_strategy = Retry(
-            total=2,  # По 2 повтора на каждую модель
-            backoff_factor=1.5, # Пауза между повторами (1.5с, 3с)
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
+        retry_strategy = Retry(total=2, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
@@ -131,60 +172,40 @@ async def get_signal_data(symbol):
 
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-            headers = {
-                'Content-Type': 'application/json',
-                'x-goog-api-key': GEMINI_API_KEY
-            }
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "thinkingConfig": {"thinkingLevel": "LOW"}
-                }
-            }
+            headers = {'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY}
+            payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
 
             try:
-                print(f"Пытаемся обратиться к модели: {model_name}")
-                response = await asyncio.to_thread(
-                    session.post, url, headers=headers, json=payload, timeout=(15, 90)
-                )
+                response = await asyncio.to_thread(session.post, url, headers=headers, json=payload, timeout=(15, 90))
                 res_data = response.json()
 
                 if 'error' in res_data and res_data['error'].get('code') == 503:
                     last_error_message = res_data['error'].get('message', 'Модель перегружена')
-                    print(f"Модель {model_name} перегружена (503). Пробуем следующую...")
                     continue
-
                 if 'error' in res_data:
                     last_error_message = res_data['error'].get('message', 'Неизвестная ошибка')
-                    print(f"Ошибка при запросе к {model_name}: {last_error_message}")
                     continue
-
                 break
-
             except requests.exceptions.Timeout:
-                last_error_message = "Таймаут ожидания ответа от нейросети (90 секунд)."
-                print(f"Таймаут при запросе к {model_name}.")
+                last_error_message = "Таймаут ожидания ответа (90 секунд)."
                 continue
             except Exception as e:
                 last_error_message = str(e)
-                print(f"Системная ошибка при запросе к {model_name}: {e}")
                 continue
 
         if res_data is None or 'error' in res_data:
-            return f"⚠️ Не удалось получить ответ от нейросети. Причина: {last_error_message}. Попробуйте позже."
+            return f"⚠️ Не удалось получить ответ. Причина: {last_error_message}. Попробуйте позже."
 
-        # --- ПАРСИНГ УСПЕШНОГО ОТВЕТА ---
         try:
             raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
         except (KeyError, IndexError):
             return "⚠️ Нейросеть вернула пустой ответ. Попробуйте позже。"
 
         clean_response = raw_text.replace('```json', '').replace('```', '').strip()
-
         try:
             ai_data = json.loads(clean_response)
         except json.JSONDecodeError:
-            return "⚠️ Нейросеть вернула некорректный формат. Попробуйте еще раз。"
+            return "⚠️ Нейросеть вернула некорректный формат."
 
         long_prob = ai_data.get("long_prob", 50)
         short_prob = ai_data.get("short_prob", 50)
@@ -220,18 +241,20 @@ async def get_signal_data(symbol):
 @dp.message(Command('start', 'menu'))
 @dp.message(F.text == "🚀 Открыть меню")
 async def start_handler(message: types.Message):
+    # Добавляем пользователя в список для рассылки новостей
+    active_chats.add(message.chat.id)
+    
     reply_kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="🚀 Открыть меню")]],
         resize_keyboard=True,
         is_persistent=True
     )
-    await message.answer("Привет! Нажми кнопку ниже, чтобы выбрать монету.", reply_markup=reply_kb)
+    await message.answer("Привет! Нажми кнопку ниже, чтобы выбрать монету.\nЯ также буду присылать тебе сюда важные мировые новости.", reply_markup=reply_kb)
     await message.answer("👋 Выбери монету для анализа:", reply_markup=get_coins_keyboard())
 
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
     symbol = callback_query.data
-    # ТЕКСТ ОЖИДАНИЯ ЗАМЕНЕН НА 1 МИНУТУ
     await callback_query.message.answer(f"⏳ Запрос {symbol}... Ожидайте около 1 минуты.")
     result = await get_signal_data(symbol)
     await callback_query.message.answer(result, parse_mode='HTML')
@@ -240,6 +263,10 @@ async def process_callback(callback_query: types.CallbackQuery):
 async def main():
     keep_alive()
     print("Бот запущен...")
+    
+    # Запускаем фоновую задачу по сбору новостей
+    asyncio.create_task(news_watcher())
+    
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
