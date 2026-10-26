@@ -6,6 +6,7 @@ IXCLY Trading bot v2.9.1
 - Мировые + крипто-новости идут в анализ каждой монеты
 - ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
 - ПАМЯТЬ НОВОСТЕЙ: проверка сбывшихся прогнозов по кнопке /news
+- ЕЖЕДНЕВНАЯ СТАТИСТИКА: в 00:00 МСК отчет по всем монетам
 """
 import asyncio
 import html
@@ -17,7 +18,7 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
 from urllib.parse import quote
 
@@ -234,7 +235,7 @@ def _load_news_history():
 def _save_news_history():
     global news_history
     try:
-        news_history = news_history[-100:] # Храним только последние 100 новостей, чтобы не раздувать файл
+        news_history = news_history[-100:]
         with open(NEWS_HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(news_history, f, ensure_ascii=False, indent=4)
     except Exception as e:
@@ -261,6 +262,9 @@ def get_coins_keyboard(page=0):
     if page < total_pages - 1:
         nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"p:{page + 1}"))
     buttons.append(nav)
+    
+    # Кнопка статистики
+    buttons.append([InlineKeyboardButton(text="📊 Статистика за 24 часа", callback_data="show_stats")])
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -538,7 +542,6 @@ async def get_market_data(coin):
     raise LookupError(coin)
 
 async def get_simple_price(coin):
-    """Быстрая проверка текущей цены монеты для отслеживания новостей."""
     try:
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/price", params={"symbol": f"{coin}USDT"}, timeout=5)
         return float(j["price"])
@@ -548,6 +551,77 @@ async def get_simple_price(coin):
             return float(j["result"]["list"][0]["lastPrice"])
         except Exception:
             return None
+
+# ----------------------------------------------------------------------------
+# ЕЖЕДНЕВНАЯ СТАТИСТИКА И ОТЧЕТ В 00:00 МСК
+# ----------------------------------------------------------------------------
+async def build_daily_stats():
+    """Собирает статистику за 24 часа по всем монетам и красиво оформляет."""
+    try:
+        # Получаем данные по всем парам разом (1 запрос вместо 84)
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
+        data = {item['symbol']: item for item in j}
+    except Exception as e:
+        return f"⚠️ Ошибка при получении статистики: {e}"
+    
+    gainers = []
+    losers = []
+    
+    for coin in POPULAR_COINS:
+        symbol = f"{coin}USDT"
+        if symbol in data:
+            item = data[symbol]
+            change = float(item['priceChangePercent'])
+            open_p = float(item['openPrice'])
+            last_p = float(item['lastPrice'])
+            
+            if change > 0:
+                gainers.append((coin, change, open_p, last_p))
+            else:
+                losers.append((coin, change, open_p, last_p))
+                
+    gainers.sort(key=lambda x: x[1], reverse=True)
+    losers.sort(key=lambda x: x[1]) # Самые сильные падения в начале
+    
+    text = "📊 <b>Статистика рынка за 24 часа</b>\n\n"
+    
+    if gainers:
+        text += "🟢 <b>ТОП РОСТА:</b>\n"
+        for c, ch, op, lp in gainers[:10]:
+            text += f"<code>{c}</code>  <b>+{ch:.1f}%</b>\n└ {fmt(op)} → {fmt(lp)}\n\n"
+            
+    if losers:
+        text += "🔴 <b>ТОП ПАДЕНИЯ:</b>\n"
+        for c, ch, op, lp in losers[:10]:
+            text += f"<code>{c}</code>  <b>{ch:.1f}%</b>\n└ {fmt(op)} → {fmt(lp)}\n\n"
+            
+    text += f"<i>Показаны Топ-10 роста и падения из {len(POPULAR_COINS)} монет.</i>"
+    return text
+
+async def daily_stats_loop():
+    """Фоновая задача: ждет 00:00 по МСК и рассылает статистику."""
+    await asyncio.sleep(10)
+    while True:
+        now_utc = datetime.utcnow()
+        # Москва это UTC+3
+        now_msk = now_utc + timedelta(hours=3)
+        next_run_msk = now_msk.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        sleep_seconds = (next_run_msk - now_msk).total_seconds()
+        
+        log.info(f"Следующая рассылка статистики через {sleep_seconds:.0f} секунд (в 00:00 МСК)")
+        await asyncio.sleep(sleep_seconds)
+        
+        try:
+            if active_chats:
+                log.info("Запуск ежедневной рассылки статистики...")
+                text = await build_daily_stats()
+                payload = {"kind": "text", "text": text}
+                sent, failed, removed = await broadcast(payload)
+                log.info(f"Ежедневная статистика разослана: {sent} доставлено, {failed} ошибок")
+        except Exception as e:
+            log.error(f"Ошибка при отправке ежедневной статистики: {e}")
+            
+        await asyncio.sleep(60) # Защита от двойного срабатывания
 
 # ----------------------------------------------------------------------------
 # ИИ
@@ -814,10 +888,9 @@ async def download_bytes(url):
     return None
 
 async def track_news(title, summary):
-    """Сохраняет новость в память для отслеживания."""
     coins = mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"]
     ns = news_sentiment(f"{title}. {summary}")
-    if ns == 0: return # Нейтральные новости не отслеживаем
+    if ns == 0: return 
     
     prices = {}
     for c in coins:
@@ -826,7 +899,6 @@ async def track_news(title, summary):
 
     if not prices: return
 
-    # Проверяем, нет ли уже такой новости
     for item in news_history:
         if item.get("title") == title:
             return
@@ -842,7 +914,6 @@ async def track_news(title, summary):
     _save_news_history()
 
 async def check_past_news():
-    """Проверяет, сбылись ли прогнозы по прошлым новостям."""
     if not news_history: return ""
     lines = []
     changed = False
@@ -852,7 +923,6 @@ async def check_past_news():
         if item.get("status") == "resolved": continue
         age = now - item["ts"]
         
-        # Если новости больше 3 дней, закрываем её без отчета
         if age > 3 * 24 * 3600: 
             item["status"] = "resolved"
             changed = True
@@ -868,7 +938,6 @@ async def check_past_news():
             diff = (cur_p - entry_price) / entry_price * 100
             results.append(f"{c} {diff:+.1f}%")
 
-            # Условие: позитивная новость -> цена выросла >1.5%, негативная -> упала >1.5%
             if item["sentiment"] == 1 and diff < 1.5: resolved = False
             if item["sentiment"] == -1 and diff > -1.5: resolved = False
 
@@ -919,7 +988,6 @@ async def fetch_and_analyze_news():
         tag = ENGINE_TAG.get(news_engine if ai_text else "local", "l")
         text = f"{body}\n\n💰ВРЕМЯ ТОРГОВАТЬ💸\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">Читать источник</a> {tag}"
         
-        # Запоминаем новость
         await track_news(title, summary)
         
         return text, extract_image(news), True
@@ -1431,15 +1499,9 @@ async def news_handler(message: types.Message):
     active_chats.add(message.chat.id)
     loading = await message.answer("⏳ Запрашиваю новость и проверяю прошлые прогнозы...")
     try:
-        # Сначала проверяем, сбылись ли прошлые прогнозы
         check_text = await check_past_news()
-        
-        # Затем получаем свежую новость
         text, image_url, _ = await fetch_and_analyze_news()
-        
-        # Объединяем тексты, если есть сбывшиеся прогнозы
         full_text = check_text + text if check_text else text
-        
         img = await download_bytes(image_url) if image_url else None
         await send_with_image(message.chat.id, full_text, img, "news.jpg")
     finally:
@@ -1469,6 +1531,15 @@ async def callback_handler(cb: types.CallbackQuery):
         user_name = cb.from_user.first_name or "User"
         username = f"@{cb.from_user.username}" if cb.from_user.username else "Нет юзернейма"
         await bot.send_message(chat_id, f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\nВыбери монету:", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
+    elif data == "show_stats":
+        await cb.answer("Собираю статистику...")
+        loading = await bot.send_message(chat_id, "⏳ Собираю статистику за 24 часа...")
+        try:
+            stats_text = await build_daily_stats()
+            await bot.send_message(chat_id, stats_text, parse_mode="HTML", reply_markup=get_coins_keyboard(0))
+        finally:
+            try: await loading.delete()
+            except Exception: pass
     elif data.startswith("p:"):
         try: await cb.message.edit_reply_markup(reply_markup=get_coins_keyboard(int(data[2:])))
         except Exception: pass
@@ -1858,7 +1929,7 @@ async def main():
     http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.9)"})
     analysis_sem = asyncio.Semaphore(4)
     load_active_chats()
-    _load_news_history() # Загружаем память новостей
+    _load_news_history()
     log.info("Бот запущен...")
     background = []
     try:
@@ -1876,7 +1947,8 @@ async def main():
         
         background.append(asyncio.create_task(news_watcher()))
         background.append(asyncio.create_task(backup_loop()))
-        background.append(asyncio.create_task(alert_loop())) # <-- Часовой сканер
+        background.append(asyncio.create_task(alert_loop()))
+        background.append(asyncio.create_task(daily_stats_loop())) # <-- Ежедневная статистика в 00:00 МСК
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
