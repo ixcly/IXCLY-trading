@@ -29,8 +29,14 @@ def keep_alive():
 # ---------------------------------------------------------
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-# Читаем список ключей из переменной GEMINI_API_KEYS (через запятую)
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
+
+# Ключи для других провайдеров
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+CEREBRAS_API_KEY = os.getenv('CEREBRAS_API_KEY')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+MISTRAL_API_KEY = os.getenv('MISTRAL_API_KEY')
+NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY')
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
@@ -139,7 +145,6 @@ def calc_atr(df, length=14):
     return true_range.rolling(length).mean()
 # ---------------------------------------------------------
 
-# --- ИКОНКИ ДЛЯ МОНЕТ ---
 def get_coins_keyboard():
     buttons = [
         [InlineKeyboardButton(text="👑 BTC", callback_data="BTCUSDT"), InlineKeyboardButton(text="💎 ETH", callback_data="ETHUSDT")],
@@ -168,22 +173,39 @@ async def animate_loading(message: types.Message):
     except Exception:
         pass
 
-# --- ЗАПРОС К API С АВТОМАТИЧЕСКОЙ РОТАЦИЕЙ КЛЮЧЕЙ И МОДЕЛЕЙ ---
-async def fetch_analysis(prompt):
+# --- УНИВЕРСАЛЬНЫЙ ЗАПРОС К OPENAI-СОВМЕСТИМЫМ API ---
+async def fetch_openai_compatible(prompt, base_url, api_key, model):
+    if not api_key:
+        return None
+    url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3
+    }
+    try:
+        response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=(15, 90))
+        res_data = response.json()
+        if 'error' in res_data:
+            return None
+        return res_data['choices'][0]['message']['content']
+    except Exception:
+        return None
+
+# --- ЗАПРОС К GEMINI (СПЕЦИАЛЬНЫЙ ФОРМАТ) ---
+async def fetch_gemini(prompt):
     if not GEMINI_API_KEYS:
-        return "ERROR: Нет доступных API-ключей."
-    
-    # Список моделей для fallback (если одна перегружена, пробуем следующую)
+        return None
     models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
-    
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
     
-    # Проходим по всем ключам по очереди
     for key in GEMINI_API_KEYS:
         headers['x-goog-api-key'] = key
-        
-        # Для каждого ключа пробуем все модели
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             try:
@@ -192,26 +214,57 @@ async def fetch_analysis(prompt):
                 
                 if 'error' in res_data:
                     error_msg = res_data['error'].get('message', '')
-                    
-                    # Если лимит исчерпан, переходим к следующему ключу
                     if 'exceeded your current quota' in error_msg.lower() or 'quota' in error_msg.lower():
-                        print(f"Ключ ...{key[-4:]} исчерпан. Пробуем следующий.")
-                        break # Выходим из цикла моделей для этого ключа
-                        
-                    # Если модель перегружена (503), пробуем следующую модель
-                    if 'high demand' in error_msg.lower() or 'currently experiencing' in error_msg.lower() or 'overloaded' in error_msg.lower():
-                        print(f"Модель {model_name} перегружена. Пробуем запасную...")
-                        continue # Переходим к следующей модели
-                        
-                    return f"ERROR: {error_msg}"
+                        break
+                    if 'high demand' in error_msg.lower() or 'overloaded' in error_msg.lower():
+                        continue
+                    return None
                 
                 return res_data['candidates'][0]['content']['parts'][0]['text']
-                
-            except Exception as e:
-                print(f"Ошибка с ключом ...{key[-4:]} и моделью {model_name}: {e}")
+            except Exception:
                 continue
-                
-    return "QUOTA_EXCEEDED_ALL"
+    return None
+
+# --- ГЛАВНАЯ ФУНКЦИЯ СБОРА АНАЛИЗА (ПЕРЕБОР ВСЕХ ПРОВАЙДЕРОВ) ---
+async def fetch_analysis(prompt):
+    # 1. Пытаемся использовать Google Gemini
+    result = await fetch_gemini(prompt)
+    if result:
+        print("Успешный ответ от Google Gemini")
+        return result
+
+    # 2. Пытаемся использовать Groq
+    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
+    if result:
+        print("Успешный ответ от Groq")
+        return result
+
+    # 3. Пытаемся использовать Cerebras
+    result = await fetch_openai_compatible(prompt, "https://api.cerebras.ai/v1", CEREBRAS_API_KEY, "llama3.3-70b")
+    if result:
+        print("Успешный ответ от Cerebras")
+        return result
+
+    # 4. Пытаемся использовать OpenRouter
+    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "openrouter/free")
+    if result:
+        print("Успешный ответ от OpenRouter")
+        return result
+
+    # 5. Пытаемся использовать Mistral AI
+    result = await fetch_openai_compatible(prompt, "https://api.mistral.ai/v1", MISTRAL_API_KEY, "mistral-small-latest")
+    if result:
+        print("Успешный ответ от Mistral AI")
+        return result
+
+    # 6. Пытаемся использовать NVIDIA NIM
+    result = await fetch_openai_compatible(prompt, "https://integrate.api.nvidia.com/v1", NVIDIA_API_KEY, "meta/llama-3.1-8b-instruct")
+    if result:
+        print("Успешный ответ от NVIDIA NIM")
+        return result
+
+    # Если все провайдеры отказали
+    return "ERROR: Все доступные нейросети перегружены или исчерпали лимиты. Попробуйте позже."
 
 async def analyze_news(title, summary):
     prompt = f"""
@@ -227,10 +280,8 @@ async def analyze_news(title, summary):
     В конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
     """
     result = await fetch_analysis(prompt)
-    if result == "QUOTA_EXCEEDED_ALL":
-        return "Ошибка Лимита"
     if result.startswith("ERROR:"):
-        return f"📰 {title}\n\n(Не удалось получить разбор новости)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
+        return f"📰 {title}\n\n(Не удалось получить разбор новости: {result})\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
     return result
 
 async def get_multi_tf_data(symbol):
@@ -284,9 +335,6 @@ async def get_signal_data(symbol):
 
         raw_text = await fetch_analysis(prompt)
         
-        if raw_text == "QUOTA_EXCEEDED_ALL":
-            return "Ошибка Лимита", None
-            
         if raw_text.startswith("ERROR:"):
             return f"⚠️ Ошибка получения данных: {raw_text}", None
 
