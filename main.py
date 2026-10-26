@@ -10,7 +10,7 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardRemove
 from flask import Flask
 from threading import Thread
 from requests.adapters import HTTPAdapter
@@ -40,9 +40,8 @@ dp = Dispatcher()
 active_chats = set()
 last_news_link = None
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ (ИСПРАВЛЕНЫ РАЗМЕРЫ И ТРЕНД) ---
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ ---
 def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, tf, long_prob):
-    # Увеличиваем высоту до 1000, чтобы всё влезло
     width, height = 800, 1000
     bg_color = '#131722'
     grid_color = '#2a2e39'
@@ -64,13 +63,11 @@ def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3,
 
     main_color = color_green if "LONG" in direction else color_red
 
-    # Рисуем сетку
     for i in range(0, width, 80):
         draw.line([(i, 0), (i, height)], fill=grid_color, width=1)
     for i in range(0, height, 80):
         draw.line([(0, i), (width, i)], fill=grid_color, width=1)
 
-    # Шапка
     draw.text((40, 40), "ixcly trade", font=font_logo, fill=text_white)
     draw.text((40, 110), f"{symbol}", font=font_title, fill=text_white)
     
@@ -79,36 +76,27 @@ def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3,
     
     draw.text((40, 190), f"TF: {tf}  |  Вероятность: {long_prob}%", font=font_text, fill=text_gray)
 
-    # --- ГРАФИК (С ТРЕНДОМ) ---
     chart_top = 240
     chart_bottom = 450
     chart_height = chart_bottom - chart_top
     mid_y = chart_top + chart_height // 2
     
     current_y = mid_y
-    # Если шорт, тренд идет вниз (прибавляем к Y), если лонг - вверх (отнимаем)
     trend_step = 4 if "SHORT" in direction else -4
 
     for i in range(25):
         x = 40 + i * 28
-        
-        # Добавляем случайный шум к тренду
         current_y += trend_step + np.random.randint(-15, 15)
-        # Ограничиваем, чтобы свечи не вылетали за рамки графика
         current_y = max(chart_top + 30, min(chart_bottom - 30, current_y))
         
         body_height = np.random.randint(10, 35)
         wick_height = body_height + np.random.randint(10, 25)
         
-        # Цвет свечи чередуем для реалистичности
         candle_color = color_green if np.random.rand() > 0.4 else color_red
         
-        # Тень
         draw.line([(x + 6, current_y - wick_height//2), (x + 6, current_y + wick_height//2)], fill=candle_color, width=2)
-        # Тело
         draw.rectangle([x, current_y - body_height//2, x + 12, current_y + body_height//2], fill=candle_color)
 
-    # --- УРОВНИ (УВЕЛИЧЕНЫ ОТСТУПЫ) ---
     y_offset = 520
     
     draw.text((40, y_offset), "Цена входа:", font=font_text, fill=text_gray)
@@ -159,17 +147,6 @@ def get_coins_keyboard():
         [InlineKeyboardButton(text="🐕 DOGE", callback_data="DOGEUSDT"), InlineKeyboardButton(text="🔵 XRP", callback_data="XRPUSDT")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def get_main_menu():
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📰 Последние новости")],
-            [KeyboardButton(text="🚀 Открыть меню")]
-        ],
-        resize_keyboard=True,
-        is_persistent=True
-    )
-    return kb
 
 async def animate_loading(message: types.Message):
     phrases = [
@@ -382,15 +359,17 @@ async def news_watcher():
             print(f"Ошибка при чтении новостей: {e}")
         await asyncio.sleep(900)
 
+# --- ХЕНДЛЕРЫ КОМАНД ---
+
 @dp.message(Command('start', 'menu'))
-@dp.message(F.text == "🚀 Открыть меню")
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
-    await message.answer("👋 Главное меню активировано. Выбери действие на панели ниже:", reply_markup=get_main_menu())
-    await message.answer("👋 Выбери монету для анализа:", reply_markup=get_coins_keyboard())
+    # Убираем нижнюю клавиатуру, если она осталась с прошлых версий
+    await message.answer("👋 Главное меню активировано. Выбери монету для анализа:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("👇 Нажми на кнопку ниже:", reply_markup=get_coins_keyboard())
 
-@dp.message(F.text == "📰 Последние новости")
-async def handle_news_button(message: types.Message):
+@dp.message(Command('news'))
+async def handle_news_command(message: types.Message):
     active_chats.add(message.chat.id)
     msg = await message.answer("⏳ Запрашиваем и анализируем последнюю новость...")
     
@@ -446,6 +425,14 @@ async def process_callback(callback_query: types.CallbackQuery):
 async def main():
     keep_alive()
     print("Бот запущен...")
+    
+    # Устанавливаем нативное меню команд в Telegram
+    # "menu" будет стоять выше, так как добавлена первой
+    await bot.set_my_commands([
+        types.BotCommand(command="menu", description="🚀 Открыть меню"),
+        types.BotCommand(command="news", description="📰 Последние новости")
+    ])
+    
     asyncio.create_task(news_watcher())
     try:
         await bot.delete_webhook(drop_pending_updates=True)
