@@ -11,6 +11,8 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from flask import Flask
 from threading import Thread
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask('')
@@ -106,7 +108,7 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
         """
 
-        # --- ИСПОЛЬЗУЕМ АКТУАЛЬНУЮ МОДЕЛЬ gemini-3.8-flash ---
+        # --- ИСПОЛЬЗУЕМ gemini-3.8-flash С ЗАЩИТОЙ ОТ ТАЙМАУТОВ ---
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
         headers = {
             'Content-Type': 'application/json',
@@ -115,36 +117,67 @@ async def get_signal_data(symbol):
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "thinkingConfig": {
-                    "thinkingLevel": "LOW" # Низкий уровень "размышлений" для экономии токенов
-                }
+                "thinkingConfig": {"thinkingLevel": "LOW"}
             }
         }
+
+        # Настраиваем сессию с повторными попытками при таймаутах и ошибках сервера
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+        res_data = None
+        last_error = None
         
-        response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=30)
-        res_data = response.json()
+        for attempt in range(4):  # 1 основная попытка + 3 повтора
+            try:
+                # Ждем до 15 сек на соединение и до 90 сек на ответ от ИИ
+                response = await asyncio.to_thread(
+                    session.post, url, headers=headers, json=payload, timeout=(15, 90)
+                )
+                res_data = response.json()
+                break  # Если успешно, выходим из цикла
+            except requests.exceptions.Timeout as e:
+                last_error = e
+                print(f"Попытка {attempt + 1} не удалась (таймаут): {e}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
+            except Exception as e:
+                last_error = e
+                print(f"Попытка {attempt + 1} не удалась (ошибка): {e}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
         
+        if res_data is None:
+            return f"⚠️ Ошибка: Нейросеть не ответила за 90 секунд. Попробуйте позже."
+
         # ЗАЩИТА ОТ ОШИБОК GEMINI
         if 'candidates' not in res_data:
             print(f"GEMINI ERROR RESPONSE: {res_data}")
             error_message = res_data.get('error', {}).get('message', 'Неизвестная ошибка API')
             return f"⚠️ Ошибка Gemini API: {error_message}"
-        
+
         try:
             raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
         except (KeyError, IndexError):
-            return "⚠️ Нейросеть вернула пустой ответ. Попробуйте позже."
-            
+            return "⚠️ Нейросеть вернула пустой ответ. Попробуйте позже。"
+
         clean_response = raw_text.replace('```json', '').replace('```', '').strip()
-        
+
         try:
             ai_data = json.loads(clean_response)
         except json.JSONDecodeError:
-            return "⚠️ Нейросеть вернула некорректный формат. Попробуйте еще раз."
+            return "⚠️ Нейросеть вернула некорректный формат. Попробуйте еще раз。"
 
         long_prob = ai_data.get("long_prob", 50)
         short_prob = ai_data.get("short_prob", 50)
-        reason = ai_data.get("reason", "Анализ завершен.")
+        reason = ai_data.get("reason", "Анализ завершен。")
 
         if long_prob > short_prob:
             direction = "🟢 LONG"
