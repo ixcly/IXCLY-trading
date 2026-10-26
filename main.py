@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.8
+IXCLY Trading bot v2.9
 - Цепочка ИИ: Gemini/Groq/OpenRouter (с ключами) -> бесплатный GPT без ключа (Pollinations) -> локальный движок
 - Локальный движок работает ВСЕГДА (мульти-ТФ + волатильность + новостной сентимент) и даёт ENTER/WAIT
 - Мировые + крипто-новости идут в анализ каждой монеты
@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from collections import Counter
 from datetime import datetime
 from threading import Thread
 from urllib.parse import quote
@@ -24,7 +25,7 @@ import pandas as pd
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 from flask import Flask
 from PIL import Image, ImageDraw, ImageFont
 
@@ -67,7 +68,11 @@ GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
 POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))  # необязательно (бесплатный ключ на enter.pollinations.ai)
-ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
+ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))  # один или несколько числовых Telegram ID через запятую
+ADMIN_IDS = set()
+for _x in re.split(r"[,\s]+", ADMIN_ID or ""):
+    if _x.lstrip("-").isdigit():
+        ADMIN_IDS.add(int(_x))
 
 # gemini-1.5-flash отключён Google, поэтому по умолчанию актуальная модель
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -113,6 +118,8 @@ notified_users = set()
 RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
+stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time(), "engines": Counter()}
+bot_flags = {"news_enabled": True, "instant": True}
 
 
 # ----------------------------------------------------------------------------
@@ -126,31 +133,77 @@ def _load_users():
         return {}
 
 
+def _save_users(users):
+    try:
+        tmp = USERS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=4)
+        os.replace(tmp, USERS_FILE)
+    except Exception as e:
+        log.warning("Не удалось сохранить users.json: %s", e)
+
+
 def save_user_data(user_id, username, first_name):
+    """True, если пользователь новый. Вернувшегося (ранее заблокировавшего бота) снова включает в рассылку."""
     users = _load_users()
     key = str(user_id)
     if key in users:
+        if users[key].get("active") is False:
+            users[key]["active"] = True
+            _save_users(users)
         return False
     users[key] = {
         "username": username,
         "first_name": first_name,
         "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "active": True,
     }
-    try:
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        log.warning("Не удалось сохранить users.json: %s", e)
+    _save_users(users)
     return True
 
 
+def set_users_active(ids, active):
+    users = _load_users()
+    changed = False
+    for i in ids:
+        k = str(i)
+        if k in users and users[k].get("active", True) != active:
+            users[k]["active"] = active
+            changed = True
+    if changed:
+        _save_users(users)
+
+
 def load_active_chats():
-    for uid in _load_users():
+    active_chats.clear()
+    for uid, u in _load_users().items():
+        if isinstance(u, dict) and u.get("active", True) is False:
+            continue
         try:
             active_chats.add(int(uid))
         except ValueError:
             pass
-    log.info("Подписчиков на новости: %d", len(active_chats))
+    log.info("Получателей рассылки и новостей: %d", len(active_chats))
+
+
+def user_counts():
+    """(всего в базе, активных, новых сегодня, новых за 7 дней)"""
+    users = _load_users()
+    today = datetime.now().date()
+    active = new_today = new_week = 0
+    for u in users.values():
+        if not isinstance(u, dict):
+            continue
+        if u.get("active", True) is not False:
+            active += 1
+        try:
+            d = datetime.strptime(u.get("joined_at", ""), "%Y-%m-%d %H:%M:%S").date()
+            age = (today - d).days
+            new_today += 1 if age == 0 else 0
+            new_week += 1 if age < 7 else 0
+        except Exception:
+            pass
+    return len(users), active, new_today, new_week
 
 
 # ----------------------------------------------------------------------------
@@ -908,21 +961,18 @@ async def news_watcher():
             if entries:
                 link = entries[0].link
                 if last_news_link is None:
-                    last_news_link = link
+                    last_news_link = link  # первый запуск: не рассылаем старое
                 elif link != last_news_link:
                     last_news_link = link
-                    text, image_url, ok = await fetch_and_analyze_news()
-                    if ok:
-                        img = await download_bytes(image_url) if image_url else None
-                        for chat_id in list(active_chats):
-                            try:
-                                await send_with_image(chat_id, text, img, "news.jpg")
-                            except (TelegramNotFound, TelegramForbiddenError):
-                                active_chats.discard(chat_id)
-                            except Exception as e:
-                                if "blocked" in str(e).lower() or "deactivated" in str(e).lower():
-                                    active_chats.discard(chat_id)
-                            await asyncio.sleep(0.05)
+                    if bot_flags["news_enabled"]:
+                        text, image_url, ok = await fetch_and_analyze_news()
+                        if ok:
+                            img = await download_bytes(image_url) if image_url else None
+                            payload = {"kind": "photo" if img else "text", "text": text,
+                                       "data": img, "filename": "news.jpg"}
+                            sent, failed, removed = await broadcast(payload)
+                            stats["news_sent"] += sent
+                            log.info("Новость разослана: доставлено %d, ошибок %d, убрано %d", sent, failed, removed)
         except Exception as e:
             log.warning("news_watcher: %s", e)
         await asyncio.sleep(600)
@@ -1143,6 +1193,8 @@ async def build_signal(coin, status, force=False):
     multi = "  ·  ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
     n_emoji, n_label = NEWS_LABEL[ns]
     tag = ENGINE_TAG.get(engine, "l")
+    stats["signals"] += 1
+    stats["engines"][tag] += 1
 
     if entry_status == "ENTER":
         head, lv = "✅ <b>ВХОДИТЬ</b>", ""
@@ -1235,15 +1287,14 @@ async def start_handler(message: types.Message):
 
     is_new = save_user_data(message.from_user.id, message.from_user.username, user_name)
 
-    if is_new and ADMIN_ID and message.from_user.id not in notified_users:
+    if is_new and message.from_user.id not in notified_users:
         notified_users.add(message.from_user.id)
-        try:
-            await bot.send_message(
-                int(ADMIN_ID),
-                f"👤 <b>Новый пользователь!</b>\n\nИмя: {html.escape(user_name)}\nЮзернейм: {html.escape(username)}",
-                parse_mode="HTML")
-        except Exception:
-            pass
+        total = len(_load_users())
+        await notify_admins(
+            f"👤 <b>Новый пользователь!</b>\n\nИмя: {html.escape(user_name)}\n"
+            f"Юзернейм: {html.escape(username)}\nID: <code>{message.from_user.id}</code>\nВсего: {total}")
+        if total % 5 == 0:
+            asyncio.create_task(send_backup("💾 Авто-бэкап"))
 
     await message.answer(
         f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\n"
@@ -1313,81 +1364,521 @@ async def callback_handler(cb: types.CallbackQuery):
 
 
 # ----------------------------------------------------------------------------
-# ХЕНДЛЕРЫ ВТОРОГО (АДМИН) БОТА ДЛЯ РАССЫЛОК
+# РАССЫЛКА (общая для админ-панели и автоновостей)
 # ----------------------------------------------------------------------------
+async def notify_admins(text):
+    for aid in ADMIN_IDS:
+        sent = False
+        if input_bot:
+            try:
+                await input_bot.send_message(aid, text, parse_mode="HTML")
+                sent = True
+            except Exception:
+                pass
+        if not sent:
+            try:
+                await bot.send_message(aid, text, parse_mode="HTML")
+            except Exception:
+                pass
+
+
+async def send_payload(chat_id, p, cache):
+    """Отправляет одно сообщение (текст или медиа) одному пользователю через основной бот."""
+    kind = p["kind"]
+    text = p.get("text") or ""
+    if kind == "text":
+        await bot.send_message(chat_id, text[:4000] or "…", parse_mode="HTML", disable_web_page_preview=True)
+        return
+
+    media = cache.get("file_id") or BufferedInputFile(p["data"], filename=p.get("filename") or "file")
+    caption = text if 0 < len(text) <= 1024 else None
+    senders = {
+        "photo": bot.send_photo, "video": bot.send_video, "document": bot.send_document,
+        "animation": bot.send_animation, "audio": bot.send_audio, "voice": bot.send_voice,
+    }
+    m = await senders[kind](chat_id, media, caption=caption, parse_mode="HTML")
+
+    if "file_id" not in cache:  # дальше шлём по file_id, без повторной загрузки файла
+        obj = {
+            "photo": m.photo[-1] if m.photo else None, "video": m.video, "document": m.document,
+            "animation": m.animation, "audio": m.audio, "voice": m.voice,
+        }.get(kind)
+        if obj:
+            cache["file_id"] = obj.file_id
+    if text and not caption:  # подпись длиннее лимита Telegram: отдельным сообщением
+        await bot.send_message(chat_id, text[:4000], parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def broadcast(payload, progress=None):
+    """Рассылает всем active_chats. Возвращает (доставлено, ошибок, убрано неактивных)."""
+    chats = list(active_chats)
+    cache, ok, fail, dead = {}, 0, 0, []
+    for i, chat_id in enumerate(chats):
+        for _ in range(3):
+            try:
+                await send_payload(chat_id, payload, cache)
+                ok += 1
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except (TelegramForbiddenError, TelegramNotFound):
+                dead.append(chat_id)
+                fail += 1
+                break
+            except TelegramBadRequest as e:
+                if "chat not found" in str(e).lower() or "deactivated" in str(e).lower():
+                    dead.append(chat_id)
+                else:
+                    log.warning("broadcast %s: %s", chat_id, e)
+                fail += 1
+                break
+            except Exception as e:
+                log.warning("broadcast %s: %s", chat_id, e)
+                fail += 1
+                break
+        await asyncio.sleep(0.04)  # ~25 сообщений в секунду, в рамках лимитов Telegram
+        if progress and (i + 1) % 25 == 0:
+            try:
+                await progress(i + 1, len(chats))
+            except Exception:
+                pass
+    if dead:
+        for c in dead:
+            active_chats.discard(c)
+        set_users_active(dead, False)
+    return ok, fail, len(dead)
+
+
+async def send_backup(caption="💾 Бэкап базы пользователей"):
+    users = _load_users()
+    if not users:
+        return False
+    data = json.dumps(users, ensure_ascii=False, indent=2).encode("utf-8")
+    sender = input_bot or bot
+    for aid in ADMIN_IDS:
+        try:
+            await sender.send_document(aid, BufferedInputFile(data, "users.json"),
+                                       caption=f"{caption}\nПользователей: {len(users)}")
+        except Exception as e:
+            log.warning("Бэкап не отправлен админу %s: %s", aid, e)
+    return True
+
+
+async def backup_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            await send_backup("💾 Ежедневный бэкап")
+        except Exception as e:
+            log.warning("backup_loop: %s", e)
+        await asyncio.sleep(24 * 3600)
+
+
+async def run_diagnostics():
+    lines = ["🧪 <b>Диагностика</b>", "", "<b>Источники свечей (BTC, 1h):</b>"]
+
+    async def probe(ex):
+        t0 = time.time()
+        try:
+            await _fetch_klines(ex, "BTC", "1h")
+            return f"✅ {ex['name']} · {int((time.time() - t0) * 1000)} мс"
+        except Exception as e:
+            return f"❌ {ex['name']} · {html.escape(str(e))[:40]}"
+
+    lines += await asyncio.gather(*[probe(e) for e in EXCHANGES])
+
+    lines += ["", "<b>Анализ (метка в конце сигнала):</b>"]
+    prompt = "Напиши одно предложение из десяти слов о том, что такое биткоин и зачем он нужен людям."
+
+    async def timed(name, fn):
+        t0 = time.time()
+        try:
+            r = await asyncio.wait_for(fn(), 25)
+        except Exception:
+            r = None
+        return f"{'✅' if r else '❌'} {name} · {int((time.time() - t0) * 1000)} мс"
+
+    tests = []
+    if GEMINI_API_KEYS:
+        tests.append(timed(f"g · Gemini ({GEMINI_MODEL})", lambda: _ask_gemini(prompt, False)))
+    else:
+        lines.append("➖ g · Gemini: ключ не задан")
+    if GROQ_API_KEY:
+        tests.append(timed(f"q · Groq ({GROQ_MODEL})", lambda: _ask_openai_compat(
+            "https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, False)))
+    else:
+        lines.append("➖ q · Groq: ключ не задан")
+    if OPENROUTER_API_KEY:
+        tests.append(timed("o · OpenRouter", lambda: _ask_openai_compat(
+            "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, False,
+            extra_headers={"HTTP-Referer": "https://t.me/bot", "X-Title": "IXCLY"})))
+    else:
+        lines.append("➖ o · OpenRouter: ключ не задан")
+    key_note = "с ключом" if POLLINATIONS_KEY else "без ключа"
+    tests.append(timed(f"f · бесплатный GPT ({key_note})", lambda: _ask_free_gpt(prompt, False)))
+    lines += await asyncio.gather(*tests)
+
+    lines += ["", f"Получателей рассылки: {len(active_chats)}",
+              f"Новости по расписанию: {'вкл' if bot_flags['news_enabled'] else 'выкл'}"]
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------------
+# АДМИН-ПАНЕЛЬ (второй бот, доступ только для ADMIN_ID)
+# ----------------------------------------------------------------------------
+admin_mode = {}        # admin_id -> "restore"
+pending_payload = {}   # admin_id -> payload (если выключена мгновенная рассылка)
+
+
+def panel_text():
+    total, _, _, _ = user_counts()
+    mode = "⚡ сразу" if bot_flags["instant"] else "✋ с подтверждением"
+    news = "включены" if bot_flags["news_enabled"] else "выключены"
+    return (
+        "🛠 <b>Админ-панель</b>\n\n"
+        f"👥 В базе: <b>{total}</b> · получают рассылку: <b>{len(active_chats)}</b>\n"
+        f"📢 Режим рассылки: {mode}\n"
+        f"📰 Автоновости: {news}\n\n"
+        "Просто пришлите мне любое сообщение (текст, фото, видео, файл, голосовое) — "
+        "я перешлю его всем пользователям основного бота."
+    )
+
+
+def panel_kb():
+    B = InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [B(text="📊 Статистика", callback_data="adm:stats"), B(text="👥 Пользователи", callback_data="adm:users")],
+        [B(text="📰 Новость сейчас", callback_data="adm:news"),
+         B(text=f"🔔 Автоновости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="adm:tglnews")],
+        [B(text=f"⚡ Рассылка: {'сразу' if bot_flags['instant'] else 'с подтверждением'}", callback_data="adm:tglinst")],
+        [B(text="🧪 Диагностика", callback_data="adm:diag"), B(text="💾 Бэкап базы", callback_data="adm:backup")],
+        [B(text="📤 Восстановить базу", callback_data="adm:restore")],
+    ])
+
+
+def back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В панель", callback_data="adm:panel")]])
+
+
+def stats_text():
+    total, _, today, week = user_counts()
+    up = int(time.time() - stats["started"])
+    eng = ", ".join(f"{k}:{v}" for k, v in sorted(stats["engines"].items())) or "—"
+    return (
+        "📊 <b>Статистика</b>\n\n"
+        f"👥 В базе: <b>{total}</b>\n"
+        f"✅ Получают рассылку: <b>{len(active_chats)}</b>\n"
+        f"🆕 Новых сегодня: {today} · за 7 дней: {week}\n\n"
+        f"📈 Сигналов с запуска: {stats['signals']}\n"
+        f"🧩 Движки анализа: {eng}\n"
+        f"📰 Новостей доставлено: {stats['news_sent']}\n"
+        f"📢 Рассылок сделано: {stats['broadcasts']}\n"
+        f"⏱ Аптайм: {up // 3600} ч {up % 3600 // 60} мин"
+    )
+
+
+async def extract_payload(message):
+    """Превращает сообщение админа в payload для рассылки. None, если тип не поддерживается."""
+    text = message.html_text if (message.text or message.caption) else ""
+    if message.text:
+        return {"kind": "text", "text": text}
+
+    spec = None
+    if message.photo:
+        spec = ("photo", message.photo[-1].file_id, "photo.jpg")
+    elif message.video:
+        spec = ("video", message.video.file_id, message.video.file_name or "video.mp4")
+    elif message.animation:
+        spec = ("animation", message.animation.file_id, message.animation.file_name or "anim.mp4")
+    elif message.document:
+        spec = ("document", message.document.file_id, message.document.file_name or "file")
+    elif message.audio:
+        spec = ("audio", message.audio.file_id, message.audio.file_name or "audio.mp3")
+    elif message.voice:
+        spec = ("voice", message.voice.file_id, "voice.ogg")
+    if not spec:
+        return None
+
+    kind, file_id, filename = spec
+    try:
+        f = await input_bot.get_file(file_id)
+        buf = await input_bot.download_file(f.file_path)
+        data = buf.read()
+    except Exception as e:
+        raise ValueError(f"Не удалось скачать файл (лимит Telegram для ботов 20 МБ): {e}")
+    return {"kind": kind, "text": text, "data": data, "filename": filename}
+
+
+async def run_broadcast(admin_chat, payload):
+    n = len(active_chats)
+    if n == 0:
+        await input_bot.send_message(
+            admin_chat,
+            "⚠️ Получателей нет: база пуста. На бесплатном Render users.json стирается при деплое. "
+            "Нажмите «📤 Восстановить базу» и пришлите последний бэкап.")
+        return
+    status = await input_bot.send_message(admin_chat, f"⏳ Рассылка: 0/{n}")
+
+    async def progress(done, total):
+        await status.edit_text(f"⏳ Рассылка: {done}/{total}")
+
+    ok, fail, removed = await broadcast(payload, progress)
+    stats["broadcasts"] += 1
+    try:
+        await status.edit_text(
+            f"✅ Рассылка завершена\n\nДоставлено: {ok} из {n}\nОшибок: {fail}\nУбрано неактивных: {removed}")
+    except Exception:
+        pass
+
+
+async def do_restore(message):
+    if not message.document:
+        await message.answer("Нужен файл users.json. Режим восстановления отменён, нажмите кнопку ещё раз.")
+        return
+    try:
+        f = await input_bot.get_file(message.document.file_id)
+        buf = await input_bot.download_file(f.file_path)
+        data = json.loads(buf.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("ожидался JSON-объект {id: данные}")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось прочитать файл: {html.escape(str(e))}", parse_mode="HTML")
+        return
+    users = _load_users()
+    added = 0
+    for k, v in data.items():
+        if str(k).lstrip("-").isdigit() and k not in users and isinstance(v, dict):
+            users[k] = v
+            added += 1
+    _save_users(users)
+    load_active_chats()
+    await message.answer(f"✅ Восстановлено: добавлено {added}, всего в базе {len(users)}, "
+                         f"получателей {len(active_chats)}.", reply_markup=panel_kb())
+
+
 if input_dp:
-    @input_dp.message(Command("start"))
-    async def admin_start_handler(message: types.Message):
-        await message.answer("👋 Привет, админ! Отправь сюда любой текст или фото, и я мгновенно разошлю это всем пользователям основного бота.")
+    admin_filter = F.from_user.id.in_(ADMIN_IDS)
+
+    async def _edit(cb, text, kb=None):
+        try:
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except TelegramBadRequest:
+            pass  # "message is not modified"
+
+    @input_dp.message(Command("start", "panel", "menu"), admin_filter)
+    async def adm_start(message: types.Message):
+        admin_mode.pop(message.from_user.id, None)
+        await message.answer(panel_text(), parse_mode="HTML", reply_markup=panel_kb())
+
+    @input_dp.message(Command("stats"), admin_filter)
+    async def adm_stats(message: types.Message):
+        await message.answer(stats_text(), parse_mode="HTML", reply_markup=back_kb())
+
+    @input_dp.message(Command("backup"), admin_filter)
+    async def adm_backup_cmd(message: types.Message):
+        ok = await send_backup()
+        if not ok:
+            await message.answer("База пуста, бэкапить нечего.")
+
+    @input_dp.message(Command("dm"), admin_filter)
+    async def adm_dm(message: types.Message):
+        parts = (message.text or "").split(maxsplit=2)
+        if len(parts) < 3 or not parts[1].lstrip("-").isdigit():
+            await message.answer("Формат: <code>/dm ID текст</code>", parse_mode="HTML")
+            return
+        try:
+            await bot.send_message(int(parts[1]), parts[2])
+            await message.answer("✅ Отправлено.")
+        except Exception as e:
+            await message.answer(f"❌ Не удалось: {html.escape(str(e))[:200]}", parse_mode="HTML")
+
+    @input_dp.message(admin_filter)
+    async def adm_any(message: types.Message):
+        uid = message.from_user.id
+        if message.text and message.text.startswith("/"):
+            await message.answer("Неизвестная команда. /panel — открыть панель.")
+            return
+        if admin_mode.pop(uid, None) == "restore":
+            await do_restore(message)
+            return
+        try:
+            payload = await extract_payload(message)
+        except ValueError as e:
+            await message.answer(f"❌ {html.escape(str(e))}", parse_mode="HTML")
+            return
+        if payload is None:
+            await message.answer("⚠️ Этот тип сообщения не поддерживается (стикеры, опросы и т.п.).")
+            return
+        if bot_flags["instant"]:
+            await run_broadcast(message.chat.id, payload)
+        else:
+            pending_payload[uid] = payload
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=f"✅ Разослать ({len(active_chats)})", callback_data="adm:send"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="adm:drop"),
+            ]])
+            await input_bot.copy_message(message.chat.id, message.chat.id, message.message_id, reply_markup=kb)
+
+    @input_dp.callback_query(admin_filter)
+    async def adm_callback(cb: types.CallbackQuery):
+        try:
+            await cb.answer()
+        except Exception:
+            pass
+        uid = cb.from_user.id
+        action = (cb.data or "").split(":", 1)[-1]
+
+        if action == "panel":
+            admin_mode.pop(uid, None)
+            await _edit(cb, panel_text(), panel_kb())
+        elif action == "stats":
+            await _edit(cb, stats_text(), back_kb())
+        elif action == "users":
+            users = _load_users()
+            last = list(users.items())[-10:]
+            rows = []
+            for k, u in reversed(last):
+                name = html.escape(str(u.get("first_name") or "—"))
+                uname = f"@{html.escape(u['username'])}" if u.get("username") else ""
+                rows.append(f"• {name} {uname} · {str(u.get('joined_at', ''))[:10]} · <code>{k}</code>")
+            await _edit(cb, f"👥 <b>Последние пользователи</b> (всего {len(users)})\n\n" + ("\n".join(rows) or "пусто"),
+                        back_kb())
+        elif action == "tglnews":
+            bot_flags["news_enabled"] = not bot_flags["news_enabled"]
+            await _edit(cb, panel_text(), panel_kb())
+        elif action == "tglinst":
+            bot_flags["instant"] = not bot_flags["instant"]
+            await _edit(cb, panel_text(), panel_kb())
+        elif action == "news":
+            await _edit(cb, "⏳ Готовлю последнюю новость...", None)
+            text, image_url, ok = await fetch_and_analyze_news()
+            if not ok:
+                await _edit(cb, f"{text}", back_kb())
+                return
+            img = await download_bytes(image_url) if image_url else None
+            payload = {"kind": "photo" if img else "text", "text": text, "data": img, "filename": "news.jpg"}
+            await run_broadcast(cb.message.chat.id, payload)
+        elif action == "diag":
+            await _edit(cb, "⏳ Проверяю источники и анализ (до 30 секунд)...", None)
+            try:
+                result = await run_diagnostics()
+            except Exception as e:
+                result = f"❌ Ошибка диагностики: {html.escape(str(e))}"
+            await _edit(cb, result, back_kb())
+        elif action == "backup":
+            ok = await send_backup()
+            await cb.message.answer("💾 Бэкап отправлен выше." if ok else "База пуста, бэкапить нечего.")
+        elif action == "restore":
+            admin_mode[uid] = "restore"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm:panel")]])
+            await _edit(cb, "📤 Пришлите файл <b>users.json</b> (последний бэкап). "
+                            "Новые пользователи добавятся, существующие не изменятся.", kb)
+        elif action == "send":
+            payload = pending_payload.pop(uid, None)
+            if payload is None:
+                await cb.message.answer("Нечего отправлять: сообщение уже разослано или отменено.")
+                return
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await run_broadcast(cb.message.chat.id, payload)
+        elif action == "drop":
+            pending_payload.pop(uid, None)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await cb.message.answer("Отменено.")
 
     @input_dp.message()
-    async def handle_broadcast(message: types.Message):
-        if message.text and message.text.startswith('/'):
-            return
+    async def adm_deny(message: types.Message):
+        uid = message.from_user.id if message.from_user else 0
+        log.warning("Админ-бот: обращение от не-админа, id=%s", uid)
+        text = "⛔ Нет доступа."
+        if not ADMIN_IDS:
+            text += (f"\n\nВаш Telegram ID: <code>{uid}</code>\nЕсли вы владелец, добавьте в переменные "
+                     f"окружения Render: <code>ADMIN_ID={uid}</code> и перезапустите сервис.")
+        await message.answer(text, parse_mode="HTML")
 
-        status_msg = await message.answer("⏳ Начинаю мгновенную рассылку...")
-        success = 0
-
-        photo_bytes = None
-        if message.photo:
-            try:
-                file_info = await input_bot.get_file(message.photo[-1].file_id)
-                file_data = await input_bot.download_file(file_info.file_path)
-                photo_bytes = file_data.read()
-            except Exception as e:
-                log.error(f"Ошибка скачивания фото: {e}")
-
-        for chat_id in list(active_chats):
-            try:
-                if photo_bytes:
-                    await bot.send_photo(chat_id, photo=BufferedInputFile(photo_bytes, "photo.jpg"),
-                                         caption=message.html_text, parse_mode="HTML")
-                elif message.text:
-                    await bot.send_message(chat_id, text=message.html_text, parse_mode="HTML")
-
-                success += 1
-                await asyncio.sleep(0.05)
-            except (TelegramNotFound, TelegramForbiddenError):
-                active_chats.discard(chat_id)
-                log.warning(f"Пользователь {chat_id} недоступен. Удалён из рассылки.")
-            except Exception as e:
-                if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
-                    active_chats.discard(chat_id)
-
-        await status_msg.edit_text(f"✅ Рассылка завершена!\nДоставлено: {success} чел.")
+    @input_dp.callback_query()
+    async def adm_deny_cb(cb: types.CallbackQuery):
+        await cb.answer("Нет доступа", show_alert=True)
 
 
 # ----------------------------------------------------------------------------
 # ЗАПУСК
 # ----------------------------------------------------------------------------
+def _log_task_result(t):
+    try:
+        t.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.error("Фоновая задача завершилась ошибкой: %s", e, exc_info=True)
+
+
+async def startup_notice():
+    total, _, _, _ = user_counts()
+    text = f"✅ Бот запущен.\nПользователей в базе: {total}"
+    if total == 0:
+        text += ("\n\n⚠️ База пуста (на бесплатном Render файл стирается при деплое). "
+                 "Нажмите «📤 Восстановить базу» и пришлите последний users.json из бэкапа.")
+    for aid in ADMIN_IDS:
+        try:
+            await input_bot.send_message(aid, text, reply_markup=panel_kb())
+        except Exception as e:
+            log.warning("Не удалось написать админу %s в админ-бот (нажмите /start в админ-боте): %s", aid, e)
+
+
 async def main():
     global http, analysis_sem
     keep_alive()
-    http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.8)"})
+    http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.9)"})
     analysis_sem = asyncio.Semaphore(4)
     load_active_chats()
     log.info("Бот запущен...")
-    watcher = None
+    background = []
     try:
         await bot.set_my_commands([
             types.BotCommand(command="menu", description="🚀 Меню"),
             types.BotCommand(command="news", description="📰 Новости"),
         ])
-        watcher = asyncio.create_task(news_watcher())
+        background.append(asyncio.create_task(news_watcher()))
+        background.append(asyncio.create_task(backup_loop()))
 
-        if input_bot:
+        if input_bot and input_dp:
+            if not ADMIN_IDS:
+                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки (покажет ваш ID)")
             try:
-                log.info("Админ-бот (рассылка) запущен...")
                 await input_bot.delete_webhook(drop_pending_updates=True)
-                asyncio.create_task(input_dp.start_polling(input_bot))
+                await input_bot.set_my_commands([
+                    types.BotCommand(command="panel", description="🛠 Панель"),
+                    types.BotCommand(command="stats", description="📊 Статистика"),
+                    types.BotCommand(command="backup", description="💾 Бэкап базы"),
+                ])
+                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False,
+                                                               close_bot_session=False))
+                t.add_done_callback(_log_task_result)
+                background.append(t)
+                log.info("Админ-бот запущен (админов: %d)", len(ADMIN_IDS))
+                if ADMIN_IDS:
+                    await startup_notice()
             except Exception as e:
-                log.error(f"ОШИБКА ЗАПУСКА АДМИН-БОТА: {e}. Основной бот продолжит работу.")
+                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s. Основной бот продолжит работу.", e, exc_info=True)
+        else:
+            log.warning("Админ-бот выключен: задайте INPUT_BOT_TOKEN (токен ВТОРОГО бота, отличный от BOT_TOKEN)")
 
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
-        if watcher:
-            watcher.cancel()
+        for t in background:
+            t.cancel()
+        if input_bot:
+            try:
+                await input_bot.session.close()
+            except Exception:
+                pass
         await http.close()
         await bot.session.close()
 
