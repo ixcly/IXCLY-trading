@@ -1,7 +1,7 @@
 aiogram
 ccxt
 pandas
-pandas_ta
+pandas
 feedparser
 requests
 flask
