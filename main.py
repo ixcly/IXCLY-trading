@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v3.4
-- Исправлено падение при рассылке (обработка TelegramNotFound)
-- Новости: строгий перевод на русский
-- Свечи: Binance, MEXC, Gate, KuCoin, OKX, Bybit + CryptoCompare
+IXCLY Trading bot v3.4 (FULL VERSION)
+- BOT_TOKEN: Главный бот (полный функционал)
+- INPUT_BOT_TOKEN: Админ-бот (рассылка)
 """
 import asyncio
 import html
@@ -72,7 +71,7 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация админ-бота (с защитой от ошибок)
+# Инициализация админ-бота
 input_bot = None
 input_dp = None
 if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
