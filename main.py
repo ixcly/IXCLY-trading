@@ -36,12 +36,15 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 ADMIN_ID = os.getenv('ADMIN_ID') 
 
-# --- БИРЖИ ---
-ex_opts = {'defaultType': 'swap', 'timeout': 7000}
+# --- БИРЖИ (Добавлены те, что лояльнее к серверам Render) ---
+ex_opts = {'defaultType': 'swap', 'timeout': 8000}
 exchange_list = [
+    {'name': 'KRAKEN', 'ex': ccxt.kraken(ex_opts)},
+    {'name': 'COINBASE', 'ex': ccxt.coinbase(ex_opts)},
+    {'name': 'BITSTAMP', 'ex': ccxt.bitstamp(ex_opts)},
     {'name': 'OKX', 'ex': ccxt.okx(ex_opts)},
     {'name': 'BYBIT', 'ex': ccxt.bybit(ex_opts)},
-    {'name': 'MEXC', 'ex': ccxt.mexc(ex_opts)},
+    {'name': 'KUCOIN', 'ex': ccxt.kucoin(ex_opts)},
     {'name': 'GATE', 'ex': ccxt.gate(ex_opts)}
 ]
 
@@ -203,7 +206,7 @@ def calc_atr(df, length=14):
 async def animate_loading(message: types.Message, symbol_name="Монета"):
     phrases = [
         f"📡 Сканируем {symbol_name}...",
-        "⚡ Мгновенный поиск...",
+        "⚡ Поиск на Kraken, Coinbase, Bybit...",
         "📊 Считаем индикаторы...",
         "⚖️ Готовим уровни..."
     ]
@@ -244,7 +247,6 @@ async def fetch_gemini(prompt):
     return None
 
 async def fetch_analysis(prompt, is_news=False):
-    # Для новостей таймаут больше (15 сек), для сигналов меньше (5 сек)
     timeout_val = 15.0 if is_news else 5.0
     try:
         result = await asyncio.wait_for(fetch_gemini(prompt), timeout=timeout_val)
@@ -263,13 +265,13 @@ async def fetch_analysis(prompt, is_news=False):
         
     return "ERROR"
 
-# --- ПОИСК НА БИРЖАХ И COINGECKO ---
+# --- ПОИСК НА БИРЖАХ ---
 async def check_exchange(ex_name, ex_instance, base_coin):
     for symbol in [f"{base_coin}/USDT:USDT", f"{base_coin}/USDT"]:
         try:
             tf_data = {}
             for tf in ['15m', '1h', '4h', '1d']:
-                ohlcv = await asyncio.wait_for(asyncio.to_thread(ex_instance.fetch_ohlcv, symbol, tf, limit=100), timeout=6.0)
+                ohlcv = await asyncio.wait_for(asyncio.to_thread(ex_instance.fetch_ohlcv, symbol, tf, limit=100), timeout=8.0)
                 if not ohlcv: raise Exception("No data")
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['ema20'] = calc_ema(df['close'], 20)
@@ -283,21 +285,28 @@ async def check_exchange(ex_name, ex_instance, base_coin):
                     'recent_low': float(df['low'].iloc[-24:].min()), 'recent_high': float(df['high'].iloc[-24:].max())
                 }
             if tf_data: return tf_data, ex_name
-        except Exception: continue
+        except Exception as e:
+            print(f"Ошибка на {ex_name} для {symbol}: {e}", flush=True)
+            continue
     return None, None
 
+# --- РЕЗЕРВНЫЙ ИСТОЧНИК: COINGECKO ---
 async def fetch_coingecko(base_coin):
     try:
         url = f"https://api.coingecko.com/api/v3/search?query={base_coin}"
         res = await asyncio.to_thread(requests.get, url, timeout=10)
-        if res.status_code != 200: return None, None
+        if res.status_code != 200: 
+            print(f"CoinGecko search error: {res.status_code}", flush=True)
+            return None, None
         coins = res.json().get('coins', [])
         if not coins: return None, None
         
         coin_id = coins[0]['id']
         chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=7&interval=daily"
         chart_res = await asyncio.to_thread(requests.get, chart_url, timeout=10)
-        if chart_res.status_code != 200: return None, None
+        if chart_res.status_code != 200: 
+            print(f"CoinGecko chart error: {chart_res.status_code}", flush=True)
+            return None, None
         
         prices = chart_res.json().get('prices', [])
         if not prices: return None, None
@@ -319,7 +328,41 @@ async def fetch_coingecko(base_coin):
             'ema50': float(last['ema50']), 'rsi': float(last['rsi']), 'atr': float(last['atr']), 
             'recent_low': float(df['low'].iloc[-7:].min()), 'recent_high': float(df['high'].iloc[-7:].max())
         }, 'CoinGecko'
-    except Exception: return None, None
+    except Exception as e: 
+        print(f"CoinGecko Exception: {e}", flush=True)
+        return None, None
+
+# --- РЕЗЕРВНЫЙ ИСТОЧНИК 2: CRYPTOCOMPARE (Супер надежный) ---
+async def fetch_cryptocompare(base_coin):
+    try:
+        url = f"https://min-api.cryptocompare.com/data/v2/histoday?fsym={base_coin}&tsym=USD&limit=100"
+        res = await asyncio.to_thread(requests.get, url, timeout=10)
+        if res.status_code != 200: return None, None
+        
+        data = res.json().get('Data', {}).get('Data', [])
+        if not data: return None, None
+        
+        df = pd.DataFrame(data)
+        df['close'] = df['close'].astype(float)
+        df['open'] = df['open'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['volume'] = df['volumeto'].astype(float)
+        
+        df['ema20'] = calc_ema(df['close'], 20)
+        df['ema50'] = calc_ema(df['close'], 50)
+        df['rsi'] = calc_rsi(df['close'], 14)
+        df['atr'] = calc_atr(df, 14)
+        
+        last = df.iloc[-1]
+        return {
+            'df': df, 'price': float(last['close']), 'ema20': float(last['ema20']), 
+            'ema50': float(last['ema50']), 'rsi': float(last['rsi']), 'atr': float(last['atr']), 
+            'recent_low': float(df['low'].iloc[-7:].min()), 'recent_high': float(df['high'].iloc[-7:].max())
+        }, 'CryptoCompare'
+    except Exception as e:
+        print(f"CryptoCompare Exception: {e}", flush=True)
+        return None, None
 
 async def process_signal(chat_id, symbol):
     global last_request_time
@@ -345,12 +388,22 @@ async def process_signal(chat_id, symbol):
                     tf_data, found_exchange = res
                     break
             
+            # Если биржи не ответили, пробуем CoinGecko
             if not tf_data:
+                print(f"⚠️ {base_coin} не найдена на биржах, пробуем CoinGecko...", flush=True)
                 cg_result = await fetch_coingecko(base_coin)
                 if cg_result and cg_result[0]:
                     tf_data, found_exchange = cg_result
-                else:
-                    raise ValueError(f"Монета {base_coin} не найдена.")
+            
+            # Если CoinGecko не ответил, пробуем CryptoCompare
+            if not tf_data:
+                print(f"⚠️ {base_coin} не найдена на CoinGecko, пробуем CryptoCompare...", flush=True)
+                cc_result = await fetch_cryptocompare(base_coin)
+                if cc_result and cc_result[0]:
+                    tf_data, found_exchange = cc_result
+
+            if not tf_data:
+                raise ValueError(f"Монета {base_coin} не найдена ни на биржах, ни в CoinGecko, ни в CryptoCompare.")
                 
             tf_text = "".join([f"[{tf}] RSI: {d['rsi']:.2f}, EMA20: {d['ema20']:.6f}, EMA50: {d['ema50']:.6f}, ATR: {d['atr']:.6f}\n" for tf, d in tf_data.items()])
 
@@ -437,11 +490,11 @@ async def process_signal(chat_id, symbol):
             image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, long_prob)
             return formatted_text, image_buf
 
-        formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=25.0)
+        formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=30.0)
         await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=formatted_text, parse_mode='HTML')
         
     except asyncio.TimeoutError:
-        await bot.send_message(chat_id, "⏳ Биржи не ответили вовремя. Попробуйте еще раз.")
+        await bot.send_message(chat_id, "⏳ Биржи не ответили вовремя (30 сек). Попробуйте еще раз.")
     except ValueError as ve:
         await bot.send_message(chat_id, f"❌ {str(ve)}")
     except Exception as e:
@@ -455,7 +508,7 @@ async def process_signal(chat_id, symbol):
 async def fetch_and_analyze_news():
     try:
         feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
-        if not feed.entries: return "❌ Свежих новостей пока нет."
+        if not feed.entries: return "❌ Свежих новостей пока нет.", None
         
         latest_news = feed.entries[0]
         title = latest_news.title
@@ -479,7 +532,6 @@ async def fetch_and_analyze_news():
         ai_text = await fetch_analysis(prompt, is_news=True)
         
         if ai_text == "ERROR":
-            # Если ИИ упал, выдаем хотя бы базовую инфу
             ai_text = f"📌 {title}\n\nНе удалось получить полный разбор от ИИ. Ознакомьтесь с источником.\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
             
         final_text = f"{ai_text}\n\n🔗 <a href='{link}'>Читать источник</a>"
