@@ -35,9 +35,8 @@ exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилище пользователей, которым нужно присылать новости
+# Хранилище пользователей и последняя новость
 active_chats = set()
-# Ссылка на последнюю отправленную новость, чтобы не спамить одинаковыми
 last_news_link = None
 
 # --- РУЧНОЙ РАСЧЕТ ИНДИКАТОРОВ ---
@@ -68,25 +67,43 @@ def get_coins_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# --- УМНЫЙ ТЕКСТ ДЛЯ ОЖИДАНИЯ ---
+async def animate_loading(message: types.Message):
+    phrases = [
+        "📡 Сканируем рыночные данные...",
+        "📰 Анализируем мировые новости и настроения...",
+        "📊 Рассчитываем индикаторы RSI, EMA и ATR...",
+        "🧠 Нейросеть формирует среднесрочный вердикт...",
+        "⚖️ Оцениваем риски и потенциальную доходность...",
+        "⚙️ Завершаем глубокий анализ данных..."
+    ]
+    try:
+        i = 0
+        while True:
+            await asyncio.sleep(5) # Ждем 5 секунд
+            await message.edit_text(phrases[i % len(phrases)])
+            i += 1
+    except asyncio.CancelledError:
+        pass # Задача отменена (анализ завершен)
+    except Exception as e:
+        print(f"Ошибка при обновлении текста: {e}")
+
 # --- ФОНОВАЯ ЗАДАЧА ДЛЯ НОВОСТЕЙ ---
 async def news_watcher():
     global last_news_link
-    await asyncio.sleep(10) # Небольшая пауза при старте бота
+    await asyncio.sleep(10)
     
     while True:
         try:
-            # Загружаем новости в фоновом режиме
             feed = await asyncio.to_thread(feedparser.parse, 'https://cointelegraph.com/rss')
             if feed.entries:
-                latest_news = feed.entries[0] # Берем самую свежую новость
+                latest_news = feed.entries[0]
                 news_link = latest_news.link
                 news_title = latest_news.title
                 
-                # Если это новая новость, которой мы еще не делились
                 if news_link != last_news_link:
                     last_news_link = news_link
                     
-                    # Ищем картинку (иногда она лежит в media_content, иногда в enclosures)
                     image_url = None
                     if hasattr(latest_news, 'media_content'):
                         image_url = latest_news.media_content[0]['url']
@@ -96,7 +113,6 @@ async def news_watcher():
                     
                     text = f"📰 <b>Срочные новости:</b>\n\n{news_title}\n\n💰<b>ВРЕМЯ ТОРГОВАТЬ</b>💸\n\n🔗 <a href='{news_link}'>Читать полностью</a>"
                     
-                    # Рассылаем всем, кто нажал /start
                     for chat_id in list(active_chats):
                         try:
                             if image_url:
@@ -109,8 +125,7 @@ async def news_watcher():
         except Exception as e:
             print(f"Ошибка при чтении новостей: {e}")
             
-        # Ждем 15 минут (900 секунд) до следующей проверки
-        await asyncio.sleep(900)
+        await asyncio.sleep(900) # Ждем 15 минут
 # ---------------------------------------------------------
 
 async def get_signal_data(symbol):
@@ -155,11 +170,7 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
         """
 
-        models_to_try = [
-            "gemini-3.8-flash",
-            "gemini-3.8-flash-medium",
-            "gemini-3.5-flash"
-        ]
+        models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-medium", "gemini-3.5-flash"]
 
         session = requests.Session()
         retry_strategy = Retry(total=2, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
@@ -241,7 +252,6 @@ async def get_signal_data(symbol):
 @dp.message(Command('start', 'menu'))
 @dp.message(F.text == "🚀 Открыть меню")
 async def start_handler(message: types.Message):
-    # Добавляем пользователя в список для рассылки новостей
     active_chats.add(message.chat.id)
     
     reply_kb = ReplyKeyboardMarkup(
@@ -249,24 +259,41 @@ async def start_handler(message: types.Message):
         resize_keyboard=True,
         is_persistent=True
     )
-    await message.answer("Привет! Нажми кнопку ниже, чтобы выбрать монету.\nЯ также буду присылать тебе сюда важные мировые новости.", reply_markup=reply_kb)
+    await message.answer("Привет! Нажми кнопку ниже, чтобы выбрать монету.", reply_markup=reply_kb)
     await message.answer("👋 Выбери монету для анализа:", reply_markup=get_coins_keyboard())
 
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
-    symbol = callback_query.data
-    await callback_query.message.answer(f"⏳ Запрос {symbol}... Ожидайте около 1 минуты.")
-    result = await get_signal_data(symbol)
-    await callback_query.message.answer(result, parse_mode='HTML')
+    # Сразу убираем "часики" с кнопки в Telegram
     await callback_query.answer()
+    
+    symbol = callback_query.data
+    
+    # Отправляем первое сообщение о поиске
+    loading_msg = await callback_query.message.answer(f"⏳ Запрос {symbol}...")
+    
+    # Запускаем задачу, которая будет менять текст каждые 5 секунд
+    animation_task = asyncio.create_task(animate_loading(loading_msg))
+    
+    # Ждем, пока нейросеть и биржа выдадут результат
+    result = await get_signal_data(symbol)
+    
+    # Останавливаем анимацию текста
+    animation_task.cancel()
+    
+    # Удаляем сообщение с поиском
+    try:
+        await loading_msg.delete()
+    except Exception as e:
+        print(f"Не удалось удалить сообщение: {e}")
+        
+    # Отправляем чистый финальный результат
+    await callback_query.message.answer(result, parse_mode='HTML')
 
 async def main():
     keep_alive()
     print("Бот запущен...")
-    
-    # Запускаем фоновую задачу по сбору новостей
     asyncio.create_task(news_watcher())
-    
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
