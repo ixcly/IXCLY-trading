@@ -36,13 +36,13 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 ADMIN_ID = os.getenv('ADMIN_ID') 
 
-# --- ТОЛЬКО ТОП-4 БЫСТРЫЕ БИРЖИ ---
-ex_opts = {'defaultType': 'swap', 'timeout': 3000}
+# --- ТОЛЬКО САМЫЕ НАДЕЖНЫЕ БИРЖИ ---
+ex_opts = {'defaultType': 'swap', 'timeout': 7000}
 exchange_list = [
-    {'name': 'BINANCE', 'ex': ccxt.binance(ex_opts)},
-    {'name': 'BYBIT', 'ex': ccxt.bybit(ex_opts)},
     {'name': 'OKX', 'ex': ccxt.okx(ex_opts)},
-    {'name': 'MEXC', 'ex': ccxt.mexc(ex_opts)}
+    {'name': 'BYBIT', 'ex': ccxt.bybit(ex_opts)},
+    {'name': 'MEXC', 'ex': ccxt.mexc(ex_opts)},
+    {'name': 'GATE', 'ex': ccxt.gate(ex_opts)}
 ]
 
 bot = Bot(token=BOT_TOKEN)
@@ -106,14 +106,14 @@ def get_coins_keyboard(page=0):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def calc_exact_probability(df):
-    ema20 = df['ema20'].iloc[-1]
-    ema50 = df['ema50'].iloc[-1]
-    rsi = df['rsi'].iloc[-1]
+    ema20 = float(df['ema20'].iloc[-1])
+    ema50 = float(df['ema50'].iloc[-1])
+    rsi = float(df['rsi'].iloc[-1])
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
     signal = macd.ewm(span=9, adjust=False).mean()
-    macd_hist = macd.iloc[-1] - signal.iloc[-1]
+    macd_hist = float(macd.iloc[-1] - signal.iloc[-1])
 
     score = 0
     if ema20 > ema50:
@@ -262,17 +262,15 @@ async def fetch_analysis(prompt):
         
     return "ERROR"
 
-# --- ПОИСК НА 4 БИРЖАХ И COINGECKO ---
+# --- ПОИСК НА БИРЖАХ И COINGECKO ---
 async def check_exchange(ex_name, ex_instance, base_coin):
     for symbol in [f"{base_coin}/USDT:USDT", f"{base_coin}/USDT"]:
         try:
-            ticker = await asyncio.wait_for(asyncio.to_thread(ex_instance.fetch_ticker, symbol), timeout=2.5)
-            if not ticker or 'last' not in ticker: continue
-            
             tf_data = {}
             for tf in ['15m', '1h', '4h', '1d']:
-                ohlcv = await asyncio.wait_for(asyncio.to_thread(ex_instance.fetch_ohlcv, symbol, tf, limit=100), timeout=3.0)
-                if not ohlcv: continue
+                # Убрали fetch_ticker, сразу запрашиваем свечи. Timeout увеличен до 6 сек.
+                ohlcv = await asyncio.wait_for(asyncio.to_thread(ex_instance.fetch_ohlcv, symbol, tf, limit=100), timeout=6.0)
+                if not ohlcv: raise Exception("No data")
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['ema20'] = calc_ema(df['close'], 20)
                 df['ema50'] = calc_ema(df['close'], 50)
@@ -295,15 +293,16 @@ async def check_exchange(ex_name, ex_instance, base_coin):
 
 async def fetch_coingecko(base_coin):
     try:
+        # Таймаут CoinGecko увеличен до 10 секунд
         url = f"https://api.coingecko.com/api/v3/search?query={base_coin}"
-        res = await asyncio.to_thread(requests.get, url, timeout=3)
+        res = await asyncio.to_thread(requests.get, url, timeout=10)
         if res.status_code != 200: return None, None
         coins = res.json().get('coins', [])
         if not coins: return None, None
         
         coin_id = coins[0]['id']
         chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=7&interval=daily"
-        chart_res = await asyncio.to_thread(requests.get, chart_url, timeout=3)
+        chart_res = await asyncio.to_thread(requests.get, chart_url, timeout=10)
         if chart_res.status_code != 200: return None, None
         
         prices = chart_res.json().get('prices', [])
@@ -365,7 +364,7 @@ async def process_signal(chat_id, symbol):
                 else:
                     raise ValueError(f"Монета {base_coin} не найдена на биржах и в CoinGecko.")
                 
-            tf_text = "".join([f"[{tf}] RSI: {float(d['rsi']):.2f}, EMA20: {float(d['ema20']):.6f}, EMA50: {float(d['ema50']):.6f}, ATR: {float(d['atr']):.6f}\n" for tf, d in tf_data.items()])
+            tf_text = "".join([f"[{tf}] RSI: {d['rsi']:.2f}, EMA20: {d['ema20']:.6f}, EMA50: {d['ema50']:.6f}, ATR: {d['atr']:.6f}\n" for tf, d in tf_data.items()])
 
             prompt = f"""
             Проанализируй {base_coin}:
@@ -393,7 +392,6 @@ async def process_signal(chat_id, symbol):
             tf_info = tf_data[dominant_tf]
             df = tf_info['df']
             
-            # ПРИНУДИТЕЛЬНАЯ КОНВЕРТАЦИЯ В FLOAT
             entry = float(tf_info['price'])
             atr = float(tf_info['atr'])
             recent_low = float(tf_info['recent_low'])
@@ -443,7 +441,8 @@ async def process_signal(chat_id, symbol):
             image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, long_prob)
             return formatted_text, image_buf
 
-        formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=15.0)
+        # Общий таймаут на всё: 25 секунд (с запасом для медленного Render)
+        formatted_text, image_buf = await asyncio.wait_for(run_analysis(), timeout=25.0)
         await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(image_buf.read(), filename=f"{symbol}.png"), caption=formatted_text, parse_mode='HTML')
         
     except asyncio.TimeoutError:
