@@ -32,7 +32,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(',') if k.strip()]
 
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-CEREBRAS_API_KEY = os.getenv('CEREBRAS_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
@@ -210,9 +209,9 @@ async def fetch_gemini(prompt):
     if not GEMINI_API_KEYS:
         print("Пропуск Gemini: нет API-ключей.", flush=True)
         return None
-    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
     headers = {'Content-Type': 'application/json'}
-    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     for key in GEMINI_API_KEYS:
         headers['x-goog-api-key'] = key
@@ -252,13 +251,7 @@ async def fetch_analysis(prompt):
         print("✅ Успешный ответ от Groq", flush=True)
         return result
 
-    # 3. Cerebras
-    result = await fetch_openai_compatible(prompt, "https://api.cerebras.ai/v1", CEREBRAS_API_KEY, "llama3.1-8b")
-    if result:
-        print("✅ Успешный ответ от Cerebras", flush=True)
-        return result
-
-    # 4. OpenRouter (Актуальная бесплатная модель llama-3.3-70b)
+    # 3. OpenRouter (Актуальная бесплатная модель llama-3.3-70b)
     or_headers = {
         "HTTP-Referer": "https://t.me/ixcly_trade_bot", 
         "X-Title": "IXCLY Trade Bot"
