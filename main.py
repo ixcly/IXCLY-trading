@@ -29,7 +29,7 @@ def keep_alive():
 # ---------------------------------------------------------
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') # Имя переменной оставлено для работы ключа
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
@@ -72,9 +72,9 @@ async def animate_loading(message: types.Message):
         "📡 Сканируем рыночные данные (15m, 1h, 4h, 1d)...",
         "📰 Анализируем мировые новости и настроения...",
         "📊 Рассчитываем индикаторы на всех таймфреймах...",
-        "🧠 Нейросеть ищет точку входа и доминирующий тренд...",
+        "⚙️ Система ищет точку входа и доминирующий тренд...",
         "⚖️ Рассчитываем уровни риска (3 TP / 3 SL)...",
-        "⚙️ Завершаем глубокий анализ данных..."
+        "📈 Завершаем глубокий анализ данных..."
     ]
     try:
         i = 0
@@ -87,8 +87,8 @@ async def animate_loading(message: types.Message):
     except Exception:
         pass
 
-# --- ОТДЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ЗАПРОСА К GEMINI ---
-async def fetch_from_gemini(prompt):
+# --- ОТДЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ЗАПРОСА К API ---
+async def fetch_analysis(prompt):
     models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-medium", "gemini-3.5-flash"]
     session = requests.Session()
     retry_strategy = Retry(total=2, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
@@ -106,7 +106,7 @@ async def fetch_from_gemini(prompt):
             res_data = response.json()
             
             if 'error' in res_data and res_data['error'].get('code') == 503:
-                last_error_message = res_data['error'].get('message', 'Модель перегружена')
+                last_error_message = res_data['error'].get('message', 'Сервер перегружен')
                 continue
             if 'error' in res_data:
                 last_error_message = res_data['error'].get('message', 'Неизвестная ошибка')
@@ -120,7 +120,7 @@ async def fetch_from_gemini(prompt):
     return f"ERROR: {last_error_message}"
 
 # --- АНАЛИЗ НОВОСТЕЙ ---
-async def analyze_news_with_ai(title, summary):
+async def analyze_news(title, summary):
     prompt = f"""
     Ты профессиональный крипто-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
     Заголовок: {title}
@@ -133,9 +133,9 @@ async def analyze_news_with_ai(title, summary):
     
     В конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
     """
-    result = await fetch_from_gemini(prompt)
+    result = await fetch_analysis(prompt)
     if result.startswith("ERROR:"):
-        return f"📰 {title}\n\n(Не удалось получить разбор от ИИ)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
+        return f"📰 {title}\n\n(Не удалось получить разбор новости)\n\n💰ВРЕМЯ ТОРГОВАТЬ💸"
     return result
 
 # --- СБОР ДАННЫХ СО ВСЕХ ТАЙМФРЕЙМОВ ---
@@ -189,15 +189,15 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "dominant_tf": "1h", "reason": "Краткое обоснование на русском."}}
         """
 
-        raw_text = await fetch_from_gemini(prompt)
+        raw_text = await fetch_analysis(prompt)
         if raw_text.startswith("ERROR:"):
-            return f"⚠️ Ошибка API: {raw_text}"
+            return f"⚠️ Ошибка получения данных: {raw_text}"
 
         try:
             clean_response = raw_text.replace('```json', '').replace('```', '').strip()
             ai_data = json.loads(clean_response)
         except Exception:
-            return "⚠️ Нейросеть вернула некорректный формат."
+            return "⚠️ Ошибка обработки данных."
 
         long_prob = ai_data.get("long_prob", 50)
         short_prob = ai_data.get("short_prob", 50)
@@ -222,7 +222,7 @@ async def get_signal_data(symbol):
 
         return (
             f"📊 <b>Мульти-таймфрейм анализ по {symbol}</b>\n\n"
-            f"🤖 <b>Вердикт:</b> {direction}\n"
+            f"📈 <b>Вердикт:</b> {direction}\n"
             f"Вероятность Лонга: <b>{long_prob}%</b>\n"
             f"Вероятность Шорта: <b>{short_prob}%</b>\n"
             f"🎯 <b>Доминирующий ТФ:</b> {dominant_tf}\n\n"
@@ -264,7 +264,7 @@ async def news_watcher():
                         if 'image' in latest_news.enclosures[0].get('type', ''):
                             image_url = latest_news.enclosures[0].get('href')
                     
-                    ai_analysis_text = await analyze_news_with_ai(news_title, news_summary)
+                    ai_analysis_text = await analyze_news(news_title, news_summary)
                     final_text = f"{ai_analysis_text}\n\n🔗 <a href='{news_link}'>Читать источник</a>"
                     
                     for chat_id in list(active_chats):
