@@ -245,18 +245,18 @@ async def fetch_analysis(prompt):
         print("✅ Успешный ответ от Google Gemini", flush=True)
         return result
 
-    # 2. Groq (Актуальная модель llama-3.1-8b-instant)
-    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.1-8b-instant")
+    # 2. Groq (Актуальная модель llama-3.3-70b-versatile)
+    result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
     if result:
         print("✅ Успешный ответ от Groq", flush=True)
         return result
 
-    # 3. OpenRouter (Актуальная бесплатная модель llama-3.3-70b)
+    # 3. OpenRouter (Бесплатная модель google/gemini-2.0-flash-exp:free)
     or_headers = {
         "HTTP-Referer": "https://t.me/ixcly_trade_bot", 
         "X-Title": "IXCLY Trade Bot"
     }
-    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3.3-70b-instruct:free", or_headers)
+    result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "google/gemini-2.0-flash-exp:free", or_headers)
     if result:
         print("✅ Успешный ответ от OpenRouter", flush=True)
         return result
