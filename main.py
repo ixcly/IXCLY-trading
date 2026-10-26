@@ -7,6 +7,7 @@ IXCLY Trading bot v2.9.1
 - ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
 - ПАМЯТЬ НОВОСТЕЙ: проверка сбывшихся прогнозов по кнопке /news
 - ЕЖЕДНЕВНАЯ СТАТИСТИКА: в 00:00 МСК отчет по всем монетам
+- ИЗВЛЕЧЕНИЕ ДАТ: указывает конкретную дату/время события из новости
 """
 import asyncio
 import html
@@ -263,7 +264,6 @@ def get_coins_keyboard(page=0):
         nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"p:{page + 1}"))
     buttons.append(nav)
     
-    # Кнопка статистики
     buttons.append([InlineKeyboardButton(text="📊 Статистика за 24 часа", callback_data="show_stats")])
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -326,6 +326,20 @@ def normalize_ticker(text):
     if t.endswith("USDT") and len(t) > 4:
         t = t[:-4]
     return t
+
+def extract_dates_from_text(text):
+    """Ищет даты в тексте новости на случай, если ИИ не справится."""
+    patterns = [
+        r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?\b',
+        r'\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b',
+        r'\b\d{4}-\d{2}-\d{2}\b'
+    ]
+    found = set()
+    for p in patterns:
+        matches = re.findall(p, text, re.IGNORECASE)
+        for m in matches:
+            found.add(m)
+    return list(found)
 
 # --- МУЛЬТИ-ПЕРЕВОДЧИК ---
 async def translate_text(text, target="ru"):
@@ -556,9 +570,7 @@ async def get_simple_price(coin):
 # ЕЖЕДНЕВНАЯ СТАТИСТИКА И ОТЧЕТ В 00:00 МСК
 # ----------------------------------------------------------------------------
 async def build_daily_stats():
-    """Собирает статистику за 24 часа по всем монетам и красиво оформляет."""
     try:
-        # Получаем данные по всем парам разом (1 запрос вместо 84)
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
         data = {item['symbol']: item for item in j}
     except Exception as e:
@@ -581,7 +593,7 @@ async def build_daily_stats():
                 losers.append((coin, change, open_p, last_p))
                 
     gainers.sort(key=lambda x: x[1], reverse=True)
-    losers.sort(key=lambda x: x[1]) # Самые сильные падения в начале
+    losers.sort(key=lambda x: x[1])
     
     text = "📊 <b>Статистика рынка за 24 часа</b>\n\n"
     
@@ -599,11 +611,9 @@ async def build_daily_stats():
     return text
 
 async def daily_stats_loop():
-    """Фоновая задача: ждет 00:00 по МСК и рассылает статистику."""
     await asyncio.sleep(10)
     while True:
         now_utc = datetime.utcnow()
-        # Москва это UTC+3
         now_msk = now_utc + timedelta(hours=3)
         next_run_msk = now_msk.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         sleep_seconds = (next_run_msk - now_msk).total_seconds()
@@ -621,7 +631,7 @@ async def daily_stats_loop():
         except Exception as e:
             log.error(f"Ошибка при отправке ежедневной статистики: {e}")
             
-        await asyncio.sleep(60) # Защита от двойного срабатывания
+        await asyncio.sleep(60)
 
 # ----------------------------------------------------------------------------
 # ИИ
@@ -963,6 +973,7 @@ async def fetch_and_analyze_news():
         summary = re.sub(r"<[^>]+>", "", getattr(news, "summary", ""))[:800]
         link = news.link
 
+        # Обновленный промпт с указанием даты
         prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость и напиши краткий пост для Telegram СТРОГО НА РУССКОМ ЯЗЫКЕ.
 Заголовок: {title}
 Описание: {summary}
@@ -970,6 +981,7 @@ async def fetch_and_analyze_news():
 ОБЯЗАТЕЛЬНО ПЕРЕВЕДИ ЗАГОЛОВОК И ТЕКСТ НА РУССКИЙ ЯЗЫК. НИКАКОГО АНГЛИЙСКОГО ТЕКСТА В ОТВЕТЕ. Без markdown.
 Ответ краткий, по делу, без воды. Напиши:
 📌 Что произошло (1-2 предложения).
+📅 Дата и время (ЕСЛИ в новости указана конкретная дата или время события, напиши её сюда строго в формате 'ДД.ММ.ГГГГ ЧЧ:ММ (МСК)'. Если даты нет, НЕ ПИШИ этот пункт вообще).
 📉 Как это влияет на рынок (позитив/негатив и почему).
 🎯 Какие монеты затронуты (2-3 тикера, например BTC, ETH) и конкретный вывод: покупать, продавать или ждать.
 """
@@ -983,7 +995,12 @@ async def fetch_and_analyze_news():
             emoji, label = NEWS_LABEL[ns]
             coins = mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"]
             action = {1: "поддержка покупателей, лонги выглядят интереснее", -1: "давление на рынок, осторожнее с лонгами", 0: "без явного перекоса, ждём подтверждения графиком"}[ns]
-            body = f"📌 <b>{html.escape(ru_title)}</b>\n\n<i>{html.escape(ru_summary)}</i>\n\n📉 <b>Влияние:</b> {emoji} {label} фон — {action}.\n🎯 <b>Монеты:</b> {', '.join(coins)}"
+            
+            # Если ИИ не справился, ищем даты сами
+            dates = extract_dates_from_text(f"{title}. {summary}")
+            date_str = f"\n📅 <b>Указанная дата:</b> {', '.join(dates)}" if dates else ""
+            
+            body = f"📌 <b>{html.escape(ru_title)}</b>\n\n<i>{html.escape(ru_summary)}</i>\n{date_str}\n📉 <b>Влияние:</b> {emoji} {label} фон — {action}.\n🎯 <b>Монеты:</b> {', '.join(coins)}"
 
         tag = ENGINE_TAG.get(news_engine if ai_text else "local", "l")
         text = f"{body}\n\n💰ВРЕМЯ ТОРГОВАТЬ💸\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">Читать источник</a> {tag}"
@@ -1948,7 +1965,7 @@ async def main():
         background.append(asyncio.create_task(news_watcher()))
         background.append(asyncio.create_task(backup_loop()))
         background.append(asyncio.create_task(alert_loop()))
-        background.append(asyncio.create_task(daily_stats_loop())) # <-- Ежедневная статистика в 00:00 МСК
+        background.append(asyncio.create_task(daily_stats_loop()))
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
