@@ -42,11 +42,9 @@ last_news_link = None
 
 # --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ ---
 def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, tf, long_prob):
-    # Создаем черное полотно 800x800
     img = Image.new('RGB', (800, 800), color='#111111')
     draw = ImageDraw.Draw(img)
     
-    # Пытаемся загрузить шрифты (на Render обычно есть DejaVu)
     try:
         font_logo = ImageFont.truetype("DejaVuSans-Bold.ttf", 40)
         font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 60)
@@ -55,7 +53,6 @@ def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3,
     except:
         font_logo = font_title = font_text = font_bold = ImageFont.load_default()
 
-    # Цвета
     color_green = '#00FF7F'
     color_red = '#FF4500'
     color_white = '#FFFFFF'
@@ -63,42 +60,34 @@ def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3,
     
     main_color = color_green if "LONG" in direction else color_red
 
-    # Логотип
     draw.text((40, 40), "ixcly trade", font=font_logo, fill=color_white)
-    
-    # Монета и направление
     draw.text((40, 120), f"{symbol}", font=font_title, fill=color_white)
     draw.text((450, 135), f"{direction.split(' ')[1]}", font=font_logo, fill=main_color)
-    
-    # Таймфрейм и вероятность
     draw.text((40, 200), f"TF: {tf}  |  Вероятность: {long_prob}%", font=font_text, fill=color_gray)
 
-    # Рисуем фейковый график (для визуала)
-    graph_y = 260
-    draw.line((40, graph_y+100, 760, graph_y-100 if "LONG" in direction else graph_y+150), fill=main_color, width=4)
+    graph_y = 250
+    draw.line((40, graph_y+40, 760, graph_y-40 if "LONG" in direction else graph_y+80), fill=main_color, width=4)
     for i in range(10):
-        x = 40 + i * 80
-        y = graph_y + np.random.randint(-50, 50)
-        draw.rectangle([x, y-20, x+20, y+20], fill=main_color)
+        x = 40 + i * 75
+        y = graph_y + np.random.randint(-30, 30)
+        draw.rectangle([x, y-15, x+20, y+15], fill=main_color)
 
-    # Уровни
-    y_offset = 450
+    y_offset = 400
     draw.text((40, y_offset), "Точка входа:", font=font_text, fill=color_gray)
-    draw.text((300, y_offset), f"{entry:.4f}", font=font_bold, fill=color_white)
+    draw.text((280, y_offset), f"{entry:.4f}", font=font_bold, fill=color_white)
     
     y_offset += 60
     draw.text((40, y_offset), "Тейк-профиты:", font=font_text, fill=color_gray)
-    draw.text((300, y_offset), f"TP1: {tp1:.4f}", font=font_bold, fill=color_green)
-    draw.text((550, y_offset), f"TP2: {tp2:.4f}", font=font_bold, fill=color_green)
-    draw.text((40, y_offset+40), f"TP3: {tp3:.4f}", font=font_bold, fill=color_green)
+    draw.text((280, y_offset), f"TP1: {tp1:.4f}", font=font_bold, fill=color_green)
+    draw.text((280, y_offset+40), f"TP2: {tp2:.4f}", font=font_bold, fill=color_green)
+    draw.text((280, y_offset+80), f"TP3: {tp3:.4f}", font=font_bold, fill=color_green)
     
-    y_offset += 120
+    y_offset += 160
     draw.text((40, y_offset), "Стоп-лоссы:", font=font_text, fill=color_gray)
-    draw.text((300, y_offset), f"SL1: {sl1:.4f}", font=font_bold, fill=color_red)
-    draw.text((550, y_offset), f"SL2: {sl2:.4f}", font=font_bold, fill=color_red)
-    draw.text((40, y_offset+40), f"SL3: {sl3:.4f}", font=font_bold, fill=color_red)
+    draw.text((280, y_offset), f"SL1: {sl1:.4f}", font=font_bold, fill=color_red)
+    draw.text((280, y_offset+40), f"SL2: {sl2:.4f}", font=font_bold, fill=color_red)
+    draw.text((280, y_offset+80), f"SL3: {sl3:.4f}", font=font_bold, fill=color_red)
 
-    # Сохраняем в буфер
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
@@ -184,14 +173,15 @@ async def fetch_analysis(prompt):
             
     return f"ERROR: {last_error_message}"
 
+# --- АНАЛИЗ НОВОСТЕЙ (УБРАНО СЛОВО СУТЬ) ---
 async def analyze_news(title, summary):
     prompt = f"""
-    Ты профессиональный крипто-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
+    Ты профессиональный крито-аналитик. Прочитай эту новость и напиши пост для Telegram на русском языке.
     Заголовок: {title}
     Описание: {summary}
     
-    В ответе напиши (без лишнего текста):
-    📌 Суть: (что произошло)
+    В ответе напиши (без лишнего текста, НЕ ИСПОЛЬЗУЙ слово "Суть"):
+    📌 (что произошло)
     📉 Влияние на рынок: (позитив/негатив)
     🎯 Затронутые монеты: (из списка: BTC, ETH, SOL, BNB, DOGE, XRP)
     
@@ -282,7 +272,6 @@ async def get_signal_data(symbol):
             sl1, sl2, sl3 = entry + (0.5 * atr), entry + (1.0 * atr), entry + (1.5 * atr)
             tp1, tp2, tp3 = entry - (1.0 * atr), entry - (2.0 * atr), entry - (3.0 * atr)
 
-        # Красивый, структурированный текст
         formatted_text = (
             f"<b>📊 Анализ монеты: {symbol}</b>\n\n"
             f"🎯 <b>Рекомендация:</b> {direction} (Вероятность: {max(long_prob, short_prob)}%)\n"
@@ -301,7 +290,6 @@ async def get_signal_data(symbol):
             f"⚠️ <i>Не является финансовой рекомендацией!</i>"
         )
         
-        # Генерируем картинку
         image_buf = generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, dominant_tf, max(long_prob, short_prob))
         
         return formatted_text, image_buf
@@ -374,11 +362,9 @@ async def process_callback(callback_query: types.CallbackQuery):
         pass
 
     if image_buf:
-        # Отправляем картинку с подписью
         photo = BufferedInputFile(image_buf.read(), filename=f"{symbol}.png")
         await callback_query.message.answer_photo(photo=photo, caption=text_result, parse_mode='HTML')
     else:
-        # Если картинка не сгенерировалась, отправляем просто текст
         await callback_query.message.answer(text_result, parse_mode='HTML')
 
 async def main():
