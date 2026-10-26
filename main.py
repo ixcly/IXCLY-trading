@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.3 (FULL + No AI words + Double Translate)
+IXCLY Trading bot v2.5 (FULL + Username instead of ID)
 """
 import asyncio
 import html
@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("ixcly")
 
 # ----------------------------------------------------------------------------
-# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы сервис считался живым)
+# ВЕБ-СЕРВЕР ДЛЯ RENDER
 # ----------------------------------------------------------------------------
 app = Flask("")
 
@@ -96,6 +96,7 @@ active_chats = set()
 busy_users = set()
 user_last_request = {}
 result_cache = {} 
+notified_users = set()
 RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
@@ -218,10 +219,8 @@ def normalize_ticker(text):
         t = t[:-4]
     return t
 
-# ДВОЙНОЙ ПЕРЕВОДЧИК (Google -> MyMemory)
 async def translate_text(text, target="ru"):
     if not text: return text
-    # 1. Пробуем Google
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text}
@@ -232,7 +231,6 @@ async def translate_text(text, target="ru"):
     except Exception:
         pass
     
-    # 2. Пробуем MyMemory (запасной)
     try:
         url = "https://api.mymemory.translated.net/get"
         params = {"q": text, "langpair": f"en|{target}"}
@@ -243,8 +241,7 @@ async def translate_text(text, target="ru"):
                     return data["responseData"]["translatedText"]
     except Exception:
         pass
-
-    return text # Если оба упали, возвращаем оригинал
+    return text
 
 # ----------------------------------------------------------------------------
 # ИНДИКАТОРЫ
@@ -602,7 +599,6 @@ async def fetch_and_analyze_news():
         if ai_text:
             body = ai_to_html(ai_text)
         else:
-            # Аварийный режим: переводим сами. Никаких слов про ИИ и нейросети.
             ru_title = await translate_text(title)
             ru_summary = await translate_text(summary[:300])
             
@@ -918,17 +914,23 @@ async def process_signal(chat_id, user_id, coin, force=False):
 @dp.message(Command("start", "menu"))
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
-    is_new = save_user_data(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    if is_new and ADMIN_ID:
+    
+    user_name = message.from_user.first_name or "User"
+    username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
+    
+    is_new = save_user_data(message.from_user.id, message.from_user.username, user_name)
+    
+    if is_new and ADMIN_ID and message.from_user.id not in notified_users:
+        notified_users.add(message.from_user.id)
         try:
             await bot.send_message(
                 int(ADMIN_ID),
-                f"👤 <b>Новый пользователь!</b>\n\nID: <code>{message.from_user.id}</code>\n"
-                f"Имя: {html.escape(message.from_user.first_name or '')}",
+                f"👤 <b>Новый пользователь!</b>\n\nИмя: {html.escape(user_name)}\nЮзернейм: {html.escape(username)}",
                 parse_mode="HTML")
         except Exception:
             pass
-    await message.answer("👋 Выбери монету из списка или просто напиши тикер (например: <code>WIF</code>):",
+            
+    await message.answer(f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\nВыбери монету из списка или просто напиши тикер (например: <code>WIF</code>):",
                          parse_mode="HTML", reply_markup=get_coins_keyboard(0))
 
 @dp.message(Command("news"))
@@ -971,7 +973,9 @@ async def callback_handler(cb: types.CallbackQuery):
     if data == "ignore":
         return
     if data == "menu":
-        await bot.send_message(chat_id, "Выбери монету:", reply_markup=get_coins_keyboard(0))
+        user_name = cb.from_user.first_name or "User"
+        username = f"@{cb.from_user.username}" if cb.from_user.username else "Нет юзернейма"
+        await bot.send_message(chat_id, f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\nВыбери монету:", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
     elif data.startswith("p:"):
         try:
             await cb.message.edit_reply_markup(reply_markup=get_coins_keyboard(int(data[2:])))
