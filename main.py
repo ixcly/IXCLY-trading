@@ -50,15 +50,20 @@ def keep_alive():
 
 
 # ----------------------------------------------------------------------------
-# НАСТРОЙКИ
+# НАСТРОЙКИ (ОЧИСТКА КЛЮЧЕЙ ОТ ПРОБЕЛОВ И КАВЫЧЕК)
 # ----------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-CRYPTOCOMPARE_KEY = os.getenv("CRYPTOCOMPARE_KEY")  # необязательно
-ADMIN_ID = os.getenv("ADMIN_ID")
+def clean_key(key):
+    if not key: return None
+    return key.strip().strip('"').strip("'")
 
+BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
+GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
+GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
+OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
+CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
+ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
+
+# Модели оставлены ровно как ты просил
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
@@ -316,14 +321,12 @@ def _p_binance(j):
 def _p_gate(j):
     if not isinstance(j, list):
         raise ValueError("bad response")
-    # [t, quote_vol, close, high, low, open, base_vol, closed]
     return [[float(x[0]) * 1000, float(x[5]), float(x[3]), float(x[4]), float(x[2]), float(x[6])] for x in j]
 
 
 def _p_kucoin(j):
     if j.get("code") != "200000" or not j.get("data"):
         raise ValueError("bad response")
-    # [time, open, close, high, low, volume, turnover], новые первыми
     rows = [[float(x[0]) * 1000, float(x[1]), float(x[3]), float(x[4]), float(x[2]), float(x[5])]
             for x in reversed(j["data"])]
     return rows[-200:]
@@ -457,11 +460,11 @@ async def _ask_gemini(prompt, json_mode):
                                  timeout=aiohttp.ClientTimeout(total=14)) as r:
                 j = await r.json(content_type=None)
                 if r.status != 200:
-                    log.info("Gemini %s: %s", r.status, str(j)[:150])
+                    log.warning(f"Gemini API Error ({r.status}): {str(j)[:100]}")
                     continue
                 return j["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
-            log.info("Gemini error: %s", e)
+            log.warning("Gemini timeout/error: %s", e)
     return None
 
 
@@ -478,11 +481,11 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_
                              timeout=aiohttp.ClientTimeout(total=14)) as r:
             j = await r.json(content_type=None)
             if r.status != 200 or "choices" not in j:
-                log.info("%s %s: %s", base_url, r.status, str(j)[:150])
+                log.warning(f"{base_url} Error ({r.status}): {str(j)[:100]}")
                 return None
             return j["choices"][0]["message"]["content"]
     except Exception as e:
-        log.info("%s error: %s", base_url, e)
+        log.warning("%s timeout/error: %s", base_url, e)
         return None
 
 
@@ -506,7 +509,10 @@ async def ask_ai(prompt, json_mode=False, validate=None, timeout=16):
             return text
         return None
 
-    return await first_success([wrap(p) for p in providers], timeout)
+    res = await first_success([wrap(p) for p in providers], timeout)
+    if not res:
+        log.error("❌ ВСЕ ИИ ПРОВАЙДЕРЫ ОТКАЗАЛИ. Проверьте API-ключи и лимиты.")
+    return res
 
 
 def parse_ai_json(text):
@@ -528,7 +534,7 @@ def ai_to_html(text):
 
 
 # ----------------------------------------------------------------------------
-# НОВОСТИ
+# НОВОСТИ (С УМНЫМ FALLBACK)
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 _news_cache = {"ts": 0.0, "entries": []}
@@ -595,10 +601,17 @@ async def fetch_and_analyze_news():
 🎯 Затронутые монеты — 2-3 тикера (BTC, ETH, SOL, BNB, XRP, DOGE, TON и т.д.).
 """
         ai_text = await ask_ai(prompt, json_mode=False, timeout=20)
+        
         if ai_text:
             body = ai_to_html(ai_text)
         else:
-            body = f"📌 {html.escape(title)}\n\nНе удалось получить разбор от ИИ. Ознакомьтесь с источником."
+            # Умный Fallback: если ИИ упал, сами собираем структуру вместо ошибки
+            body = (
+                f"📌 <b>Суть:</b> {html.escape(title)}\n\n"
+                f"📉 <b>Влияние на рынок:</b> Требуется ручная оценка (ИИ временно недоступен, проверьте лимиты API).\n"
+                f"🧠 <b>Обоснование:</b> Ознакомьтесь с оригиналом новости для принятия решения.\n"
+                f"🎯 <b>Затронутые монеты:</b> BTC, ETH (общий фон).\n"
+            )
 
         text = f"{body}\n\n💰ВРЕМЯ ТОРГОВАТЬ💸\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">Читать источник</a>"
         return text, extract_image(news), True
@@ -628,7 +641,7 @@ async def news_watcher():
             if entries:
                 link = entries[0].link
                 if last_news_link is None:
-                    last_news_link = link  # первый запуск: не рассылаем старое
+                    last_news_link = link
                 elif link != last_news_link:
                     last_news_link = link
                     text, image_url, ok = await fetch_and_analyze_news()
