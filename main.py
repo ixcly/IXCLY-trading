@@ -39,7 +39,6 @@ ADMIN_ID = os.getenv('ADMIN_ID')
 # --- БЕЗОПАСНАЯ ИНИЦИАЛИЗАЦИЯ БИРЖ ---
 ex_opts = {'defaultType': 'swap', 'timeout': 5000}
 
-# Список ID бирж, которые мы хотим использовать
 exchange_ids = [
     'okx', 'bybit', 'binance', 'gate', 'bitget', 'kucoinfutures', 
     'mexc', 'htx', 'phemex', 'bingx', 'krakenfutures', 'bitfinex', 
@@ -48,7 +47,6 @@ exchange_ids = [
 
 exchange_list = []
 for ex_id in exchange_ids:
-    # Проверяем, существует ли такой класс в установленной версии ccxt
     exchange_class = getattr(ccxt, ex_id, None)
     if exchange_class:
         try:
@@ -58,8 +56,6 @@ for ex_id in exchange_ids:
             })
         except Exception as e:
             print(f"⚠️ Не удалось инициализировать {ex_id}: {e}", flush=True)
-    else:
-        print(f"⚠️ Биржа {ex_id} не найдена в этой версии ccxt, пропускаем.", flush=True)
 
 print(f"✅ Загружено бирж: {len(exchange_list)}", flush=True)
 
@@ -315,39 +311,56 @@ async def fetch_coingecko_ohlcv(base_coin):
     except Exception:
         return None
 
-# --- ПАРАЛЛЕЛЬНЫЙ ПОИСК ---
+# --- НАДЕЖНАЯ ПРОВЕРКА СИМВОЛОВ ---
 async def check_exchange_for_coin(ex_name, ex_instance, base_coin):
-    symbol_to_try = f"{base_coin}/USDT:USDT"
-    try:
-        tf_data = {}
-        for tf in ['15m', '1h', '4h', '1d']:
-            ohlcv = await asyncio.wait_for(
-                asyncio.to_thread(ex_instance.fetch_ohlcv, symbol_to_try, tf, limit=100),
-                timeout=5.0
+    # Пробуем разные варианты символа
+    symbol_variants = [
+        f"{base_coin}/USDT:USDT",  # Для фьючерсов
+        f"{base_coin}/USDT"        # Для спота (на случай, если фьючерсов нет)
+    ]
+    
+    for symbol in symbol_variants:
+        try:
+            # 1. Быстрая проверка существования тикера
+            ticker = await asyncio.wait_for(
+                asyncio.to_thread(ex_instance.fetch_ticker, symbol),
+                timeout=4.0
             )
-            if not ohlcv: raise Exception("No data")
+            if not ticker or 'last' not in ticker:
+                continue
             
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['ema20'] = calc_ema(df['close'], 20)
-            df['ema50'] = calc_ema(df['close'], 50)
-            df['rsi'] = calc_rsi(df['close'], 14)
-            df['atr'] = calc_atr(df, 14)
+            # 2. Если тикер есть, качаем OHLCV
+            tf_data = {}
+            for tf in ['15m', '1h', '4h', '1d']:
+                ohlcv = await asyncio.wait_for(
+                    asyncio.to_thread(ex_instance.fetch_ohlcv, symbol, tf, limit=100),
+                    timeout=5.0
+                )
+                if not ohlcv: continue
+                
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['ema20'] = calc_ema(df['close'], 20)
+                df['ema50'] = calc_ema(df['close'], 50)
+                df['rsi'] = calc_rsi(df['close'], 14)
+                df['atr'] = calc_atr(df, 14)
+                
+                tf_data[tf] = {
+                    'df': df,
+                    'price': df['close'].iloc[-1],
+                    'ema20': df['ema20'].iloc[-1],
+                    'ema50': df['ema50'].iloc[-1],
+                    'rsi': df['rsi'].iloc[-1],
+                    'atr': df['atr'].iloc[-1],
+                    'recent_low': df['low'].iloc[-24:].min(),
+                    'recent_high': df['high'].iloc[-24:].max()
+                }
+            if tf_data:
+                print(f"✅ {base_coin} найдена на {ex_name} ({symbol})", flush=True)
+                return tf_data, ex_name
+        except Exception:
+            continue
             
-            tf_data[tf] = {
-                'df': df,
-                'price': df['close'].iloc[-1],
-                'ema20': df['ema20'].iloc[-1],
-                'ema50': df['ema50'].iloc[-1],
-                'rsi': df['rsi'].iloc[-1],
-                'atr': df['atr'].iloc[-1],
-                'recent_low': df['low'].iloc[-24:].min(),
-                'recent_high': df['high'].iloc[-24:].max()
-            }
-        if tf_data:
-            print(f"✅ {base_coin} найдена на {ex_name}", flush=True)
-            return tf_data, ex_name
-    except Exception:
-        return None, None
+    return None, None
 
 async def fetch_ohlcv_parallel(base_coin):
     tasks = []
@@ -355,12 +368,12 @@ async def fetch_ohlcv_parallel(base_coin):
         task = asyncio.create_task(check_exchange_for_coin(item['name'], item['ex'], base_coin))
         tasks.append(task)
     
-    for coro in asyncio.as_completed(tasks):
-        result = await coro
-        if result[0] is not None:
-            for t in tasks:
-                t.cancel()
-            return result
+    # Ждем все задачи, но берем первый успешный результат
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for res in results:
+        if isinstance(res, tuple) and res[0] is not None:
+            return res
     
     return None, None
 
