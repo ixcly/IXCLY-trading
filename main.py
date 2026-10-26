@@ -44,6 +44,46 @@ dp = Dispatcher()
 active_chats = set()
 last_news_link = None
 
+# --- СПИСОК МОНЕТ И ПАГИНАЦИЯ ---
+POPULAR_COINS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
+    "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
+    "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
+    "GALA", "PEPE", "WIF", "BONK", "ORDI", "JUP", "TIA", "SEI"
+]
+
+def get_coins_keyboard(page=0):
+    per_page = 12
+    start = page * per_page
+    end = start + per_page
+    coins_page = POPULAR_COINS[start:end]
+    
+    buttons = []
+    # Формируем сетку по 2 кнопки в ряд
+    for i in range(0, len(coins_page), 2):
+        row = []
+        row.append(InlineKeyboardButton(text=f"{coins_page[i]}", callback_data=f"{coins_page[i]}USDT"))
+        if i + 1 < len(coins_page):
+            row.append(InlineKeyboardButton(text=f"{coins_page[i+1]}", callback_data=f"{coins_page[i+1]}USDT"))
+        buttons.append(row)
+        
+    # Кнопки навигации (Вперед/Назад)
+    nav_row = []
+    total_pages = (len(POPULAR_COINS) + per_page - 1) // per_page
+    
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
+    
+    # Кнопка с текущей страницей (пустая, для красоты)
+    nav_row.append(InlineKeyboardButton(text=f"Стр. {page+1}/{total_pages}", callback_data="ignore"))
+    
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
+        
+    buttons.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# ---------------------------------------------------------
+
 # --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ ---
 def generate_trade_image(symbol, direction, entry, tp1, tp2, tp3, sl1, sl2, sl3, tf, long_prob):
     width, height = 800, 1000
@@ -143,14 +183,6 @@ def calc_atr(df, length=14):
     true_range = np.max(ranges, axis=1)
     return true_range.rolling(length).mean()
 # ---------------------------------------------------------
-
-def get_coins_keyboard():
-    buttons = [
-        [InlineKeyboardButton(text="👑 BTC", callback_data="BTCUSDT"), InlineKeyboardButton(text="💎 ETH", callback_data="ETHUSDT")],
-        [InlineKeyboardButton(text="⚡ SOL", callback_data="SOLUSDT"), InlineKeyboardButton(text="🔶 BNB", callback_data="BNBUSDT")],
-        [InlineKeyboardButton(text="🐶 DOGE", callback_data="DOGEUSDT"), InlineKeyboardButton(text="🌊 XRP", callback_data="XRPUSDT")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def animate_loading(message: types.Message):
     phrases = [
@@ -293,7 +325,7 @@ async def analyze_news(title, summary):
     В ответе напиши (без лишнего текста, НЕ ИСПОЛЬЗУЙ слово "Суть"):
     📌 (что произошло)
     📉 Влияние на рынок: (позитив/негатив)
-    🎯 Затронутые монеты: (из списка: BTC, ETH, SOL, BNB, DOGE, XRP)
+    🎯 Затронутые монеты: (выбери 2-3 монеты из списка: BTC, ETH, SOL, BNB, DOGE, XRP, TON, PEPE, WIF и т.д.)
     
     В конце добавь: 💰ВРЕМЯ ТОРГОВАТЬ💸
     """
@@ -317,7 +349,6 @@ async def get_multi_tf_data(symbol):
             df['rsi'] = calc_rsi(df['close'], 14)
             df['atr'] = calc_atr(df, 14)
             
-            # Ищем локальные минимумы и максимумы за последние 24 свечи
             recent_low = df['low'].iloc[-24:].min()
             recent_high = df['high'].iloc[-24:].max()
             
@@ -341,7 +372,7 @@ async def get_signal_data(symbol):
         
         tf_data = await get_multi_tf_data(okx_symbol)
         if not tf_data:
-            return "❌ Не удалось получить данные с биржи.", None
+            return f"❌ Не удалось получить данные с биржи для {symbol}. Возможно, эта пара недоступна.", None
             
         tf_text = ""
         for tf, data in tf_data.items():
@@ -382,55 +413,38 @@ async def get_signal_data(symbol):
         recent_low = tf_info['recent_low']
         recent_high = tf_info['recent_high']
 
-        # --- УЛУЧШЕННАЯ ЛОГИКА РАССТАНОВКИ УРОВНЕЙ ---
         if long_prob > short_prob:
             direction = "🟢 LONG"
-            
-            # SL1 ставим за локальный минимум, отступая 0.2 ATR для защиты от ложного пробоя
             sl1 = recent_low - (0.2 * atr)
-            # SL2 и SL3 ставим на расстоянии 1.5 и 2.0 ATR от входа
             sl2 = entry - (1.5 * atr)
             sl3 = entry - (2.0 * atr)
-            
-            # Определяем риск как разницу между входом и SL1
             risk = entry - sl1
-            
-            # TP ставим по системе Risk/Reward: 1:1, 1:2, 1:3
             tp1 = entry + (1.0 * risk)
             tp2 = entry + (2.0 * risk)
             tp3 = entry + (3.0 * risk)
-            
         else:
             direction = "🔴 SHORT"
-            
-            # SL1 ставим за локальный максимум, отступая 0.2 ATR для защиты от ложного пробоя
             sl1 = recent_high + (0.2 * atr)
-            # SL2 и SL3 ставим на расстоянии 1.5 и 2.0 ATR от входа
             sl2 = entry + (1.5 * atr)
             sl3 = entry + (2.0 * atr)
-            
-            # Определяем риск как разницу между SL1 и входом
             risk = sl1 - entry
-            
-            # TP ставим по системе Risk/Reward: 1:1, 1:2, 1:3
             tp1 = entry - (1.0 * risk)
             tp2 = entry - (2.0 * risk)
             tp3 = entry - (3.0 * risk)
-        # ------------------------------------------------
 
         formatted_text = (
             f"<b>📊 Анализ монеты: {symbol}</b>\n\n"
             f"🎯 <b>Рекомендация:</b> {direction} (Вероятность: {max(long_prob, short_prob)}%)\n"
             f"⏱ <b>Рабочий таймфрейм:</b> {dominant_tf}\n"
-            f"💵 <b>Текущая цена:</b> <code>{entry:.4f}</code>\n\n"
+            f"💵 <b>Текущая цена:</b> <code>{entry:.6f}</code>\n\n"
             f"🚀 <b>Цели (Take Profit):</b>\n"
-            f"├ TP1: <code>{tp1:.4f}</code>\n"
-            f"├ TP2: <code>{tp2:.4f}</code>\n"
-            f"└ TP3: <code>{tp3:.4f}</code>\n\n"
+            f"├ TP1: <code>{tp1:.6f}</code>\n"
+            f"├ TP2: <code>{tp2:.6f}</code>\n"
+            f"└ TP3: <code>{tp3:.6f}</code>\n\n"
             f"🛑 <b>Стоп-лоссы (Stop Loss):</b>\n"
-            f"├ SL1: <code>{sl1:.4f}</code> (За локальным уровнем)\n"
-            f"├ SL2: <code>{sl2:.4f}</code>\n"
-            f"└ SL3: <code>{sl3:.4f}</code>\n\n"
+            f"├ SL1: <code>{sl1:.6f}</code> (За локальным уровнем)\n"
+            f"├ SL2: <code>{sl2:.6f}</code>\n"
+            f"└ SL3: <code>{sl3:.6f}</code>\n\n"
             f"📰 <b>Обоснование:</b>\n"
             f"<i>{reason}</i>\n\n"
             f"⚠️ <i>Не является финансовой рекомендацией!</i>"
@@ -491,7 +505,7 @@ async def news_watcher():
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
     await message.answer("👋 Главное меню активировано. Выбери монету для анализа:", reply_markup=ReplyKeyboardRemove())
-    await message.answer("👇 Нажми на кнопку ниже:", reply_markup=get_coins_keyboard())
+    await message.answer("👇 Нажми на кнопку ниже (листай стрелками):", reply_markup=get_coins_keyboard(0))
 
 @dp.message(Command('news'))
 async def handle_news_command(message: types.Message):
@@ -533,8 +547,23 @@ async def handle_news_command(message: types.Message):
 
 @dp.callback_query(F.data)
 async def process_callback(callback_query: types.CallbackQuery):
+    data = callback_query.data
+    
+    # Если нажата кнопка "пустышка" (номер страницы)
+    if data == "ignore":
+        await callback_query.answer()
+        return
+        
+    # Обработка листания страниц
+    if data.startswith("page_"):
+        page = int(data.split("_")[1])
+        await callback_query.message.edit_reply_markup(reply_markup=get_coins_keyboard(page))
+        await callback_query.answer()
+        return
+        
+    # Если выбрана монета (анализ)
     await callback_query.answer()
-    symbol = callback_query.data
+    symbol = data
     loading_msg = await callback_query.message.answer(f"⏳ Запрос {symbol}...")
     animation_task = asyncio.create_task(animate_loading(loading_msg))
     
