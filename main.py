@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v3.3
-- Защита от падения при неверном токене админ-бота
+IXCLY Trading bot v3.4
+- Исправлено падение при рассылке (обработка TelegramNotFound)
 - Новости: строгий перевод на русский
 - Свечи: Binance, MEXC, Gate, KuCoin, OKX, Bybit + CryptoCompare
 """
@@ -23,6 +23,7 @@ import pandas as pd
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramNotFound, TelegramUnauthorizedError
 from flask import Flask
 from PIL import Image, ImageDraw, ImageFont
 
@@ -79,7 +80,7 @@ if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
         input_bot = Bot(token=INPUT_BOT_TOKEN)
         input_dp = Dispatcher()
     except Exception as e:
-        log.error(f"Ошибка инициализации админ-бота (возможно неверный токен): {e}")
+        log.error(f"Ошибка инициализации админ-бота: {e}")
         input_bot = None
         input_dp = None
 
@@ -670,6 +671,8 @@ async def news_watcher():
                         for chat_id in list(active_chats):
                             try:
                                 await send_with_image(chat_id, text, img, "news.jpg")
+                            except TelegramNotFound:
+                                active_chats.discard(chat_id)
                             except Exception as e:
                                 if "blocked" in str(e).lower() or "deactivated" in str(e).lower():
                                     active_chats.discard(chat_id)
@@ -1032,6 +1035,9 @@ if input_dp:
                 
                 success += 1
                 await asyncio.sleep(0.05)
+            except TelegramNotFound:
+                active_chats.discard(chat_id)
+                log.warning(f"Пользователь {chat_id} не найден. Удален.")
             except Exception as e:
                 if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
                     active_chats.discard(chat_id)
