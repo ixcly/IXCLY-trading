@@ -108,24 +108,19 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
         """
 
-        # --- ИСПОЛЬЗУЕМ gemini-3.8-flash С ЗАЩИТОЙ ОТ ТАЙМАУТОВ ---
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
-        headers = {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': GEMINI_API_KEY
-        }
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "thinkingConfig": {"thinkingLevel": "LOW"}
-            }
-        }
+        # --- ЗАЩИТА ОТ 503 (ПЕРЕГРУЗКА МОДЕЛИ) И FALLBACK ---
+        # Сначала пробуем основную модель (high tier), затем запасные
+        models_to_try = [
+            "gemini-3.8-flash",          # Основная (по алиасу это high)
+            "gemini-3.8-flash-medium",   # Средняя нагрузка
+            "gemini-3.5-flash"           # Стабильная запасная
+        ]
 
-        # Настраиваем сессию с повторными попытками при таймаутах и ошибках сервера
+        # Настраиваем сессию с повторными попытками
         session = requests.Session()
         retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
+            total=2,  # По 2 повтора на каждую модель
+            backoff_factor=1.5, # Пауза между повторами (1.5с, 3с)
             status_forcelist=[429, 500, 502, 503, 504],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -133,36 +128,58 @@ async def get_signal_data(symbol):
         session.mount("http://", adapter)
 
         res_data = None
-        last_error = None
-        
-        for attempt in range(4):  # 1 основная попытка + 3 повтора
+        last_error_message = ""
+
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            headers = {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': GEMINI_API_KEY
+            }
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "thinkingConfig": {"thinkingLevel": "LOW"}
+                }
+            }
+
             try:
-                # Ждем до 15 сек на соединение и до 90 сек на ответ от ИИ
+                print(f"Пытаемся обратиться к модели: {model_name}")
+                # Таймаут: 15 сек на соединение, 90 сек на чтение (модель может "думать")
                 response = await asyncio.to_thread(
                     session.post, url, headers=headers, json=payload, timeout=(15, 90)
                 )
                 res_data = response.json()
-                break  # Если успешно, выходим из цикла
-            except requests.exceptions.Timeout as e:
-                last_error = e
-                print(f"Попытка {attempt + 1} не удалась (таймаут): {e}")
-                if attempt < 3:
-                    await asyncio.sleep(2)
+
+                # Если в ответе есть ошибка 503 (high demand), идем к следующей модели
+                if 'error' in res_data and res_data['error'].get('code') == 503:
+                    last_error_message = res_data['error'].get('message', 'Модель перегружена')
+                    print(f"Модель {model_name} перегружена (503). Пробуем следующую...")
+                    continue # Переходим к следующей модели в списке
+
+                # Если ошибка 404 (модель не найдена) или другая, тоже пробуем следующую
+                if 'error' in res_data:
+                    last_error_message = res_data['error'].get('message', 'Неизвестная ошибка')
+                    print(f"Ошибка при запросе к {model_name}: {last_error_message}")
+                    continue
+
+                # Если дошли сюда и нет ошибки, значит ответ успешный
+                break
+
+            except requests.exceptions.Timeout:
+                last_error_message = "Таймаут ожидания ответа от нейросети (90 секунд)."
+                print(f"Таймаут при запросе к {model_name}.")
+                continue
             except Exception as e:
-                last_error = e
-                print(f"Попытка {attempt + 1} не удалась (ошибка): {e}")
-                if attempt < 3:
-                    await asyncio.sleep(2)
-        
-        if res_data is None:
-            return f"⚠️ Ошибка: Нейросеть не ответила за 90 секунд. Попробуйте позже."
+                last_error_message = str(e)
+                print(f"Системная ошибка при запросе к {model_name}: {e}")
+                continue
 
-        # ЗАЩИТА ОТ ОШИБОК GEMINI
-        if 'candidates' not in res_data:
-            print(f"GEMINI ERROR RESPONSE: {res_data}")
-            error_message = res_data.get('error', {}).get('message', 'Неизвестная ошибка API')
-            return f"⚠️ Ошибка Gemini API: {error_message}"
+        # Если все модели отказали
+        if res_data is None or 'error' in res_data:
+            return f"⚠️ Не удалось получить ответ от нейросети. Причина: {last_error_message}. Попробуйте позже."
 
+        # --- ПАРСИНГ УСПЕШНОГО ОТВЕТА ---
         try:
             raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
         except (KeyError, IndexError):
