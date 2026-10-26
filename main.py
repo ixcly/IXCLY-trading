@@ -173,6 +173,7 @@ async def animate_loading(message: types.Message):
 # --- УНИВЕРСАЛЬНЫЙ ЗАПРОС К OPENAI-СОВМЕСТИМЫМ API ---
 async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_headers=None):
     if not api_key:
+        print(f"Пропуск {base_url}: нет API-ключа.", flush=True)
         return None
     url = f"{base_url}/chat/completions"
     headers = {
@@ -191,19 +192,19 @@ async def fetch_openai_compatible(prompt, base_url, api_key, model, extra_header
         response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=(15, 90))
         res_data = response.json()
         
-        # Выводим ошибку в консоль Render для отладки
         if 'error' in res_data:
-            print(f"Ошибка от {base_url}: {res_data['error']}")
+            print(f"Ошибка от {base_url}: {res_data['error']}", flush=True)
             return None
             
         return res_data['choices'][0]['message']['content']
     except Exception as e:
-        print(f"Сбой соединения с {base_url}: {e}")
+        print(f"Сбой соединения с {base_url}: {e}", flush=True)
         return None
 
 # --- ЗАПРОС К GEMINI (СПЕЦИАЛЬНЫЙ ФОРМАТ) ---
 async def fetch_gemini(prompt):
     if not GEMINI_API_KEYS:
+        print("Пропуск Gemini: нет API-ключей.", flush=True)
         return None
     models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
     headers = {'Content-Type': 'application/json'}
@@ -220,15 +221,16 @@ async def fetch_gemini(prompt):
                 if 'error' in res_data:
                     error_msg = res_data['error'].get('message', '')
                     if 'exceeded your current quota' in error_msg.lower() or 'quota' in error_msg.lower():
-                        print(f"Ключ Gemini ...{key[-4:]} исчерпан.")
+                        print(f"Ключ Gemini ...{key[-4:]} исчерпан.", flush=True)
                         break
                     if 'high demand' in error_msg.lower() or 'overloaded' in error_msg.lower():
-                        print(f"Модель {model_name} перегружена.")
+                        print(f"Модель {model_name} перегружена.", flush=True)
                         continue
                     return None
                 
                 return res_data['candidates'][0]['content']['parts'][0]['text']
-            except Exception:
+            except Exception as e:
+                print(f"Сбой при запросе к Gemini {model_name}: {e}", flush=True)
                 continue
     return None
 
@@ -237,34 +239,34 @@ async def fetch_analysis(prompt):
     # 1. Google Gemini
     result = await fetch_gemini(prompt)
     if result:
-        print("✅ Успешный ответ от Google Gemini")
+        print("✅ Успешный ответ от Google Gemini", flush=True)
         return result
 
     # 2. Groq
     result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
     if result:
-        print("✅ Успешный ответ от Groq")
+        print("✅ Успешный ответ от Groq", flush=True)
         return result
 
     # 3. Cerebras
     result = await fetch_openai_compatible(prompt, "https://api.cerebras.ai/v1", CEREBRAS_API_KEY, "llama3.1-8b")
     if result:
-        print("✅ Успешный ответ от Cerebras")
+        print("✅ Успешный ответ от Cerebras", flush=True)
         return result
 
-    # 4. OpenRouter (Исправленная модель и добавлены обязательные заголовки)
+    # 4. OpenRouter
     or_headers = {
         "HTTP-Referer": "https://t.me/ixcly_trade_bot", 
         "X-Title": "IXCLY Trade Bot"
     }
     result = await fetch_openai_compatible(prompt, "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3-8b-instruct:free", or_headers)
     if result:
-        print("✅ Успешный ответ от OpenRouter")
+        print("✅ Успешный ответ от OpenRouter", flush=True)
         return result
 
-    # Если все провайдеры отказали
-    print("❌ Все провайдеры отказали.")
-    return "ERROR: Все доступные нейросети перегружены или исчерпали лимиты. Попробуйте позже."
+    # Если все системы отказали
+    print("❌ Все системы отказали.", flush=True)
+    return "ERROR: Все доступные системы перегружены или исчерпали лимиты. Попробуйте позже."
 
 async def analyze_news(title, summary):
     prompt = f"""
@@ -307,7 +309,7 @@ async def get_multi_tf_data(symbol):
                 'atr': df['atr'].iloc[-1]
             }
         except Exception as e:
-            print(f"Ошибка при получении данных {tf}: {e}")
+            print(f"Ошибка при получении данных {tf}: {e}", flush=True)
             
     return data_summary
 
@@ -388,7 +390,7 @@ async def get_signal_data(symbol):
         return formatted_text, image_buf
 
     except Exception as e:
-        print(f"ERROR: {str(e)}")
+        print(f"ERROR: {str(e)}", flush=True)
         return f"⚠️ Системная ошибка: {str(e)}", None
 
 async def news_watcher():
@@ -427,9 +429,9 @@ async def news_watcher():
                             else:
                                 await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='HTML', disable_web_page_preview=False)
                         except Exception as e:
-                            print(f"Не удалось отправить новость в чат {chat_id}: {e}")
+                            print(f"Не удалось отправить новость в чат {chat_id}: {e}", flush=True)
         except Exception as e:
-            print(f"Ошибка при чтении новостей: {e}")
+            print(f"Ошибка при чтении новостей: {e}", flush=True)
         await asyncio.sleep(900)
 
 # --- ХЕНДЛЕРЫ КОМАНД ---
@@ -501,7 +503,7 @@ async def process_callback(callback_query: types.CallbackQuery):
 
 async def main():
     keep_alive()
-    print("Бот запущен...")
+    print("Бот запущен...", flush=True)
     
     await bot.set_my_commands([
         types.BotCommand(command="menu", description="🚀 Открыть меню"),
@@ -513,7 +515,7 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except Exception as e:
-        print(f"Критическая ошибка при запуске: {e}")
+        print(f"Критическая ошибка при запуске: {e}", flush=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
