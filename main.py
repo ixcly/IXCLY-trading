@@ -33,6 +33,9 @@ GEMINI_API_KEYS = [k.strip() for k in os.getenv('GEMINI_API_KEYS', '').split(','
 
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+AION_API_KEY = os.getenv('AION_API_KEY')
+CLOUDFLARE_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
+CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID')
 
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}})
 bot = Bot(token=BOT_TOKEN)
@@ -245,13 +248,13 @@ async def fetch_analysis(prompt):
         print("✅ Успешный ответ от Google Gemini", flush=True)
         return result
 
-    # 2. Groq (Актуальная модель llama-3.3-70b-versatile)
+    # 2. Groq
     result = await fetch_openai_compatible(prompt, "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.3-70b-versatile")
     if result:
         print("✅ Успешный ответ от Groq", flush=True)
         return result
 
-    # 3. OpenRouter (Бесплатная модель google/gemini-2.0-flash-exp:free)
+    # 3. OpenRouter
     or_headers = {
         "HTTP-Referer": "https://t.me/ixcly_trade_bot", 
         "X-Title": "IXCLY Trade Bot"
@@ -260,6 +263,22 @@ async def fetch_analysis(prompt):
     if result:
         print("✅ Успешный ответ от OpenRouter", flush=True)
         return result
+
+    # 4. Aion Labs
+    result = await fetch_openai_compatible(prompt, "https://api.aionlabs.ai/v1", AION_API_KEY, "aion-labs/aion-2.0")
+    if result:
+        print("✅ Успешный ответ от Aion Labs", flush=True)
+        return result
+
+    # 5. Cloudflare Workers AI
+    if CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID:
+        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+        result = await fetch_openai_compatible(prompt, cf_url, CLOUDFLARE_API_TOKEN, "@cf/meta/llama-3.1-8b-instruct")
+        if result:
+            print("✅ Успешный ответ от Cloudflare Workers AI", flush=True)
+            return result
+    else:
+        print("Пропуск Cloudflare: нет токена или Account ID.", flush=True)
 
     # Если все системы отказали
     print("❌ Все системы отказали.", flush=True)
