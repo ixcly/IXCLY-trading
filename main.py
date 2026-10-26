@@ -36,30 +36,32 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 ADMIN_ID = os.getenv('ADMIN_ID') 
 
-# --- РАСШИРЕННЫЙ СПИСОК БИРЖ (20 штук) ---
+# --- БЕЗОПАСНАЯ ИНИЦИАЛИЗАЦИЯ БИРЖ ---
 ex_opts = {'defaultType': 'swap', 'timeout': 5000}
-exchange_list = [
-    {'name': 'OKX', 'ex': ccxt.okx(ex_opts)},
-    {'name': 'Bybit', 'ex': ccxt.bybit(ex_opts)},
-    {'name': 'Binance', 'ex': ccxt.binance(ex_opts)},
-    {'name': 'Gate.io', 'ex': ccxt.gate(ex_opts)},
-    {'name': 'Bitget', 'ex': ccxt.bitget(ex_opts)},
-    {'name': 'KuCoin', 'ex': ccxt.kucoinfutures(ex_opts)},
-    {'name': 'MEXC', 'ex': ccxt.mexc(ex_opts)},
-    {'name': 'HTX', 'ex': ccxt.htx(ex_opts)},
-    {'name': 'Phemex', 'ex': ccxt.phemex(ex_opts)},
-    {'name': 'BingX', 'ex': ccxt.bingx(ex_opts)},
-    {'name': 'Kraken', 'ex': ccxt.krakenfutures(ex_opts)},
-    {'name': 'Bitfinex', 'ex': ccxt.bitfinex(ex_opts)},
-    {'name': 'Bitstamp', 'ex': ccxt.bitstamp(ex_opts)},
-    {'name': 'Poloniex', 'ex': ccxt.poloniex(ex_opts)},
-    {'name': 'AscendEX', 'ex': ccxt.ascendex(ex_opts)},
-    {'name': 'WhiteBIT', 'ex': ccxt.whitebit(ex_opts)},
-    {'name': 'LBank', 'ex': ccxt.lbank(ex_opts)},
-    {'name': 'CoinEX', 'ex': ccxt.coinex(ex_opts)},
-    {'name': 'XT', 'ex': ccxt.xt(ex_opts)},
-    {'name': 'BitMart', 'ex': ccxt.bitmart(ex_opts)}
+
+# Список ID бирж, которые мы хотим использовать
+exchange_ids = [
+    'okx', 'bybit', 'binance', 'gate', 'bitget', 'kucoinfutures', 
+    'mexc', 'htx', 'phemex', 'bingx', 'krakenfutures', 'bitfinex', 
+    'poloniex', 'whitebit', 'coinex', 'xt', 'bitmart'
 ]
+
+exchange_list = []
+for ex_id in exchange_ids:
+    # Проверяем, существует ли такой класс в установленной версии ccxt
+    exchange_class = getattr(ccxt, ex_id, None)
+    if exchange_class:
+        try:
+            exchange_list.append({
+                'name': ex_id.upper(), 
+                'ex': exchange_class(ex_opts)
+            })
+        except Exception as e:
+            print(f"⚠️ Не удалось инициализировать {ex_id}: {e}", flush=True)
+    else:
+        print(f"⚠️ Биржа {ex_id} не найдена в этой версии ccxt, пропускаем.", flush=True)
+
+print(f"✅ Загружено бирж: {len(exchange_list)}", flush=True)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -218,9 +220,9 @@ def calc_atr(df, length=14):
 
 async def animate_loading(message: types.Message, symbol_name="Монета"):
     phrases = [
-        f"📡 Ищем {symbol_name} на 20 биржах...",
-        "🔍 Проверяем OKX, Bybit, Binance, Gate...",
-        "⚡ Параллельный поиск по всем площадкам...",
+        f"📡 Ищем {symbol_name} на биржах...",
+        "🔍 Проверяем OKX, Bybit, Binance...",
+        "⚡ Параллельный поиск...",
         "📊 Считаем индикаторы...",
         "⚖️ Готовим уровни..."
     ]
@@ -272,7 +274,6 @@ async def fetch_analysis(prompt):
 # --- ПОИСК ЧЕРЕЗ COINGECKO (ЕСЛИ НЕТ НА БИРЖАХ) ---
 async def fetch_coingecko_ohlcv(base_coin):
     try:
-        # Ищем монету по тикеру
         url = f"https://api.coingecko.com/api/v3/search?query={base_coin}"
         res = await asyncio.to_thread(requests.get, url, timeout=10)
         if res.status_code != 200: return None
@@ -280,10 +281,7 @@ async def fetch_coingecko_ohlcv(base_coin):
         coins = data.get('coins', [])
         if not coins: return None
         
-        # Берем первый результат
         coin_id = coins[0]['id']
-        
-        # Получаем исторические данные (daily, так как OHLCV для фьючерсов может не быть)
         chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=7&interval=daily"
         chart_res = await asyncio.to_thread(requests.get, chart_url, timeout=10)
         if chart_res.status_code != 200: return None
@@ -292,14 +290,12 @@ async def fetch_coingecko_ohlcv(base_coin):
         prices = chart_data.get('prices', [])
         if not prices: return None
         
-        # Формируем DataFrame
         df = pd.DataFrame(prices, columns=['timestamp', 'close'])
         df['open'] = df['close'].shift(1).fillna(df['close'])
         df['high'] = df[['open', 'close']].max(axis=1)
         df['low'] = df[['open', 'close']].min(axis=1)
         df['volume'] = 0
         
-        # Считаем индикаторы
         df['ema20'] = calc_ema(df['close'], 20)
         df['ema50'] = calc_ema(df['close'], 50)
         df['rsi'] = calc_rsi(df['close'], 14)
@@ -319,7 +315,7 @@ async def fetch_coingecko_ohlcv(base_coin):
     except Exception:
         return None
 
-# --- ПАРАЛЛЕЛЬНЫЙ ПОИСК ПО 20 БИРЖАМ ---
+# --- ПАРАЛЛЕЛЬНЫЙ ПОИСК ---
 async def check_exchange_for_coin(ex_name, ex_instance, base_coin):
     symbol_to_try = f"{base_coin}/USDT:USDT"
     try:
@@ -354,17 +350,14 @@ async def check_exchange_for_coin(ex_name, ex_instance, base_coin):
         return None, None
 
 async def fetch_ohlcv_parallel(base_coin):
-    # Создаем задачи для всех бирж
     tasks = []
     for item in exchange_list:
         task = asyncio.create_task(check_exchange_for_coin(item['name'], item['ex'], base_coin))
         tasks.append(task)
     
-    # Ждем первый успешный результат
     for coro in asyncio.as_completed(tasks):
         result = await coro
-        if result[0] is not None:  # Если данные получены
-            # Отменяем остальные задачи
+        if result[0] is not None:
             for t in tasks:
                 t.cancel()
             return result
@@ -385,21 +378,19 @@ async def process_signal(chat_id, symbol):
     try:
         base_coin = symbol.replace('USDT', '')
         
-        # 1. Параллельный поиск по биржам
         tf_data, found_exchange = await fetch_ohlcv_parallel(base_coin)
         
-        # 2. Если на биржах нет, пробуем CoinGecko
         if not tf_data:
             print(f"⚠️ {base_coin} нет на биржах, пробуем CoinGecko...", flush=True)
             cg_data = await fetch_coingecko_ohlcv(base_coin)
             if cg_data:
-                tf_data = {'1d': cg_data}  # Используем дневной таймфрейм
+                tf_data = {'1d': cg_data}
                 found_exchange = 'CoinGecko (Fallback)'
             else:
                 animation_task.cancel()
                 try: await loading_msg.delete()
                 except Exception: pass
-                await bot.send_message(chat_id, f"❌ Монета {base_coin} не найдена ни на 20 биржах, ни на CoinGecko.")
+                await bot.send_message(chat_id, f"❌ Монета {base_coin} не найдена ни на биржах, ни на CoinGecko.")
                 return
             
         tf_text = ""
