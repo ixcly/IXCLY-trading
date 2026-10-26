@@ -106,15 +106,15 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
         """
 
-        # Используем актуальную модель gemini-1.5-flash
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        # ИСПОЛЬЗУЕМ АКТУАЛЬНУЮ МОДЕЛЬ gemini-2.5-flash
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         headers = {'Content-Type': 'application/json'}
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         
         response = await asyncio.to_thread(requests.post, url, headers=headers, json=payload, timeout=25)
         res_data = response.json()
         
-        # ЗАЩИТА ОТ ОШИБОК GEMINI (Выведет точную причину, если что-то не так)
+        # ЗАЩИТА ОТ ОШИБОК GEMINI
         if 'candidates' not in res_data:
             print(f"GEMINI ERROR RESPONSE: {res_data}")
             error_message = res_data.get('error', {}).get('message', 'Неизвестная ошибка API')
