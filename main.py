@@ -1394,19 +1394,15 @@ async def callback_handler(cb: types.CallbackQuery):
 # РАССЫЛКА (общая для админ-панели и автоновостей)
 # ----------------------------------------------------------------------------
 async def notify_admins(text):
+    """Уведомления идут ТОЛЬКО в админ-бот. В основной бот ничего не пишем."""
+    if not input_bot:
+        log.warning("Уведомление админу не отправлено: админ-бот не запущен (см. /status)")
+        return
     for aid in ADMIN_IDS:
-        sent = False
-        if input_bot:
-            try:
-                await input_bot.send_message(aid, text, parse_mode="HTML")
-                sent = True
-            except Exception:
-                pass
-        if not sent:
-            try:
-                await bot.send_message(aid, text, parse_mode="HTML")
-            except Exception:
-                pass
+        try:
+            await input_bot.send_message(aid, text, parse_mode="HTML")
+        except Exception as e:
+            log.warning("Админ-бот не смог написать админу %s: %s. Откройте админ-бота и нажмите /start.", aid, e)
 
 
 async def send_payload(chat_id, p, cache):
@@ -1480,11 +1476,13 @@ async def send_backup(caption="💾 Бэкап базы пользователе
     users = _load_users()
     if not users:
         return False
+    if not input_bot:
+        log.warning("Бэкап не отправлен: админ-бот не запущен")
+        return False
     data = json.dumps(users, ensure_ascii=False, indent=2).encode("utf-8")
-    sender = input_bot or bot
     for aid in ADMIN_IDS:
         try:
-            await sender.send_document(aid, BufferedInputFile(data, "users.json"),
+            await input_bot.send_document(aid, BufferedInputFile(data, "users.json"),
                                        caption=f"{caption}\nПользователей: {len(users)}")
         except Exception as e:
             log.warning("Бэкап не отправлен админу %s: %s", aid, e)
