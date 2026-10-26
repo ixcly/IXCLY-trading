@@ -4,6 +4,7 @@ IXCLY Trading bot v2.9.1
 - Цепочка ИИ: Gemini/Groq/OpenRouter (с ключами) -> бесплатный GPT без ключа (Pollinations) -> локальный движок
 - Локальный движок работает ВСЕГДА (мульти-ТФ + волатильность + новостной сентимент) и даёт ENTER/WAIT
 - Мировые + крипто-новости идут в анализ каждой монеты
+- ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
 """
 import asyncio
 import html
@@ -38,15 +39,12 @@ log = logging.getLogger("ixcly")
 # ----------------------------------------------------------------------------
 app = Flask("")
 
-
 @app.route("/")
 def home():
     return "Bot is alive!"
 
-
 @app.route("/status")
 def status_page():
-    """Открой https://<твой-сервис>.onrender.com/status в браузере: покажет, что реально запущено."""
     return jsonify({
         "version": VERSION,
         "uptime_s": int(time.time() - stats["started"]),
@@ -58,15 +56,12 @@ def status_page():
         "recipients": len(active_chats),
     })
 
-
 def _run_web():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-
 def keep_alive():
     Thread(target=_run_web, daemon=True).start()
-
 
 # ----------------------------------------------------------------------------
 # НАСТРОЙКИ
@@ -76,21 +71,19 @@ def clean_key(key):
         return None
     return key.strip().strip('"').strip("'")
 
-
 BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
 INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
-POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))  # необязательно (бесплатный ключ на enter.pollinations.ai)
-ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))  # один или несколько числовых Telegram ID через запятую
+POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))
+ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 ADMIN_IDS = set()
 for _x in re.split(r"[,\s]+", ADMIN_ID or ""):
     if _x.lstrip("-").isdigit():
         ADMIN_IDS.add(int(_x))
 
-# gemini-1.5-flash отключён Google, поэтому по умолчанию актуальная модель
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
@@ -102,10 +95,8 @@ if not BOT_TOKEN:
 VERSION = "2.9.1"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
-
 def _bot_id(t):
     return t.split(":")[0] if t and ":" in t else ("не задан" if not t else "неверный формат")
-
 
 print(f"=== IXCLY v{VERSION} | BOT_TOKEN id={_bot_id(BOT_TOKEN)} | INPUT_BOT_TOKEN id={_bot_id(INPUT_BOT_TOKEN)} "
       f"| совпадают={bool(INPUT_BOT_TOKEN) and INPUT_BOT_TOKEN == BOT_TOKEN} | ADMIN_IDS={len(ADMIN_IDS)} ===", flush=True)
@@ -129,11 +120,12 @@ TFS = ["15m", "1h", "4h", "1d"]
 TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 MIN_CANDLES = 25
 
+# --- ОБНОВЛЕННЫЙ СПИСОК ИЗ 40 МОНЕТ ---
 POPULAR_COINS = [
-    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
-    "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
-    "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
-    "GALA", "PEPE", "WIF", "BONK", "ORDI", "JUP", "TIA", "SEI",
+    "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "AVAX", "DOGE", "DOT", "LINK",
+    "MATIC", "LTC", "BCH", "UNI", "ATOM", "XLM", "ALGO", "FIL", "VET", "ICP",
+    "HBAR", "ETC", "XMR", "AAVE", "MKR", "SNX", "COMP", "SAND", "MANA", "AXS",
+    "GALA", "THETA", "EOS", "TRX", "NEO", "IOTA", "QTUM", "ZEC", "DASH", "CHZ"
 ]
 
 USERS_FILE = "users.json"
@@ -145,9 +137,8 @@ notified_users = set()
 RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
-stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time(), "engines": Counter()}
-bot_flags = {"news_enabled": True, "instant": True}
-
+stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "alerts_sent": 0, "started": time.time(), "engines": Counter()}
+bot_flags = {"news_enabled": True, "instant": True, "alerts_enabled": True}
 
 # ----------------------------------------------------------------------------
 # ПОЛЬЗОВАТЕЛИ
@@ -159,7 +150,6 @@ def _load_users():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-
 def _save_users(users):
     try:
         tmp = USERS_FILE + ".tmp"
@@ -169,9 +159,7 @@ def _save_users(users):
     except Exception as e:
         log.warning("Не удалось сохранить users.json: %s", e)
 
-
 def save_user_data(user_id, username, first_name):
-    """True, если пользователь новый. Вернувшегося (ранее заблокировавшего бота) снова включает в рассылку."""
     users = _load_users()
     key = str(user_id)
     if key in users:
@@ -188,7 +176,6 @@ def save_user_data(user_id, username, first_name):
     _save_users(users)
     return True
 
-
 def set_users_active(ids, active):
     users = _load_users()
     changed = False
@@ -199,7 +186,6 @@ def set_users_active(ids, active):
             changed = True
     if changed:
         _save_users(users)
-
 
 def load_active_chats():
     active_chats.clear()
@@ -212,9 +198,7 @@ def load_active_chats():
             pass
     log.info("Получателей рассылки и новостей: %d", len(active_chats))
 
-
 def user_counts():
-    """(всего в базе, активных, новых сегодня, новых за 7 дней)"""
     users = _load_users()
     today = datetime.now().date()
     active = new_today = new_week = 0
@@ -231,7 +215,6 @@ def user_counts():
         except Exception:
             pass
     return len(users), active, new_today, new_week
-
 
 # ----------------------------------------------------------------------------
 # КЛАВИАТУРЫ
@@ -257,13 +240,11 @@ def get_coins_keyboard(page=0):
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def result_keyboard(coin):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
         InlineKeyboardButton(text="📋 Меню", callback_data="menu"),
     ]])
-
 
 # ----------------------------------------------------------------------------
 # ВСПОМОГАТЕЛЬНОЕ
@@ -278,7 +259,6 @@ def fmt(p):
     if a >= 0.01:
         return f"{p:.5f}"
     return f"{p:.8f}"
-
 
 async def first_success(coros, timeout):
     tasks = [asyncio.create_task(c) for c in coros]
@@ -305,14 +285,12 @@ async def first_success(coros, timeout):
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-
 async def http_json(url, params=None, headers=None, timeout=8):
     async with http.get(url, params=params, headers=headers,
                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
         if r.status != 200:
             raise RuntimeError(f"HTTP {r.status}")
         return await r.json(content_type=None)
-
 
 def normalize_ticker(text):
     t = text.upper().strip()
@@ -321,12 +299,10 @@ def normalize_ticker(text):
         t = t[:-4]
     return t
 
-
-# --- МУЛЬТИ-ПЕРЕВОДЧИК (4 ПРОВАЙДЕРА) ---
+# --- МУЛЬТИ-ПЕРЕВОДЧИК ---
 async def translate_text(text, target="ru"):
     if not text:
         return text
-
     try:
         url = f"https://lingva.ml/api/v1/auto/{target}/{quote(text, safe='')}"
         async with http.get(url, timeout=aiohttp.ClientTimeout(total=6)) as r:
@@ -336,7 +312,6 @@ async def translate_text(text, target="ru"):
                     return data["translation"]
     except Exception:
         pass
-
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text}
@@ -346,7 +321,6 @@ async def translate_text(text, target="ru"):
                 return "".join([item[0] for item in data[0]])
     except Exception:
         pass
-
     try:
         url = "https://api.mymemory.translated.net/get"
         params = {"q": text[:450], "langpair": f"en|{target}"}
@@ -357,7 +331,6 @@ async def translate_text(text, target="ru"):
                     return data["responseData"]["translatedText"]
     except Exception:
         pass
-
     try:
         url = "https://translate.argosopentech.com/translate"
         payload = {"q": text, "source": "auto", "target": target, "format": "text"}
@@ -368,9 +341,7 @@ async def translate_text(text, target="ru"):
                     return data["translatedText"]
     except Exception:
         pass
-
     return text
-
 
 # ----------------------------------------------------------------------------
 # ИНДИКАТОРЫ
@@ -400,7 +371,6 @@ def add_indicators(df):
     df["macd_hist"] = macd - signal
     return df
 
-
 def calc_probability(df):
     ema20 = float(df["ema20"].iloc[-1])
     ema50 = float(df["ema50"].iloc[-1]) or 1e-12
@@ -424,7 +394,6 @@ def calc_probability(df):
     long_prob = max(5.0, min(95.0, 50 + score / 2))
     return round(long_prob, 2), round(100 - long_prob, 2)
 
-
 def rows_to_df(rows):
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
     df = df.drop_duplicates("ts").sort_values("ts")
@@ -432,7 +401,6 @@ def rows_to_df(rows):
     if len(df) < MIN_CANDLES:
         raise ValueError("мало свечей")
     return add_indicators(df)
-
 
 def build_tf_data(rows_by_tf):
     out = {}
@@ -454,7 +422,6 @@ def build_tf_data(rows_by_tf):
         }
     return out
 
-
 # ----------------------------------------------------------------------------
 # ИСТОЧНИКИ ДАННЫХ
 # ----------------------------------------------------------------------------
@@ -463,12 +430,10 @@ def _p_binance(j):
         raise ValueError("bad response")
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
 
-
 def _p_gate(j):
     if not isinstance(j, list):
         raise ValueError("bad response")
     return [[float(x[0]) * 1000, float(x[5]), float(x[3]), float(x[4]), float(x[2]), float(x[6])] for x in j]
-
 
 def _p_kucoin(j):
     if j.get("code") != "200000" or not j.get("data"):
@@ -477,12 +442,10 @@ def _p_kucoin(j):
             for x in reversed(j["data"])]
     return rows[-200:]
 
-
 def _p_okx(j):
     if j.get("code") != "0" or not j.get("data"):
         raise ValueError("bad response")
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["data"])]
-
 
 def _p_bybit(j):
     if j.get("retCode") != 0 or not j.get("result", {}).get("list"):
@@ -490,52 +453,14 @@ def _p_bybit(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])]
             for x in reversed(j["result"]["list"])]
 
-
 EXCHANGES = [
-    {
-        "name": "BINANCE",
-        "url": "https://data-api.binance.vision/api/v3/klines",
-        "params": lambda c, tf: {"symbol": f"{c}USDT", "interval": tf, "limit": 200},
-        "parse": _p_binance,
-    },
-    {
-        "name": "MEXC",
-        "url": "https://api.mexc.com/api/v3/klines",
-        "params": lambda c, tf: {"symbol": f"{c}USDT", "interval": {"1h": "60m"}.get(tf, tf), "limit": 200},
-        "parse": _p_binance,
-    },
-    {
-        "name": "GATE",
-        "url": "https://api.gateio.ws/api/v4/spot/candlesticks",
-        "params": lambda c, tf: {"currency_pair": f"{c}_USDT", "interval": tf, "limit": 200},
-        "parse": _p_gate,
-    },
-    {
-        "name": "KUCOIN",
-        "url": "https://api.kucoin.com/api/v1/market/candles",
-        "params": lambda c, tf: {
-            "symbol": f"{c}-USDT",
-            "type": {"15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day"}[tf],
-            "startAt": int(time.time() - 200 * TF_SECONDS[tf]),
-            "endAt": int(time.time()),
-        },
-        "parse": _p_kucoin,
-    },
-    {
-        "name": "OKX",
-        "url": "https://www.okx.com/api/v5/market/candles",
-        "params": lambda c, tf: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": 200},
-        "parse": _p_okx,
-    },
-    {
-        "name": "BYBIT",
-        "url": "https://api.bybit.com/v5/market/kline",
-        "params": lambda c, tf: {"category": "spot", "symbol": f"{c}USDT",
-                                 "interval": {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}[tf], "limit": 200},
-        "parse": _p_bybit,
-    },
+    {"name": "BINANCE", "url": "https://data-api.binance.vision/api/v3/klines", "params": lambda c, tf: {"symbol": f"{c}USDT", "interval": tf, "limit": 200}, "parse": _p_binance},
+    {"name": "MEXC", "url": "https://api.mexc.com/api/v3/klines", "params": lambda c, tf: {"symbol": f"{c}USDT", "interval": {"1h": "60m"}.get(tf, tf), "limit": 200}, "parse": _p_binance},
+    {"name": "GATE", "url": "https://api.gateio.ws/api/v4/spot/candlesticks", "params": lambda c, tf: {"currency_pair": f"{c}_USDT", "interval": tf, "limit": 200}, "parse": _p_gate},
+    {"name": "KUCOIN", "url": "https://api.kucoin.com/api/v1/market/candles", "params": lambda c, tf: {"symbol": f"{c}-USDT", "type": {"15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day"}[tf], "startAt": int(time.time() - 200 * TF_SECONDS[tf]), "endAt": int(time.time())}, "parse": _p_kucoin},
+    {"name": "OKX", "url": "https://www.okx.com/api/v5/market/candles", "params": lambda c, tf: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": 200}, "parse": _p_okx},
+    {"name": "BYBIT", "url": "https://api.bybit.com/v5/market/kline", "params": lambda c, tf: {"category": "spot", "symbol": f"{c}USDT", "interval": {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}[tf], "limit": 200}, "parse": _p_bybit},
 ]
-
 
 async def _fetch_klines(ex, coin, tf):
     j = await http_json(ex["url"], params=ex["params"](coin, tf), timeout=8)
@@ -544,7 +469,6 @@ async def _fetch_klines(ex, coin, tf):
         raise ValueError("мало свечей")
     return rows
 
-
 async def fetch_from_exchange(ex, coin):
     results = await asyncio.gather(*[_fetch_klines(ex, coin, tf) for tf in TFS], return_exceptions=True)
     for r in results:
@@ -552,7 +476,6 @@ async def fetch_from_exchange(ex, coin):
             log.info("%s %s: %s", ex["name"], coin, r)
             return None
     return await asyncio.to_thread(build_tf_data, dict(zip(TFS, results))), ex["name"]
-
 
 async def fetch_cryptocompare(coin):
     specs = {"15m": ("histominute", 15), "1h": ("histohour", 1), "4h": ("histohour", 4), "1d": ("histoday", 1)}
@@ -581,7 +504,6 @@ async def fetch_cryptocompare(coin):
             return None
     return await asyncio.to_thread(build_tf_data, dict(zip(TFS, results))), "CRYPTOCOMPARE"
 
-
 async def get_market_data(coin):
     res = await first_success([fetch_from_exchange(ex, coin) for ex in EXCHANGES], timeout=12)
     if res:
@@ -591,9 +513,8 @@ async def get_market_data(coin):
         return res
     raise LookupError(coin)
 
-
 # ----------------------------------------------------------------------------
-# ИИ: ключевые провайдеры -> бесплатный GPT без ключа
+# ИИ
 # ----------------------------------------------------------------------------
 async def _ask_gemini(prompt, json_mode):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -612,7 +533,6 @@ async def _ask_gemini(prompt, json_mode):
         except Exception as e:
             log.warning("Gemini timeout/error: %s", e)
     return None
-
 
 async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_headers=None, use_json_format=False):
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -634,9 +554,7 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_
         log.warning("%s timeout/error: %s", base_url, e)
         return None
 
-
 def _looks_like_junk(text):
-    """Бесплатные сервисы иногда отдают уведомления/HTML/ошибки вместо ответа."""
     t = (text or "").strip()
     low = t.lower()
     if len(t) < 40:
@@ -647,30 +565,22 @@ def _looks_like_junk(text):
         return True
     return False
 
-
 async def _ask_free_gpt(prompt, json_mode):
-    """GPT без ключа (Pollinations). Несколько эндпоинтов подряд, первый нормальный ответ побеждает."""
     system = "Ты опытный крипто-трейдер и макро-аналитик. Отвечай кратко, по делу, на русском языке."
     if json_mode:
         system += " Отвечай только валидным JSON без markdown и пояснений."
     auth = {"Authorization": f"Bearer {POLLINATIONS_KEY}"} if POLLINATIONS_KEY else {}
 
     async def post_openai(url, timeout):
-        payload = {
-            "model": POLLINATIONS_MODEL,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            "temperature": 0.2,
-        }
-        async with http.post(url, json=payload, headers={"Content-Type": "application/json", **auth},
-                             timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        payload = {"model": POLLINATIONS_MODEL, "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}], "temperature": 0.2}
+        async with http.post(url, json=payload, headers={"Content-Type": "application/json", **auth}, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             if r.status != 200:
                 raise RuntimeError(f"HTTP {r.status}")
             j = await r.json(content_type=None)
             return j["choices"][0]["message"]["content"]
 
     async def get_plain(url, timeout):
-        async with http.get(url, params={"model": POLLINATIONS_MODEL, "system": system}, headers=auth,
-                            timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        async with http.get(url, params={"model": POLLINATIONS_MODEL, "system": system}, headers=auth, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             if r.status != 200:
                 raise RuntimeError(f"HTTP {r.status}")
             return await r.text()
@@ -689,24 +599,18 @@ async def _ask_free_gpt(prompt, json_mode):
             text = await fn()
             if text and not _looks_like_junk(text):
                 return text
-            log.info("Free GPT %s: пустой/мусорный ответ", name)
-        except Exception as e:
-            log.info("Free GPT %s: %s", name, e)
+        except Exception:
+            pass
     return None
 
-
 async def ask_ai_named(prompt, json_mode=False, validate=None, timeout=12, free_timeout=20):
-    """Возвращает (text, provider_name) или (None, None)."""
     keyed = []
     if GEMINI_API_KEYS:
         keyed.append(("Gemini", lambda: _ask_gemini(prompt, json_mode)))
     if GROQ_API_KEY:
-        keyed.append(("Groq", lambda: _ask_openai_compat(
-            "https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, json_mode, use_json_format=True)))
+        keyed.append(("Groq", lambda: _ask_openai_compat("https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, json_mode, use_json_format=True)))
     if OPENROUTER_API_KEY:
-        keyed.append(("OpenRouter", lambda: _ask_openai_compat(
-            "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, json_mode,
-            extra_headers={"HTTP-Referer": "https://t.me/bot", "X-Title": "IXCLY"})))
+        keyed.append(("OpenRouter", lambda: _ask_openai_compat("https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, json_mode, extra_headers={"HTTP-Referer": "https://t.me/bot", "X-Title": "IXCLY"})))
 
     async def wrap(name, fn):
         text = await fn()
@@ -716,23 +620,15 @@ async def ask_ai_named(prompt, json_mode=False, validate=None, timeout=12, free_
 
     if keyed:
         res = await first_success([wrap(n, f) for n, f in keyed], timeout)
-        if res:
-            log.info("ИИ ответил: %s", res[1])
-            return res
-        log.warning("Ключевые ИИ не ответили, переключаюсь на бесплатный GPT без ключа")
+        if res: return res
 
     res = await first_success([wrap("GPT (free)", lambda: _ask_free_gpt(prompt, json_mode))], free_timeout)
-    if res:
-        log.info("ИИ ответил: %s", res[1])
-        return res
-    log.error("❌ Все ИИ недоступны, работает локальный движок.")
+    if res: return res
     return None, None
-
 
 async def ask_ai(prompt, json_mode=False, validate=None, timeout=12, free_timeout=20):
     text, _ = await ask_ai_named(prompt, json_mode, validate, timeout, free_timeout)
     return text
-
 
 def parse_ai_json(text):
     try:
@@ -744,10 +640,8 @@ def parse_ai_json(text):
         pass
     return None
 
-
 def has_russian(text, min_letters=30):
     return len(re.findall(r"[А-Яа-яЁё]", text or "")) >= min_letters
-
 
 def ai_to_html(text):
     text = html.escape(text.strip())
@@ -755,16 +649,12 @@ def ai_to_html(text):
     text = re.sub(r"(?m)^#+\s*", "", text)
     return text[:3500]
 
-
 # ----------------------------------------------------------------------------
-# ЛОКАЛЬНЫЙ ДВИЖОК (работает всегда, без интернета-ИИ)
+# ЛОКАЛЬНЫЙ ДВИЖОК
 # ----------------------------------------------------------------------------
-BULL_STEMS = ("surg", "soar", "rall", "approv", "adopt", "inflow", "bullish", "gain", "jump", "partner",
-              "upgrad", "breakout", "rebound", "recover", "accumul")
+BULL_STEMS = ("surg", "soar", "rall", "approv", "adopt", "inflow", "bullish", "gain", "jump", "partner", "upgrad", "breakout", "rebound", "recover", "accumul")
 BULL_EXACT = {"etf", "buy", "launch", "launches", "record"}
-BEAR_STEMS = ("hack", "exploit", "crash", "plung", "lawsuit", "sues", "outflow", "bearish", "drop", "fall",
-              "liquidat", "fraud", "scam", "delist", "arrest", "dump", "selloff", "declin", "probe",
-              "investigat", "collaps", "bankrupt", "fear", "slump", "tumbl", "recession", "tariff")
+BEAR_STEMS = ("hack", "exploit", "crash", "plung", "lawsuit", "sues", "outflow", "bearish", "drop", "fall", "liquidat", "fraud", "scam", "delist", "arrest", "dump", "selloff", "declin", "probe", "investigat", "collaps", "bankrupt", "fear", "slump", "tumbl", "recession", "tariff")
 BEAR_EXACT = {"ban", "bans", "banned"}
 
 COIN_WORDS = {
@@ -774,35 +664,24 @@ COIN_WORDS = {
     "polkadot": "DOT", "litecoin": "LTC", "shiba": "SHIB", "pepe": "PEPE", "sui": "SUI",
 }
 
-# Метка движка в конце сообщения (для отладки): g=Gemini, q=Groq, o=OpenRouter, f=бесплатный GPT, l=локальный
 ENGINE_TAG = {"Gemini": "g", "Groq": "q", "OpenRouter": "o", "GPT (free)": "f", "local": "l"}
-
 NEWS_LABEL = {1: ("🟢", "позитивный"), 0: ("⚪", "нейтральный"), -1: ("🔴", "негативный")}
 
-
 def news_sentiment(text):
-    """+1 / 0 / -1 по ключевым словам."""
     score = 0
     for w in re.findall(r"[a-z]+", (text or "").lower()):
-        if w in BULL_EXACT or w.startswith(BULL_STEMS):
-            score += 1
-        elif w in BEAR_EXACT or w.startswith(BEAR_STEMS):
-            score -= 1
-    if score >= 2:
-        return 1
-    if score <= -2:
-        return -1
+        if w in BULL_EXACT or w.startswith(BULL_STEMS): score += 1
+        elif w in BEAR_EXACT or w.startswith(BEAR_STEMS): score -= 1
+    if score >= 2: return 1
+    if score <= -2: return -1
     return 0
-
 
 def mentioned_coins(text):
     found = []
     for w in re.findall(r"[a-z]+", (text or "").lower()):
         t = COIN_WORDS.get(w)
-        if t and t not in found:
-            found.append(t)
+        if t and t not in found: found.append(t)
     return found[:3]
-
 
 def local_reason(tf, i):
     trend = "восходящий тренд (EMA20 выше EMA50)" if i["ema20"] > i["ema50"] else "нисходящий тренд (EMA20 ниже EMA50)"
@@ -811,9 +690,7 @@ def local_reason(tf, i):
     macd = "бычий" if i["macd_hist"] > 0 else "медвежий"
     return f"На {tf}: {trend}, RSI {rsi:.0f} ({zone}), импульс MACD {macd}."
 
-
 def local_verdict(tf_data, news_text):
-    """Конкретный вывод без ИИ: согласованность ТФ + сила сигнала + волатильность + новости."""
     tf = "4h" if "4h" in tf_data else list(tf_data.keys())[-1]
     d = tf_data[tf]
     p = d["long_prob"]
@@ -824,10 +701,8 @@ def local_verdict(tf_data, news_text):
 
     atr_mean = float(d["df"]["atr"].tail(50).mean())
     vol_ratio = d["atr"] / atr_mean if atr_mean > 0 else 1.0
-
     ns = news_sentiment(news_text)
     news_ok = ns == 0 or (ns > 0) == is_long
-
     need = max(3, total - 1)
     enter = aligned >= need and edge >= 12 and vol_ratio >= 0.8 and news_ok
     if enter:
@@ -841,33 +716,22 @@ def local_verdict(tf_data, news_text):
     else:
         entry_reason = "Новостной фон идёт против направления сигнала."
 
-    label = NEWS_LABEL[ns][1]
-    return {
-        "dominant_tf": tf,
-        "reason": local_reason(tf, d),
-        "entry_status": "ENTER" if enter else "WAIT",
-        "entry_reason": entry_reason,
-        "news": ns,
-    }
-
+    return {"dominant_tf": tf, "reason": local_reason(tf, d), "entry_status": "ENTER" if enter else "WAIT", "entry_reason": entry_reason, "news": ns}
 
 # ----------------------------------------------------------------------------
-# НОВОСТИ (крипто + мировые)
+# НОВОСТИ
 # ----------------------------------------------------------------------------
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml", "https://feeds.bbci.co.uk/news/world/rss.xml"]
 _news_cache = {"ts": 0.0, "entries": []}
 _world_cache = {"ts": 0.0, "titles": []}
 
-
 async def _load_feed(url):
     async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-        if r.status != 200:
-            return []
+        if r.status != 200: return []
         text = await r.text()
     feed = await asyncio.to_thread(feedparser.parse, text)
     return list(feed.entries)
-
 
 async def get_news_entries():
     if _news_cache["entries"] and time.time() - _news_cache["ts"] < 300:
@@ -882,7 +746,6 @@ async def get_news_entries():
         except Exception as e:
             log.info("RSS %s: %s", url, e)
     return _news_cache["entries"]
-
 
 async def get_world_titles(n=4):
     if _world_cache["titles"] and time.time() - _world_cache["ts"] < 600:
@@ -899,32 +762,25 @@ async def get_world_titles(n=4):
         _world_cache["titles"] = titles[:n]
     return _world_cache["titles"]
 
-
 def extract_image(entry):
     mc = getattr(entry, "media_content", None)
-    if mc and isinstance(mc, list) and mc[0].get("url"):
-        return mc[0]["url"]
+    if mc and isinstance(mc, list) and mc[0].get("url"): return mc[0]["url"]
     for enc in getattr(entry, "enclosures", None) or []:
-        if "image" in enc.get("type", ""):
-            return enc.get("href")
+        if "image" in enc.get("type", ""): return enc.get("href")
     return None
-
 
 async def download_bytes(url):
     try:
         async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                return await r.read()
+            if r.status == 200: return await r.read()
     except Exception:
         pass
     return None
 
-
 async def fetch_and_analyze_news():
     try:
         entries = await get_news_entries()
-        if not entries:
-            return "❌ Свежих новостей пока нет.", None, False
+        if not entries: return "❌ Свежих новостей пока нет.", None, False
         news = entries[0]
         title = news.title
         summary = re.sub(r"<[^>]+>", "", getattr(news, "summary", ""))[:800]
@@ -941,7 +797,6 @@ async def fetch_and_analyze_news():
 🎯 Какие монеты затронуты (2-3 тикера, например BTC, ETH) и конкретный вывод: покупать, продавать или ждать.
 """
         ai_text, news_engine = await ask_ai_named(prompt, json_mode=False, validate=has_russian, timeout=20, free_timeout=25)
-
         if ai_text:
             body = ai_to_html(ai_text)
         else:
@@ -950,15 +805,8 @@ async def fetch_and_analyze_news():
             ns = news_sentiment(f"{title}. {summary}")
             emoji, label = NEWS_LABEL[ns]
             coins = mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"]
-            action = {1: "поддержка покупателей, лонги выглядят интереснее",
-                      -1: "давление на рынок, осторожнее с лонгами",
-                      0: "без явного перекоса, ждём подтверждения графиком"}[ns]
-            body = (
-                f"📌 <b>{html.escape(ru_title)}</b>\n\n"
-                f"<i>{html.escape(ru_summary)}</i>\n\n"
-                f"📉 <b>Влияние:</b> {emoji} {label} фон — {action}.\n"
-                f"🎯 <b>Монеты:</b> {', '.join(coins)}"
-            )
+            action = {1: "поддержка покупателей, лонги выглядят интереснее", -1: "давление на рынок, осторожнее с лонгами", 0: "без явного перекоса, ждём подтверждения графиком"}[ns]
+            body = f"📌 <b>{html.escape(ru_title)}</b>\n\n<i>{html.escape(ru_summary)}</i>\n\n📉 <b>Влияние:</b> {emoji} {label} фон — {action}.\n🎯 <b>Монеты:</b> {', '.join(coins)}"
 
         tag = ENGINE_TAG.get(news_engine if ai_text else "local", "l")
         text = f"{body}\n\n💰ВРЕМЯ ТОРГОВАТЬ💸\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">Читать источник</a> {tag}"
@@ -967,7 +815,6 @@ async def fetch_and_analyze_news():
         log.exception("news error")
         return f"⚠️ Ошибка при получении новостей: {html.escape(str(e))}", None, False
 
-
 async def send_with_image(chat_id, text, image_bytes, filename="img.png", markup=None):
     if image_bytes:
         photo = BufferedInputFile(image_bytes, filename=filename)
@@ -975,9 +822,7 @@ async def send_with_image(chat_id, text, image_bytes, filename="img.png", markup
             await bot.send_photo(chat_id, photo, caption=text, parse_mode="HTML", reply_markup=markup)
             return
         await bot.send_photo(chat_id, photo)
-    await bot.send_message(chat_id, text[:4000], parse_mode="HTML", reply_markup=markup,
-                           disable_web_page_preview=True)
-
+    await bot.send_message(chat_id, text[:4000], parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
 
 async def news_watcher():
     global last_news_link
@@ -988,15 +833,14 @@ async def news_watcher():
             if entries:
                 link = entries[0].link
                 if last_news_link is None:
-                    last_news_link = link  # первый запуск: не рассылаем старое
+                    last_news_link = link
                 elif link != last_news_link:
                     last_news_link = link
                     if bot_flags["news_enabled"]:
                         text, image_url, ok = await fetch_and_analyze_news()
                         if ok:
                             img = await download_bytes(image_url) if image_url else None
-                            payload = {"kind": "photo" if img else "text", "text": text,
-                                       "data": img, "filename": "news.jpg"}
+                            payload = {"kind": "photo" if img else "text", "text": text, "data": img, "filename": "news.jpg"}
                             sent, failed, removed = await broadcast(payload)
                             stats["news_sent"] += sent
                             log.info("Новость разослана: доставлено %d, ошибок %d, убрано %d", sent, failed, removed)
@@ -1004,31 +848,201 @@ async def news_watcher():
             log.warning("news_watcher: %s", e)
         await asyncio.sleep(600)
 
+# ----------------------------------------------------------------------------
+# ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
+# ----------------------------------------------------------------------------
+SCAN_INTERVAL = 3600
+ALERT_MIN_EDGE = 20
+ALERT_COOLDOWN = 6 * 3600
+MAX_ALERTS_PER_SCAN = 3
+ALERTS_FILE = "alerts.json"
+alert_history = {}
+
+def _load_alert_history():
+    try:
+        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            alert_history.update({k: float(v) for k, v in data.items()})
+    except Exception:
+        pass
+
+def _save_alert_history():
+    try:
+        with open(ALERTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(alert_history, f)
+    except Exception as e:
+        log.info("alerts.json не сохранён: %s", e)
+
+async def _noop_status(_t):
+    return
+
+def tech_check(tf_data):
+    tf = "4h" if "4h" in tf_data else list(tf_data.keys())[-1]
+    d = tf_data[tf]
+    p = d["long_prob"]
+    is_long = p >= 50
+    total = len(tf_data)
+    aligned = sum(1 for t in tf_data if (tf_data[t]["long_prob"] >= 50) == is_long)
+    edge = abs(p - 50)
+    atr_mean = float(d["df"]["atr"].tail(50).mean())
+    vol_ratio = d["atr"] / atr_mean if atr_mean > 0 else 1.0
+    ok = aligned >= max(3, total - 1) and edge >= ALERT_MIN_EDGE and vol_ratio >= 0.8
+    return {"ok": ok, "tf": tf, "is_long": is_long, "aligned": aligned, "total": total,
+            "edge": edge, "prob": max(p, 100 - p)}
+
+def coin_news_sentiment(coin, crypto_titles, world_titles):
+    names = {w for w, t in COIN_WORDS.items() if t == coin}
+    if len(coin) >= 3:
+        names.add(coin.lower())
+    related = [t for t in crypto_titles if names & set(re.findall(r"[a-z0-9]+", t.lower()))]
+    if related:
+        return news_sentiment(". ".join(related)), True
+    return news_sentiment(". ".join(crypto_titles + world_titles)), False
+
+async def scan_coin(coin, crypto_titles, world_titles):
+    tf_data, _source = await get_market_data(coin)
+    t = tech_check(tf_data)
+    if not t["ok"]:
+        return None
+    ns, related = coin_news_sentiment(coin, crypto_titles, world_titles)
+    if ns == 0 or (ns > 0) != t["is_long"]:
+        return None
+    return {"coin": coin, "tech": t, "ns": ns, "related": related}
+
+def alert_header(coin, meta, cand):
+    t = cand["tech"]
+    is_long = meta["is_long"]
+    side = "LONG 🟢" if is_long else "SHORT 🔴"
+    prob = meta["long_prob"] if is_long else meta["short_prob"]
+    news = "позитивные 🟢" if meta["ns"] > 0 else "негативные 🔴"
+    src = f"по {coin}" if cand["related"] else "общий фон рынка"
+    return (
+        "🚨🚨 <b>СРОЧНЫЙ СИГНАЛ</b> 🚨🚨\n\n"
+        f"🪙 <b>{coin}/USDT</b>\n"
+        f"✅ <b>Можно входить в сделку: {side}</b>\n\n"
+        "<b>Почему именно сейчас:</b>\n"
+        f"• Перевес {'лонга' if is_long else 'шорта'}: <b>{prob:.0f}%</b>\n"
+        f"• Таймфреймы согласованы: {t['aligned']}/{t['total']}\n"
+        f"• Новости {news} ({src})\n"
+        "• Волатильность в норме\n\n"
+        "Ниже полный разбор: вход, цели и стопы. Обязательно ставьте стоп-лосс.\n"
+        "━━━━━━━━━━━━━━"
+    )
+
+async def scan_once(send=True):
+    t0 = time.time()
+    try:
+        entries = await asyncio.wait_for(get_news_entries(), timeout=10)
+        crypto_titles = [e.title for e in entries[:8]]
+    except Exception:
+        crypto_titles = []
+    try:
+        world_titles = await asyncio.wait_for(get_world_titles(4), timeout=10)
+    except Exception:
+        world_titles = []
+
+    sem = asyncio.Semaphore(3)
+    failed, cands = [], []
+
+    async def one(coin):
+        async with sem:
+            try:
+                r = await scan_coin(coin, crypto_titles, world_titles)
+            except Exception as e:
+                failed.append(coin)
+                log.info("scan %s: %s", coin, e)
+                return
+            if r:
+                cands.append(r)
+
+    await asyncio.gather(*[one(c) for c in POPULAR_COINS])
+    cands.sort(key=lambda r: r["tech"]["edge"], reverse=True)
+
+    sent = []
+    if send:
+        for r in cands:
+            if len(sent) >= MAX_ALERTS_PER_SCAN:
+                break
+            coin = r["coin"]
+            key = f"{coin}:{'L' if r['tech']['is_long'] else 'S'}"
+            if time.time() - alert_history.get(key, 0) < ALERT_COOLDOWN:
+                continue
+            meta = {}
+            try:
+                async with analysis_sem:
+                    text, png = await asyncio.wait_for(
+                        build_signal(coin, _noop_status, force=True, meta_out=meta), timeout=70)
+            except Exception as e:
+                log.info("alert build %s: %s", coin, e)
+                continue
+            good = (meta.get("entry_status") == "ENTER"
+                    and meta.get("is_long") == r["tech"]["is_long"]
+                    and meta.get("ns", 0) != 0
+                    and (meta["ns"] > 0) == meta["is_long"])
+            if not good:
+                continue
+            full = alert_header(coin, meta, r) + "\n\n" + text
+            payload = {"kind": "photo", "text": full, "data": png, "filename": f"{coin}.png"}
+            ok, fail, removed = await broadcast(payload)
+            alert_history[key] = time.time()
+            _save_alert_history()
+            stats["alerts_sent"] += 1
+            sent.append(coin)
+            log.info("СРОЧНЫЙ СИГНАЛ %s разослан: %d доставлено, %d ошибок", coin, ok, fail)
+
+    return {"scanned": len(POPULAR_COINS), "failed": sorted(failed), "cands": cands,
+            "sent": sent, "secs": int(time.time() - t0)}
+
+def scan_report(r):
+    lines = [
+        f"🔎 <b>Скан завершён за {r['secs']} сек</b>",
+        "",
+        f"Монет: {r['scanned']} · загрузились: {r['scanned'] - len(r['failed'])}",
+    ]
+    if r["failed"]:
+        lines.append(f"❌ Не загрузились ({len(r['failed'])}): {', '.join(r['failed'])}")
+    else:
+        lines.append("✅ Все монеты загрузились")
+    lines += ["", f"Кандидатов (график + новости совпали): <b>{len(r['cands'])}</b>"]
+    for c in r["cands"][:10]:
+        t = c["tech"]
+        lines.append(f"• {c['coin']} {'LONG' if t['is_long'] else 'SHORT'} {t['prob']:.0f}% · "
+                     f"ТФ {t['aligned']}/{t['total']} · новости {'🟢' if c['ns'] > 0 else '🔴'}")
+    lines.append("\n<i>Это тест: рассылка не делалась. Срочный сигнал уходит, только если разбор тоже даёт ВХОДИТЬ.</i>")
+    return "\n".join(lines)
+
+async def alert_loop():
+    _load_alert_history()
+    await asyncio.sleep(300)
+    while True:
+        try:
+            if bot_flags["alerts_enabled"] and active_chats:
+                res = await scan_once(send=True)
+                log.info("Часовой скан: %d монет, не загрузились %d, кандидатов %d, отправлено %d",
+                         res["scanned"], len(res["failed"]), len(res["cands"]), len(res["sent"]))
+        except Exception as e:
+            log.warning("alert_loop: %s", e)
+        await asyncio.sleep(SCAN_INTERVAL)
 
 # ----------------------------------------------------------------------------
-# КАРТИНКА (только латиница: шрифт на сервере может не поддерживать кириллицу)
+# КАРТИНКА
 # ----------------------------------------------------------------------------
 def get_font(size, bold=False):
     names = (["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf"]
              if bold else
              ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf"])
     for n in names:
-        try:
-            return ImageFont.truetype(n, size)
-        except Exception:
-            pass
-    try:
-        return ImageFont.load_default(size)
-    except TypeError:
-        return ImageFont.load_default()
-
+        try: return ImageFont.truetype(n, size)
+        except Exception: pass
+    try: return ImageFont.load_default(size)
+    except TypeError: return ImageFont.load_default()
 
 def _dashed(d, y, x0, x1, color, dash=10, gap=6):
     x = x0
     while x < x1:
         d.line([(x, y), (min(x + dash, x1), y)], fill=color, width=2)
         x += dash + gap
-
 
 def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, source, entry_status="WAIT"):
     W, H = 800, 1050
@@ -1045,7 +1059,6 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     d.text((W - 40 - d.textlength(side, font=f_title), 85), side, font=f_title, fill=main)
     d.text((40, 165), f"TF {tf}  |  Long prob {long_prob}%  |  {source}", font=f_text, fill=gray)
 
-    # баннер статуса входа
     banner = green if entry_status == "ENTER" else "#F3A300"
     d.rectangle([40, 210, W - 40, 262], fill=banner)
     d.text((60, 220), f"STATUS: {entry_status}", font=f_bold, fill="#000000")
@@ -1057,8 +1070,7 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     pad = (hi - lo) * 0.08 or hi * 0.01
     lo, hi = lo - pad, hi + pad
 
-    def Y(p):
-        return y1 - (p - lo) / (hi - lo) * (y1 - y0)
+    def Y(p): return y1 - (p - lo) / (hi - lo) * (y1 - y0)
 
     for k in range(6):
         gy = y0 + k * (y1 - y0) / 5
@@ -1074,8 +1086,7 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
         col = green if row["close"] >= row["open"] else red
         d.line([(cx, Y(row["high"])), (cx, Y(row["low"]))], fill=col, width=2)
         top, bot = sorted([Y(row["open"]), Y(row["close"])])
-        if bot - top < 2:
-            bot = top + 2
+        if bot - top < 2: bot = top + 2
         d.rectangle([cx - bw / 2, top, cx + bw / 2, bot], fill=col)
 
     levels = [("ENT", entry, white)]
@@ -1101,47 +1112,35 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-
 # ----------------------------------------------------------------------------
 # АНАЛИЗ МОНЕТЫ
 # ----------------------------------------------------------------------------
 def calc_levels(info, is_long):
     entry = info["price"]
     atr = info["atr"]
-    if not atr or atr != atr or atr <= 0:
-        atr = entry * 0.01
-    if is_long:
-        dist = entry - info["recent_low"] + 0.2 * atr
-    else:
-        dist = info["recent_high"] + 0.2 * atr - entry
+    if not atr or atr != atr or atr <= 0: atr = entry * 0.01
+    if is_long: dist = entry - info["recent_low"] + 0.2 * atr
+    else: dist = info["recent_high"] + 0.2 * atr - entry
     dist = min(max(dist, 1.0 * atr), 2.5 * atr)
     sign = 1 if is_long else -1
     sls = [entry - sign * (dist + k * 0.5 * atr) for k in range(3)]
     tps = [entry + sign * dist * m for m in (1, 2, 3)]
     return entry, tps, sls
 
-
 def shorten(text, n):
-    """Обрезает по границе предложения/слова, без обрывов на полуслове."""
     text = " ".join(str(text).split())
-    if len(text) <= n:
-        return text
+    if len(text) <= n: return text
     cut = text[:n]
     m = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
-    if m >= n * 0.5:
-        return cut[:m + 1]
+    if m >= n * 0.5: return cut[:m + 1]
     return cut.rsplit(" ", 1)[0].rstrip(",;:-— ") + "…"
 
-
 def strength_label(p):
-    if p >= 70:
-        return "сильный сигнал"
-    if p >= 58:
-        return "умеренный сигнал"
+    if p >= 70: return "сильный сигнал"
+    if p >= 58: return "умеренный сигнал"
     return "слабый сигнал"
 
-
-async def build_signal(coin, status, force=False):
+async def build_signal(coin, status, force=False, meta_out=None):
     cached = result_cache.get(coin)
     if cached and not force and time.time() - cached[0] < RESULT_TTL:
         return cached[1], cached[2]
@@ -1153,12 +1152,10 @@ async def build_signal(coin, status, force=False):
     try:
         entries = await asyncio.wait_for(get_news_entries(), timeout=6)
         crypto_titles = [e.title for e in entries[:5]]
-    except Exception:
-        crypto_titles = []
+    except Exception: crypto_titles = []
     try:
         world_titles = await asyncio.wait_for(get_world_titles(4), timeout=6)
-    except Exception:
-        world_titles = []
+    except Exception: world_titles = []
     news_text = ". ".join(crypto_titles + world_titles)
 
     local = local_verdict(tf_data, news_text)
@@ -1194,8 +1191,7 @@ async def build_signal(coin, status, force=False):
         tf = ai["dominant_tf"]
         reason = ai["reason"].strip()
         entry_status = str(ai.get("entry_status", "")).upper()
-        if entry_status not in ("ENTER", "WAIT"):
-            entry_status = local["entry_status"]
+        if entry_status not in ("ENTER", "WAIT"): entry_status = local["entry_status"]
         entry_reason = str(ai.get("entry_reason") or local["entry_reason"])
         ns = {"BULLISH": 1, "BEARISH": -1, "NEUTRAL": 0}.get(str(ai.get("news_sentiment", "")).upper(), local["news"])
     else:
@@ -1214,6 +1210,14 @@ async def build_signal(coin, status, force=False):
     is_long = long_prob >= 50
     entry, tps, sls = calc_levels(info, is_long)
 
+    # --- СОХРАНЕНИЕ ДАННЫХ ДЛЯ СКАНЕРА ---
+    if meta_out is not None:
+        meta_out["entry_status"] = entry_status
+        meta_out["is_long"] = is_long
+        meta_out["ns"] = ns
+        meta_out["long_prob"] = long_prob
+        meta_out["short_prob"] = short_prob
+
     direction = "🟢 <b>LONG</b>" if is_long else "🔴 <b>SHORT</b>"
     green_n = max(0, min(10, round(long_prob / 10)))
     bar = "🟩" * green_n + "🟥" * (10 - green_n)
@@ -1223,13 +1227,10 @@ async def build_signal(coin, status, force=False):
     stats["signals"] += 1
     stats["engines"][tag] += 1
 
-    if entry_status == "ENTER":
-        head, lv = "✅ <b>ВХОДИТЬ</b>", ""
-    else:
-        head, lv = "⏳ <b>ЖДАТЬ</b>", " <i>(если войти)</i>"
+    if entry_status == "ENTER": head, lv = "✅ <b>ВХОДИТЬ</b>", ""
+    else: head, lv = "⏳ <b>ЖДАТЬ</b>", " <i>(если войти)</i>"
 
-    def pct(p):
-        return f"{(p - entry) / entry * 100:+.1f}%"
+    def pct(p): return f"{(p - entry) / entry * 100:+.1f}%"
 
     tp_lines = "\n".join(f"TP{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(tps))
     sl_lines = "\n".join(f"SL{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls))
@@ -1251,11 +1252,9 @@ async def build_signal(coin, status, force=False):
         f"💬 {html.escape(reason)}\n\n"
         f"⚠️ <i>Не является финансовой рекомендацией</i> {tag}"
     )
-    png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls,
-                                  tf, long_prob, source, entry_status)
+    png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls, tf, long_prob, source, entry_status)
     result_cache[coin] = (time.time(), text, png)
     return text, png
-
 
 async def process_signal(chat_id, user_id, coin, force=False):
     now = time.time()
@@ -1272,23 +1271,17 @@ async def process_signal(chat_id, user_id, coin, force=False):
     last_status = {"t": ""}
 
     async def status(t):
-        if t == last_status["t"]:
-            return
+        if t == last_status["t"]: return
         last_status["t"] = t
-        try:
-            await loading.edit_text(t)
-        except Exception:
-            pass
+        try: await loading.edit_text(t)
+        except Exception: pass
 
     try:
         async with analysis_sem:
             text, png = await asyncio.wait_for(build_signal(coin, status, force), timeout=70)
         await send_with_image(chat_id, text, png, f"{coin}.png", result_keyboard(coin))
     except LookupError:
-        await bot.send_message(
-            chat_id,
-            f"❌ Монета <b>{html.escape(coin)}</b> не найдена. Проверьте тикер (например: BTC, WIF, PEPE).",
-            parse_mode="HTML", reply_markup=get_coins_keyboard(0))
+        await bot.send_message(chat_id, f"❌ Монета <b>{html.escape(coin)}</b> не найдена. Проверьте тикер (например: BTC, WIF, PEPE).", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
     except asyncio.TimeoutError:
         await bot.send_message(chat_id, "⏳ Источники данных не ответили вовремя. Попробуйте ещё раз.")
     except Exception as e:
@@ -1296,11 +1289,8 @@ async def process_signal(chat_id, user_id, coin, force=False):
         await bot.send_message(chat_id, f"⚠️ Ошибка: {html.escape(str(e))[:200]}")
     finally:
         busy_users.discard(user_id)
-        try:
-            await loading.delete()
-        except Exception:
-            pass
-
+        try: await loading.delete()
+        except Exception: pass
 
 # ----------------------------------------------------------------------------
 # ХЕНДЛЕРЫ ОСНОВНОГО БОТА
@@ -1308,26 +1298,20 @@ async def process_signal(chat_id, user_id, coin, force=False):
 @dp.message(Command("start", "menu"))
 async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
-
     user_name = message.from_user.first_name or "User"
     username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
-
     is_new = save_user_data(message.from_user.id, message.from_user.username, user_name)
 
     if is_new and message.from_user.id not in notified_users:
         notified_users.add(message.from_user.id)
         total = len(_load_users())
-        await notify_admins(
-            f"👤 <b>Новый пользователь!</b>\n\nИмя: {html.escape(user_name)}\n"
-            f"Юзернейм: {html.escape(username)}\nID: <code>{message.from_user.id}</code>\nВсего: {total}")
-        if total % 5 == 0:
-            asyncio.create_task(send_backup("💾 Авто-бэкап"))
+        await notify_admins(f"👤 <b>Новый пользователь!</b>\n\nИмя: {html.escape(user_name)}\nЮзернейм: {html.escape(username)}\nID: <code>{message.from_user.id}</code>\nВсего: {total}")
+        if total % 5 == 0: asyncio.create_task(send_backup("💾 Авто-бэкап"))
 
     await message.answer(
         f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\n"
         f"Выбери монету из списка или просто напиши тикер (например: <code>WIF</code>):",
         parse_mode="HTML", reply_markup=get_coins_keyboard(0))
-
 
 @dp.message(Command("news"))
 async def news_handler(message: types.Message):
@@ -1338,75 +1322,52 @@ async def news_handler(message: types.Message):
         img = await download_bytes(image_url) if image_url else None
         await send_with_image(message.chat.id, text, img, "news.jpg")
     finally:
-        try:
-            await loading.delete()
-        except Exception:
-            pass
-
+        try: await loading.delete()
+        except Exception: pass
 
 @dp.message(F.text)
 async def text_handler(message: types.Message):
-    if message.text.startswith("/"):
-        return
+    if message.text.startswith("/"): return
     coin = normalize_ticker(message.text)
     if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
-        await message.answer("⚠️ Неверный формат. Введите тикер, например: <code>BTC</code>",
-                             parse_mode="HTML", reply_markup=get_coins_keyboard(0))
+        await message.answer("⚠️ Неверный формат. Введите тикер, например: <code>BTC</code>", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
         return
     active_chats.add(message.chat.id)
     await process_signal(message.chat.id, message.from_user.id, coin)
 
-
 @dp.callback_query(F.data)
 async def callback_handler(cb: types.CallbackQuery):
-    try:
-        await cb.answer()
-    except Exception:
-        pass
-    if not cb.message:
-        return
+    try: await cb.answer()
+    except Exception: pass
+    if not cb.message: return
     data = cb.data
     chat_id = cb.message.chat.id
 
-    if data == "ignore":
-        return
+    if data == "ignore": return
     if data == "menu":
         user_name = cb.from_user.first_name or "User"
         username = f"@{cb.from_user.username}" if cb.from_user.username else "Нет юзернейма"
-        await bot.send_message(
-            chat_id, f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\nВыбери монету:",
-            parse_mode="HTML", reply_markup=get_coins_keyboard(0))
+        await bot.send_message(chat_id, f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\nВыбери монету:", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
     elif data.startswith("p:"):
-        try:
-            await cb.message.edit_reply_markup(reply_markup=get_coins_keyboard(int(data[2:])))
-        except Exception:
-            pass
+        try: await cb.message.edit_reply_markup(reply_markup=get_coins_keyboard(int(data[2:])))
+        except Exception: pass
     elif data == "search":
-        await bot.send_message(chat_id, "🔍 <b>Поиск</b>\n\nНапиши тикер (например: <code>WIF</code>), и я найду его.",
-                               parse_mode="HTML")
-    elif data.startswith("c:"):
-        await process_signal(chat_id, cb.from_user.id, data[2:])
-    elif data.startswith("r:"):
-        await process_signal(chat_id, cb.from_user.id, data[2:], force=True)
-
+        await bot.send_message(chat_id, "🔍 <b>Поиск</b>\n\nНапиши тикер (например: <code>WIF</code>), и я найду его.", parse_mode="HTML")
+    elif data.startswith("c:"): await process_signal(chat_id, cb.from_user.id, data[2:])
+    elif data.startswith("r:"): await process_signal(chat_id, cb.from_user.id, data[2:], force=True)
 
 # ----------------------------------------------------------------------------
-# РАССЫЛКА (общая для админ-панели и автоновостей)
+# РАССЫЛКА
 # ----------------------------------------------------------------------------
 async def notify_admins(text):
-    """Уведомления идут ТОЛЬКО в админ-бот. В основной бот ничего не пишем."""
     if not input_bot:
-        log.warning("Уведомление админу не отправлено: админ-бот не запущен (см. /status)")
+        log.warning("Уведомление админу не отправлено: админ-бот не запущен")
         return
     for aid in ADMIN_IDS:
-        try:
-            await input_bot.send_message(aid, text, parse_mode="HTML")
-        except Exception as e:
-            log.warning("Админ-бот не смог написать админу %s: %s. Откройте админ-бота и нажмите /start.", aid, e)
-
+        try: await input_bot.send_message(aid, text, parse_mode="HTML")
+        except Exception as e: log.warning("Админ-бот не смог написать админу %s: %s", aid, e)
 
 async def send_payload(chat_id, p, cache):
-    """Отправляет одно сообщение (текст или медиа) одному пользователю через основной бот."""
     kind = p["kind"]
     text = p.get("text") or ""
     if kind == "text":
@@ -1415,25 +1376,16 @@ async def send_payload(chat_id, p, cache):
 
     media = cache.get("file_id") or BufferedInputFile(p["data"], filename=p.get("filename") or "file")
     caption = text if 0 < len(text) <= 1024 else None
-    senders = {
-        "photo": bot.send_photo, "video": bot.send_video, "document": bot.send_document,
-        "animation": bot.send_animation, "audio": bot.send_audio, "voice": bot.send_voice,
-    }
+    senders = {"photo": bot.send_photo, "video": bot.send_video, "document": bot.send_document, "animation": bot.send_animation, "audio": bot.send_audio, "voice": bot.send_voice}
     m = await senders[kind](chat_id, media, caption=caption, parse_mode="HTML")
 
-    if "file_id" not in cache:  # дальше шлём по file_id, без повторной загрузки файла
-        obj = {
-            "photo": m.photo[-1] if m.photo else None, "video": m.video, "document": m.document,
-            "animation": m.animation, "audio": m.audio, "voice": m.voice,
-        }.get(kind)
-        if obj:
-            cache["file_id"] = obj.file_id
-    if text and not caption:  # подпись длиннее лимита Telegram: отдельным сообщением
+    if "file_id" not in cache:
+        obj = {"photo": m.photo[-1] if m.photo else None, "video": m.video, "document": m.document, "animation": m.animation, "audio": m.audio, "voice": m.voice}.get(kind)
+        if obj: cache["file_id"] = obj.file_id
+    if text and not caption:
         await bot.send_message(chat_id, text[:4000], parse_mode="HTML", disable_web_page_preview=True)
 
-
 async def broadcast(payload, progress=None):
-    """Рассылает всем active_chats. Возвращает (доставлено, ошибок, убрано неактивных)."""
     chats = list(active_chats)
     cache, ok, fail, dead = {}, 0, 0, []
     for i, chat_id in enumerate(chats):
@@ -1459,45 +1411,34 @@ async def broadcast(payload, progress=None):
                 log.warning("broadcast %s: %s", chat_id, e)
                 fail += 1
                 break
-        await asyncio.sleep(0.04)  # ~25 сообщений в секунду, в рамках лимитов Telegram
+        await asyncio.sleep(0.04)
         if progress and (i + 1) % 25 == 0:
-            try:
-                await progress(i + 1, len(chats))
-            except Exception:
-                pass
+            try: await progress(i + 1, len(chats))
+            except Exception: pass
     if dead:
-        for c in dead:
-            active_chats.discard(c)
+        for c in dead: active_chats.discard(c)
         set_users_active(dead, False)
     return ok, fail, len(dead)
 
-
 async def send_backup(caption="💾 Бэкап базы пользователей"):
     users = _load_users()
-    if not users:
-        return False
+    if not users: return False
     if not input_bot:
         log.warning("Бэкап не отправлен: админ-бот не запущен")
         return False
     data = json.dumps(users, ensure_ascii=False, indent=2).encode("utf-8")
     for aid in ADMIN_IDS:
         try:
-            await input_bot.send_document(aid, BufferedInputFile(data, "users.json"),
-                                       caption=f"{caption}\nПользователей: {len(users)}")
-        except Exception as e:
-            log.warning("Бэкап не отправлен админу %s: %s", aid, e)
+            await input_bot.send_document(aid, BufferedInputFile(data, "users.json"), caption=f"{caption}\nПользователей: {len(users)}")
+        except Exception as e: log.warning("Бэкап не отправлен админу %s: %s", aid, e)
     return True
-
 
 async def backup_loop():
     await asyncio.sleep(90)
     while True:
-        try:
-            await send_backup("💾 Ежедневный бэкап")
-        except Exception as e:
-            log.warning("backup_loop: %s", e)
+        try: await send_backup("💾 Ежедневный бэкап")
+        except Exception as e: log.warning("backup_loop: %s", e)
         await asyncio.sleep(24 * 3600)
-
 
 async def run_diagnostics():
     lines = ["🧪 <b>Диагностика</b>", "", "<b>Источники свечей (BTC, 1h):</b>"]
@@ -1517,43 +1458,29 @@ async def run_diagnostics():
 
     async def timed(name, fn):
         t0 = time.time()
-        try:
-            r = await asyncio.wait_for(fn(), 25)
-        except Exception:
-            r = None
+        try: r = await asyncio.wait_for(fn(), 25)
+        except Exception: r = None
         return f"{'✅' if r else '❌'} {name} · {int((time.time() - t0) * 1000)} мс"
 
     tests = []
-    if GEMINI_API_KEYS:
-        tests.append(timed(f"g · Gemini ({GEMINI_MODEL})", lambda: _ask_gemini(prompt, False)))
-    else:
-        lines.append("➖ g · Gemini: ключ не задан")
-    if GROQ_API_KEY:
-        tests.append(timed(f"q · Groq ({GROQ_MODEL})", lambda: _ask_openai_compat(
-            "https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, False)))
-    else:
-        lines.append("➖ q · Groq: ключ не задан")
-    if OPENROUTER_API_KEY:
-        tests.append(timed("o · OpenRouter", lambda: _ask_openai_compat(
-            "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, False,
-            extra_headers={"HTTP-Referer": "https://t.me/bot", "X-Title": "IXCLY"})))
-    else:
-        lines.append("➖ o · OpenRouter: ключ не задан")
+    if GEMINI_API_KEYS: tests.append(timed(f"g · Gemini ({GEMINI_MODEL})", lambda: _ask_gemini(prompt, False)))
+    else: lines.append("➖ g · Gemini: ключ не задан")
+    if GROQ_API_KEY: tests.append(timed(f"q · Groq ({GROQ_MODEL})", lambda: _ask_openai_compat("https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, False)))
+    else: lines.append("➖ q · Groq: ключ не задан")
+    if OPENROUTER_API_KEY: tests.append(timed("o · OpenRouter", lambda: _ask_openai_compat("https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, False, extra_headers={"HTTP-Referer": "https://t.me/bot", "X-Title": "IXCLY"})))
+    else: lines.append("➖ o · OpenRouter: ключ не задан")
     key_note = "с ключом" if POLLINATIONS_KEY else "без ключа"
     tests.append(timed(f"f · бесплатный GPT ({key_note})", lambda: _ask_free_gpt(prompt, False)))
     lines += await asyncio.gather(*tests)
 
-    lines += ["", f"Получателей рассылки: {len(active_chats)}",
-              f"Новости по расписанию: {'вкл' if bot_flags['news_enabled'] else 'выкл'}"]
+    lines += ["", f"Получателей рассылки: {len(active_chats)}", f"Новости по расписанию: {'вкл' if bot_flags['news_enabled'] else 'выкл'}"]
     return "\n".join(lines)
 
-
 # ----------------------------------------------------------------------------
-# АДМИН-ПАНЕЛЬ (второй бот, доступ только для ADMIN_ID)
+# АДМИН-ПАНЕЛЬ
 # ----------------------------------------------------------------------------
-admin_mode = {}        # admin_id -> "restore"
-pending_payload = {}   # admin_id -> payload (если выключена мгновенная рассылка)
-
+admin_mode = {}
+pending_payload = {}
 
 def panel_text():
     total, _, _, _ = user_counts()
@@ -1568,22 +1495,18 @@ def panel_text():
         "я перешлю его всем пользователям основного бота."
     )
 
-
 def panel_kb():
     B = InlineKeyboardButton
     return InlineKeyboardMarkup(inline_keyboard=[
         [B(text="📊 Статистика", callback_data="adm:stats"), B(text="👥 Пользователи", callback_data="adm:users")],
-        [B(text="📰 Новость сейчас", callback_data="adm:news"),
-         B(text=f"🔔 Автоновости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="adm:tglnews")],
+        [B(text="📰 Новость сейчас", callback_data="adm:news"), B(text=f"🔔 Автоновости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="adm:tglnews")],
         [B(text=f"⚡ Рассылка: {'сразу' if bot_flags['instant'] else 'с подтверждением'}", callback_data="adm:tglinst")],
         [B(text="🧪 Диагностика", callback_data="adm:diag"), B(text="💾 Бэкап базы", callback_data="adm:backup")],
         [B(text="📤 Восстановить базу", callback_data="adm:restore")],
     ])
 
-
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В панель", callback_data="adm:panel")]])
-
 
 def stats_text():
     total, _, today, week = user_counts()
@@ -1595,34 +1518,25 @@ def stats_text():
         f"✅ Получают рассылку: <b>{len(active_chats)}</b>\n"
         f"🆕 Новых сегодня: {today} · за 7 дней: {week}\n\n"
         f"📈 Сигналов с запуска: {stats['signals']}\n"
+        f"🚨 Срочных сигналов: {stats['alerts_sent']}\n"
         f"🧩 Движки анализа: {eng}\n"
         f"📰 Новостей доставлено: {stats['news_sent']}\n"
         f"📢 Рассылок сделано: {stats['broadcasts']}\n"
         f"⏱ Аптайм: {up // 3600} ч {up % 3600 // 60} мин"
     )
 
-
 async def extract_payload(message):
-    """Превращает сообщение админа в payload для рассылки. None, если тип не поддерживается."""
     text = message.html_text if (message.text or message.caption) else ""
-    if message.text:
-        return {"kind": "text", "text": text}
+    if message.text: return {"kind": "text", "text": text}
 
     spec = None
-    if message.photo:
-        spec = ("photo", message.photo[-1].file_id, "photo.jpg")
-    elif message.video:
-        spec = ("video", message.video.file_id, message.video.file_name or "video.mp4")
-    elif message.animation:
-        spec = ("animation", message.animation.file_id, message.animation.file_name or "anim.mp4")
-    elif message.document:
-        spec = ("document", message.document.file_id, message.document.file_name or "file")
-    elif message.audio:
-        spec = ("audio", message.audio.file_id, message.audio.file_name or "audio.mp3")
-    elif message.voice:
-        spec = ("voice", message.voice.file_id, "voice.ogg")
-    if not spec:
-        return None
+    if message.photo: spec = ("photo", message.photo[-1].file_id, "photo.jpg")
+    elif message.video: spec = ("video", message.video.file_id, message.video.file_name or "video.mp4")
+    elif message.animation: spec = ("animation", message.animation.file_id, message.animation.file_name or "anim.mp4")
+    elif message.document: spec = ("document", message.document.file_id, message.document.file_name or "file")
+    elif message.audio: spec = ("audio", message.audio.file_id, message.audio.file_name or "audio.mp3")
+    elif message.voice: spec = ("voice", message.voice.file_id, "voice.ogg")
+    if not spec: return None
 
     kind, file_id, filename = spec
     try:
@@ -1633,28 +1547,19 @@ async def extract_payload(message):
         raise ValueError(f"Не удалось скачать файл (лимит Telegram для ботов 20 МБ): {e}")
     return {"kind": kind, "text": text, "data": data, "filename": filename}
 
-
 async def run_broadcast(admin_chat, payload):
     n = len(active_chats)
     if n == 0:
-        await input_bot.send_message(
-            admin_chat,
-            "⚠️ Получателей нет: база пуста. На бесплатном Render users.json стирается при деплое. "
-            "Нажмите «📤 Восстановить базу» и пришлите последний бэкап.")
+        await input_bot.send_message(admin_chat, "⚠️ Получателей нет: база пуста. Нажмите «📤 Восстановить базу» и пришлите последний бэкап.")
         return
     status = await input_bot.send_message(admin_chat, f"⏳ Рассылка: 0/{n}")
 
-    async def progress(done, total):
-        await status.edit_text(f"⏳ Рассылка: {done}/{total}")
+    async def progress(done, total): await status.edit_text(f"⏳ Рассылка: {done}/{total}")
 
     ok, fail, removed = await broadcast(payload, progress)
     stats["broadcasts"] += 1
-    try:
-        await status.edit_text(
-            f"✅ Рассылка завершена\n\nДоставлено: {ok} из {n}\nОшибок: {fail}\nУбрано неактивных: {removed}")
-    except Exception:
-        pass
-
+    try: await status.edit_text(f"✅ Рассылка завершена\n\nДоставлено: {ok} из {n}\nОшибок: {fail}\nУбрано неактивных: {removed}")
+    except Exception: pass
 
 async def do_restore(message):
     if not message.document:
@@ -1664,8 +1569,7 @@ async def do_restore(message):
         f = await input_bot.get_file(message.document.file_id)
         buf = await input_bot.download_file(f.file_path)
         data = json.loads(buf.read().decode("utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("ожидался JSON-объект {id: данные}")
+        if not isinstance(data, dict): raise ValueError("ожидался JSON-объект {id: данные}")
     except Exception as e:
         await message.answer(f"❌ Не удалось прочитать файл: {html.escape(str(e))}", parse_mode="HTML")
         return
@@ -1677,18 +1581,14 @@ async def do_restore(message):
             added += 1
     _save_users(users)
     load_active_chats()
-    await message.answer(f"✅ Восстановлено: добавлено {added}, всего в базе {len(users)}, "
-                         f"получателей {len(active_chats)}.", reply_markup=panel_kb())
-
+    await message.answer(f"✅ Восстановлено: добавлено {added}, всего в базе {len(users)}, получателей {len(active_chats)}.", reply_markup=panel_kb())
 
 if input_dp:
     admin_filter = F.from_user.id.in_(ADMIN_IDS)
 
     async def _edit(cb, text, kb=None):
-        try:
-            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-        except TelegramBadRequest:
-            pass  # "message is not modified"
+        try: await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except TelegramBadRequest: pass
 
     @input_dp.message(Command("start", "panel", "menu"), admin_filter)
     async def adm_start(message: types.Message):
@@ -1702,8 +1602,7 @@ if input_dp:
     @input_dp.message(Command("backup"), admin_filter)
     async def adm_backup_cmd(message: types.Message):
         ok = await send_backup()
-        if not ok:
-            await message.answer("База пуста, бэкапить нечего.")
+        if not ok: await message.answer("База пуста, бэкапить нечего.")
 
     @input_dp.message(Command("dm"), admin_filter)
     async def adm_dm(message: types.Message):
@@ -1726,38 +1625,30 @@ if input_dp:
         if admin_mode.pop(uid, None) == "restore":
             await do_restore(message)
             return
-        try:
-            payload = await extract_payload(message)
+        try: payload = await extract_payload(message)
         except ValueError as e:
             await message.answer(f"❌ {html.escape(str(e))}", parse_mode="HTML")
             return
         if payload is None:
             await message.answer("⚠️ Этот тип сообщения не поддерживается (стикеры, опросы и т.п.).")
             return
-        if bot_flags["instant"]:
-            await run_broadcast(message.chat.id, payload)
+        if bot_flags["instant"]: await run_broadcast(message.chat.id, payload)
         else:
             pending_payload[uid] = payload
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=f"✅ Разослать ({len(active_chats)})", callback_data="adm:send"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="adm:drop"),
-            ]])
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"✅ Разослать ({len(active_chats)})", callback_data="adm:send"), InlineKeyboardButton(text="❌ Отмена", callback_data="adm:drop")]])
             await input_bot.copy_message(message.chat.id, message.chat.id, message.message_id, reply_markup=kb)
 
     @input_dp.callback_query(admin_filter)
     async def adm_callback(cb: types.CallbackQuery):
-        try:
-            await cb.answer()
-        except Exception:
-            pass
+        try: await cb.answer()
+        except Exception: pass
         uid = cb.from_user.id
         action = (cb.data or "").split(":", 1)[-1]
 
         if action == "panel":
             admin_mode.pop(uid, None)
             await _edit(cb, panel_text(), panel_kb())
-        elif action == "stats":
-            await _edit(cb, stats_text(), back_kb())
+        elif action == "stats": await _edit(cb, stats_text(), back_kb())
         elif action == "users":
             users = _load_users()
             last = list(users.items())[-10:]
@@ -1766,8 +1657,7 @@ if input_dp:
                 name = html.escape(str(u.get("first_name") or "—"))
                 uname = f"@{html.escape(u['username'])}" if u.get("username") else ""
                 rows.append(f"• {name} {uname} · {str(u.get('joined_at', ''))[:10]} · <code>{k}</code>")
-            await _edit(cb, f"👥 <b>Последние пользователи</b> (всего {len(users)})\n\n" + ("\n".join(rows) or "пусто"),
-                        back_kb())
+            await _edit(cb, f"👥 <b>Последние пользователи</b> (всего {len(users)})\n\n" + ("\n".join(rows) or "пусто"), back_kb())
         elif action == "tglnews":
             bot_flags["news_enabled"] = not bot_flags["news_enabled"]
             await _edit(cb, panel_text(), panel_kb())
@@ -1785,10 +1675,8 @@ if input_dp:
             await run_broadcast(cb.message.chat.id, payload)
         elif action == "diag":
             await _edit(cb, "⏳ Проверяю источники и анализ (до 30 секунд)...", None)
-            try:
-                result = await run_diagnostics()
-            except Exception as e:
-                result = f"❌ Ошибка диагностики: {html.escape(str(e))}"
+            try: result = await run_diagnostics()
+            except Exception as e: result = f"❌ Ошибка диагностики: {html.escape(str(e))}"
             await _edit(cb, result, back_kb())
         elif action == "backup":
             ok = await send_backup()
@@ -1796,24 +1684,19 @@ if input_dp:
         elif action == "restore":
             admin_mode[uid] = "restore"
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm:panel")]])
-            await _edit(cb, "📤 Пришлите файл <b>users.json</b> (последний бэкап). "
-                            "Новые пользователи добавятся, существующие не изменятся.", kb)
+            await _edit(cb, "📤 Пришлите файл <b>users.json</b> (последний бэкап). Новые пользователи добавятся, существующие не изменятся.", kb)
         elif action == "send":
             payload = pending_payload.pop(uid, None)
             if payload is None:
                 await cb.message.answer("Нечего отправлять: сообщение уже разослано или отменено.")
                 return
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            try: await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception: pass
             await run_broadcast(cb.message.chat.id, payload)
         elif action == "drop":
             pending_payload.pop(uid, None)
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            try: await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception: pass
             await cb.message.answer("Отменено.")
 
     @input_dp.message()
@@ -1822,39 +1705,29 @@ if input_dp:
         log.warning("Админ-бот: обращение от не-админа, id=%s", uid)
         text = "⛔ Нет доступа."
         if not ADMIN_IDS:
-            text += (f"\n\nВаш Telegram ID: <code>{uid}</code>\nЕсли вы владелец, добавьте в переменные "
-                     f"окружения Render: <code>ADMIN_ID={uid}</code> и перезапустите сервис.")
+            text += (f"\n\nВаш Telegram ID: <code>{uid}</code>\nЕсли вы владелец, добавьте в переменные окружения Render: <code>ADMIN_ID={uid}</code> и перезапустите сервис.")
         await message.answer(text, parse_mode="HTML")
 
     @input_dp.callback_query()
     async def adm_deny_cb(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
 
-
 # ----------------------------------------------------------------------------
 # ЗАПУСК
 # ----------------------------------------------------------------------------
 def _log_task_result(t):
-    try:
-        t.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        log.error("Фоновая задача завершилась ошибкой: %s", e, exc_info=True)
-
+    try: t.result()
+    except asyncio.CancelledError: pass
+    except Exception as e: log.error("Фоновая задача завершилась ошибкой: %s", e, exc_info=True)
 
 async def startup_notice():
     total, _, _, _ = user_counts()
     text = f"✅ Бот запущен.\nПользователей в базе: {total}"
     if total == 0:
-        text += ("\n\n⚠️ База пуста (на бесплатном Render файл стирается при деплое). "
-                 "Нажмите «📤 Восстановить базу» и пришлите последний users.json из бэкапа.")
+        text += ("\n\n⚠️ База пуста (на бесплатном Render файл стирается при деплое). Нажмите «📤 Восстановить базу» и пришлите последний users.json из бэкапа.")
     for aid in ADMIN_IDS:
-        try:
-            await input_bot.send_message(aid, text, reply_markup=panel_kb())
-        except Exception as e:
-            log.warning("Не удалось написать админу %s в админ-бот (нажмите /start в админ-боте): %s", aid, e)
-
+        try: await input_bot.send_message(aid, text, reply_markup=panel_kb())
+        except Exception as e: log.warning("Не удалось написать админу %s в админ-бот (нажмите /start в админ-боте): %s", aid, e)
 
 async def main():
     global http, analysis_sem
@@ -1876,8 +1749,10 @@ async def main():
         except Exception as e:
             runtime["main_bot"] = f"ошибка: {e}"
             log.error("Основной бот: get_me не удался: %s (проверьте BOT_TOKEN)", e)
+        
         background.append(asyncio.create_task(news_watcher()))
         background.append(asyncio.create_task(backup_loop()))
+        background.append(asyncio.create_task(alert_loop())) # <-- Добавлен часовой сканер
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
@@ -1892,44 +1767,33 @@ async def main():
                     types.BotCommand(command="stats", description="📊 Статистика"),
                     types.BotCommand(command="backup", description="💾 Бэкап базы"),
                 ])
-                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False,
-                                                               close_bot_session=False))
+                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False, close_bot_session=False))
                 t.add_done_callback(_log_task_result)
                 background.append(t)
                 await asyncio.sleep(2)
-                if t.done():
-                    runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
-                else:
-                    log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
-                if ADMIN_IDS:
-                    await startup_notice()
+                if t.done(): runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
+                else: log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
+                if ADMIN_IDS: await startup_notice()
             except Exception as e:
                 runtime["admin_bot"] = f"ошибка: {e}"
-                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "nauthorized" in str(e) else ""
+                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "unauthorized" in str(e) else ""
                 log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
         else:
-            if not INPUT_BOT_TOKEN:
-                reason = "переменная INPUT_BOT_TOKEN не задана"
-            elif INPUT_BOT_TOKEN == BOT_TOKEN:
-                reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
-            else:
-                reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
+            if not INPUT_BOT_TOKEN: reason = "переменная INPUT_BOT_TOKEN не задана"
+            elif INPUT_BOT_TOKEN == BOT_TOKEN: reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
+            else: reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
             runtime["admin_bot"] = f"выключен: {reason}"
             log.warning("Админ-бот выключен: %s", reason)
 
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
-        for t in background:
-            t.cancel()
+        for t in background: t.cancel()
         if input_bot:
-            try:
-                await input_bot.session.close()
-            except Exception:
-                pass
+            try: await input_bot.session.close()
+            except Exception: pass
         await http.close()
         await bot.session.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
