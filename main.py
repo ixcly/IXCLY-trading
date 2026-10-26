@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.2 (FULL + Entry Filter)
-- Финансовая рекомендация: Входить или Ждать (на основе волатильности и тренда)
-- Свечи: 6 бирж + CryptoCompare
-- Админ-бот: работает параллельно на токене INPUT_BOT_TOKEN
+IXCLY Trading bot v2.3 (FULL + No AI words + Double Translate)
 """
 import asyncio
 import html
@@ -221,17 +218,33 @@ def normalize_ticker(text):
         t = t[:-4]
     return t
 
+# ДВОЙНОЙ ПЕРЕВОДЧИК (Google -> MyMemory)
 async def translate_text(text, target="ru"):
+    if not text: return text
+    # 1. Пробуем Google
     try:
         url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "en", "tl": target, "dt": "t", "q": text}
+        params = {"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text}
         async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
                 return "".join([item[0] for item in data[0]])
     except Exception:
         pass
-    return text
+    
+    # 2. Пробуем MyMemory (запасной)
+    try:
+        url = "https://api.mymemory.translated.net/get"
+        params = {"q": text, "langpair": f"en|{target}"}
+        async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                if data.get("responseStatus") == 200:
+                    return data["responseData"]["translatedText"]
+    except Exception:
+        pass
+
+    return text # Если оба упали, возвращаем оригинал
 
 # ----------------------------------------------------------------------------
 # ИНДИКАТОРЫ
@@ -502,7 +515,7 @@ async def ask_ai(prompt, json_mode=False, validate=None, timeout=30):
 
     res = await first_success([wrap(p) for p in providers], timeout)
     if not res:
-        log.error("❌ ВСЕ ИИ ПРОВАЙДЕРЫ ОТКАЗАЛИ. Проверьте API-ключи и лимиты.")
+        log.error("❌ ВСЕ СЕРВИСЫ АНАЛИЗА ОТКАЗАЛИ.")
     return res
 
 def parse_ai_json(text):
@@ -578,7 +591,7 @@ async def fetch_and_analyze_news():
 Описание: {summary}
 
 ОБЯЗАТЕЛЬНО ПЕРЕВЕДИ ЗАГОЛОВОК И ТЕКСТ НА РУССКИЙ ЯЗЫК. НИКАКОГО АНГЛИЙСКОГО ТЕКСТА В ОТВЕТЕ.
-Ответ должен быть кратким, по делу, без воды и без слов "Суть" и "ИИ".
+Ответ должен быть кратким, по делу, без воды.
 Напиши:
 1. Что произошло (1-2 предложения на русском).
 2. Как это влияет на рынок (позитив/негатив и почему, на русском).
@@ -589,13 +602,14 @@ async def fetch_and_analyze_news():
         if ai_text:
             body = ai_to_html(ai_text)
         else:
+            # Аварийный режим: переводим сами. Никаких слов про ИИ и нейросети.
             ru_title = await translate_text(title)
             ru_summary = await translate_text(summary[:300])
             
             body = (
                 f"📌 <b>{html.escape(ru_title)}</b>\n\n"
                 f"<i>{html.escape(ru_summary)}...</i>\n\n"
-                f"📉 <b>Влияние:</b> Требуется ручная оценка (нейросети перегружены).\n"
+                f"📉 <b>Влияние:</b> Требуется ручная оценка (анализ временно недоступен).\n"
                 f"🎯 <b>Монеты:</b> Общий фон рынка."
             )
 
@@ -667,7 +681,7 @@ def _dashed(d, y, x0, x1, color, dash=10, gap=6):
         x += dash + gap
 
 def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, source, entry_status="WAIT", entry_reason=""):
-    W, H = 800, 1050  # Сделал чуть выше, чтобы влез статус входа
+    W, H = 800, 1050
     green, red, gray, white, grid = "#089981", "#F23645", "#787B86", "#D1D4DC", "#2a2e39"
     img = Image.new("RGB", (W, H), "#131722")
     d = ImageDraw.Draw(img)
@@ -682,15 +696,13 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     d.text((40, 165), f"TF {tf}  |  Long prob {long_prob}%  |  {source}", font=f_text, fill=gray)
 
     # БАННЕР ВХОДА
-    status_color = green if entry_status == "ENTER" else "#F3A300" # Зеленый или Оранжевый
+    status_color = green if entry_status == "ENTER" else "#F3A300"
     status_text = f"СТАТУС: {entry_status}"
     d.rectangle([40, 210, W-40, 260], fill=status_color)
     d.text((60, 218), status_text, font=f_bold, fill="#000000")
-    
-    # Причина входа мелким шрифтом под баннером
     d.text((40, 270), entry_reason[:70], font=f_small, fill=gray)
 
-    x0, x1, y0, y1 = 40, W - 40, 310, 650 # Сдвинули график вниз
+    x0, x1, y0, y1 = 40, W - 40, 310, 650
     cd = df.tail(40).reset_index(drop=True)
     vals = [float(cd["low"].min()), float(cd["high"].max()), tps[0], sls[0], entry]
     lo, hi = min(vals), max(vals)
@@ -794,7 +806,6 @@ async def build_signal(coin, status, force=False):
         for tf, d in tf_data.items()
     )
     
-    # НОВЫЙ ПРОМПТ: Требуем финансовую рекомендацию по входу
     prompt = f"""Ты профессиональный трейдер-аналитик. Проанализируй {coin} по индикаторам:
 {tf_text}
 Последние новости (учти влияние):
@@ -819,7 +830,7 @@ async def build_signal(coin, status, force=False):
         tf = "4h"
         reason = local_reason(tf, tf_data[tf])
         entry_status = "WAIT"
-        entry_reason = "Нейросети недоступны. Локальный анализ показывает неопределенность."
+        entry_reason = "Анализ временно недоступен. Локальные данные показывают неопределенность."
 
     reason = reason[:350]
     entry_reason = entry_reason[:100]
@@ -832,7 +843,6 @@ async def build_signal(coin, status, force=False):
     direction = "🟢 LONG" if is_long else "🔴 SHORT"
     multi = " | ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
     
-    # Добавили статус входа в текст
     status_emoji = "✅" if entry_status == "ENTER" else "⏳"
     text = (
         f"<b>📊 {coin}/USDT</b> · {tf}\n"
