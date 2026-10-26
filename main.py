@@ -106,18 +106,17 @@ async def get_signal_data(symbol):
         {{"long_prob": 70, "short_prob": 30, "reason": "Краткое обоснование на русском (1-2 предложения). Укажи, куда движется среднесрочный тренд."}}
         """
 
-        # ИСПОЛЬЗУЕМ АКТУАЛЬНУЮ МОДЕЛЬ gemini-3.8-flash
+        # --- ИСПОЛЬЗУЕМ АКТУАЛЬНУЮ МОДЕЛЬ gemini-3.8-flash ---
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
         headers = {
             'Content-Type': 'application/json',
             'x-goog-api-key': GEMINI_API_KEY
         }
-        # Добавляем thinking_level для контроля затрат (low, medium, high)
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "thinkingConfig": {
-                    "thinkingLevel": "LOW" 
+                    "thinkingLevel": "LOW" # Низкий уровень "размышлений" для экономии токенов
                 }
             }
         }
