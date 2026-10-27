@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.15
+IXCLY Trading bot v2.10.18
 Полная версия без сокращений
 
-- Максимально точные сигналы (Среднесрок / Быстрый)
+- Точные сигналы: Среднесрок / Быстрый
+- Визуальная шкала силы 🟩🟥
+- Короткие читаемые новости + картинка
 - Одна общая оценка влияния мировых новостей
-- Чистка временных меню (сохранённые сигналы не удаляются)
+- Чистка временных меню
 - Мониторинг открытых позиций
 - Полная админ-панель
 - MongoDB + файловый фоллбэк
@@ -20,7 +22,6 @@ import os
 import re
 import sys
 import time
-from collections import Counter
 from datetime import datetime, timedelta
 from threading import Thread
 from urllib.parse import quote
@@ -46,7 +47,7 @@ logging.basicConfig(
 log = logging.getLogger("ixcly")
 
 # ============================================================================
-# ВЕБ-СЕРВЕР (для Render / Railway и т.д.)
+# ВЕБ-СЕРВЕР
 # ============================================================================
 app = Flask(__name__)
 
@@ -68,10 +69,8 @@ def _rss_mb():
 @app.route("/status")
 def status_page():
     return jsonify({
-        "peak_rss_mb": _rss_mb(),
         "version": VERSION,
         "uptime_s": int(time.time() - stats["started"]),
-        "main_bot": runtime.get("main_bot", "?"),
         "recipients": len(active_chats),
         "mongo_connected": users_col is not None,
         "market_bias": market_bias,
@@ -81,10 +80,9 @@ def _run_web():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     try:
         port = int(os.environ.get("PORT", 8080))
-        log.info(f"Flask запущен на порту {port}")
         app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
     except Exception as e:
-        log.error(f"Ошибка Flask: {e}")
+        log.error(f"Flask error: {e}")
 
 _web_started = False
 
@@ -96,7 +94,7 @@ def keep_alive():
     Thread(target=_run_web, daemon=True).start()
 
 # ============================================================================
-# НАСТРОЙКИ И ПЕРЕМЕННЫЕ ОКЖЕНИЯ
+# НАСТРОЙКИ
 # ============================================================================
 def clean_key(key):
     if not key:
@@ -107,8 +105,6 @@ BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
-CRYPTOCOMPARE_KEY = clean_key(os.getenv("CRYPTOCOMPARE_KEY"))
-POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 MONGO_URI = clean_key(os.getenv("MONGO_URI"))
 
@@ -117,15 +113,10 @@ for _x in re.split(r"[,\s]+", ADMIN_ID or ""):
     if _x.lstrip("-").isdigit():
         ADMIN_IDS.add(int(_x))
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
-POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
-
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.15"
+VERSION = "2.10.18"
 runtime = {"main_bot": "?"}
 
 bot = Bot(token=BOT_TOKEN)
@@ -150,9 +141,7 @@ POPULAR_COINS = [
     "BOME", "MEME", "SATS", "RATS", "DCR", "DGB", "XVG", "SC", "RVN", "WAVES", "ZEN", "BLAST",
     "AEVO", "ETHFI", "ENA", "W", "EIGEN", "MOVE", "PNUT", "GOAT", "ACT", "MOODENG", "TURBO",
     "MOG", "NEIRO", "DOGS", "NOT", "PIXEL", "PORTAL", "DYM", "ALT", "MANTA", "ZETA", "TNSR",
-    "DRIFT", "KMNO", "WEN", "MYRO", "POPCAT", "GIGA", "RETARDIO", "SILLY", "PONKE", "BODEN",
-    "MEW", "SLERF", "LUNC", "LUNA", "USTC", "CTSI", "COTI", "CELO", "CKB", "ONE", "QTUM",
-    "IOST", "ONT", "ICX", "WAN", "ARK", "STRAX", "SYS", "DENT", "XEC"
+    "DRIFT", "KMNO", "WEN", "MYRO", "POPCAT", "GIGA", "MEW", "SLERF", "LUNC", "LUNA", "USTC"
 ]
 
 SYMBOL_ALIASES = {
@@ -165,7 +154,6 @@ SYMBOL_ALIASES = {
     "BONK": ["1000BONK", "BONK"],
     "PEPE": ["1000PEPE", "PEPE"],
     "FLOKI": ["1000FLOKI", "FLOKI"],
-    "XEC": ["1000XEC", "XEC"],
 }
 
 USERS_FILE = "users.json"
@@ -190,8 +178,6 @@ bot_flags = {
     "alerts_enabled": True,
 }
 
-# Глобальная оценка влияния новостей на рынок
-# bias: -1 = медвежий, 0 = нейтральный, 1 = бычий
 market_bias = {
     "bias": 0,
     "text": "Нейтральный фон",
@@ -209,19 +195,18 @@ def init_mongo():
         client = pymongo.MongoClient(
             MONGO_URI,
             serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=8000
+            connectTimeoutMS=5000
         )
         db = client.get_database("ixcly_db")
         users_col = db["users"]
         client.server_info()
-        log.info("✅ Успешно подключено к MongoDB")
+        log.info("✅ MongoDB подключена")
     except Exception as e:
-        log.error(f"❌ Ошибка подключения к MongoDB: {e}")
+        log.error(f"❌ Ошибка MongoDB: {e}")
         users_col = None
 
 # ============================================================================
-# РАБОТА С ПОЛЬЗОВАТЕЛЯМИ
+# ПОЛЬЗОВАТЕЛИ
 # ============================================================================
 def _load_users():
     if users_col is not None:
@@ -247,19 +232,17 @@ def _save_users(users):
         except Exception as e:
             log.error(f"Mongo save error: {e}")
         return
-
     try:
         tmp = USERS_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(users, f, ensure_ascii=False, indent=2)
         os.replace(tmp, USERS_FILE)
     except Exception as e:
-        log.warning(f"Не удалось сохранить users.json: {e}")
+        log.warning(f"Save users error: {e}")
 
 def save_user_data(user_id, username, first_name):
     key = str(user_id)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     if users_col is not None:
         try:
             users_col.update_one(
@@ -278,14 +261,12 @@ def save_user_data(user_id, username, first_name):
         except Exception as e:
             log.error(f"Mongo save_user error: {e}")
             return False
-
     users = _load_users()
     if key in users:
         if users[key].get("active") is False:
             users[key]["active"] = True
             _save_users(users)
         return False
-
     users[key] = {
         "username": username,
         "first_name": first_name,
@@ -313,7 +294,6 @@ def add_user_saved_signal(user_id, coin, text, photo_id=None):
         except Exception as e:
             log.error(f"Mongo add signal error: {e}")
             return False
-
     users = _load_users()
     if key not in users:
         return False
@@ -336,7 +316,6 @@ def del_user_saved_signal(user_id, coin):
         except Exception as e:
             log.error(f"Mongo del signal error: {e}")
             return False
-
     users = _load_users()
     if key in users and "saved_signals" in users[key]:
         users[key]["saved_signals"] = [s for s in users[key]["saved_signals"] if s.get("coin") != coin]
@@ -349,7 +328,6 @@ def get_user_open_positions(user_id):
     return users.get(str(user_id), {}).get("open_positions", {})
 
 def set_user_open_position(user_id, coin, data):
-    """data = dict или None (чтобы удалить позицию)"""
     key = str(user_id)
     if users_col is not None:
         try:
@@ -365,7 +343,6 @@ def set_user_open_position(user_id, coin, data):
         except Exception as e:
             log.error(f"Mongo open_pos error: {e}")
             return False
-
     users = _load_users()
     if key not in users:
         users[key] = {}
@@ -432,9 +409,9 @@ def _load_news_history():
 def _save_news_history():
     try:
         with open(NEWS_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(news_history[-100:], f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.warning(f"news_history save error: {e}")
+            json.dump(news_history[-80:], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 def _load_signal_history():
     try:
@@ -449,8 +426,8 @@ def _save_signal_history(data):
     try:
         with open(SIGNAL_HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(data[-50:], f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.warning(f"signal_history save error: {e}")
+    except Exception:
+        pass
 
 # ============================================================================
 # МИДЛВАРЬ
@@ -459,7 +436,6 @@ class UserTrackerMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: types.Update, data: dict):
         user = None
         chat_id = None
-
         if event.message:
             user = event.message.from_user
             chat_id = event.message.chat.id
@@ -467,13 +443,11 @@ class UserTrackerMiddleware(BaseMiddleware):
             user = event.callback_query.from_user
             if event.callback_query.message:
                 chat_id = event.callback_query.message.chat.id
-
         if user and chat_id and chat_id not in active_chats:
             active_chats.add(chat_id)
             asyncio.create_task(
                 asyncio.to_thread(save_user_data, user.id, user.username, user.first_name)
             )
-
         return await handler(event, data)
 
 dp.update.middleware(UserTrackerMiddleware())
@@ -485,35 +459,31 @@ def get_coins_keyboard(page=0):
     per_page = 12
     coins_page = POPULAR_COINS[page * per_page:(page + 1) * per_page]
     buttons = []
-
     for i in range(0, len(coins_page), 2):
-        row = [InlineKeyboardButton(text=coins_page[i], callback_data=f"c:{coins_page[i]}")]
+        row = [InlineKeyboardButton(text=f"🪙 {coins_page[i]}", callback_data=f"c:{coins_page[i]}")]
         if i + 1 < len(coins_page):
-            row.append(InlineKeyboardButton(text=coins_page[i + 1], callback_data=f"c:{coins_page[i + 1]}"))
+            row.append(InlineKeyboardButton(text=f"🪙 {coins_page[i + 1]}", callback_data=f"c:{coins_page[i + 1]}"))
         buttons.append(row)
-
     total_pages = (len(POPULAR_COINS) + per_page - 1) // per_page
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"p:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"p:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"📄 {page + 1}/{total_pages}", callback_data="ignore"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"p:{page + 1}"))
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"p:{page + 1}"))
     buttons.append(nav)
-
-    buttons.append([InlineKeyboardButton(text="🧐 Интересные графики", callback_data="interesting_menu")])
+    buttons.append([InlineKeyboardButton(text="🧐 Интересные", callback_data="interesting_menu")])
     buttons.append([InlineKeyboardButton(text="🔥 Последние сигналы", callback_data="last_signals")])
     buttons.append([InlineKeyboardButton(text="⭐ Избранное", callback_data="sig:menu")])
     buttons.append([InlineKeyboardButton(text="📊 Статистика 24ч", callback_data="show_stats")])
-    buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
-
+    buttons.append([InlineKeyboardButton(text="🔍 Поиск", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def result_keyboard(coin):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
         InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}"),
-        InlineKeyboardButton(text="📋 Меню", callback_data="menu"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="menu"),
     ]])
 
 def get_saved_signals_menu(user_id):
@@ -521,17 +491,16 @@ def get_saved_signals_menu(user_id):
     buttons = []
     row = []
     for s in saved:
-        row.append(InlineKeyboardButton(text=f"🪙 {s['coin']}", callback_data=f"sig:view:{s['coin']}"))
+        row.append(InlineKeyboardButton(text=f"⭐ {s['coin']}", callback_data=f"sig:view:{s['coin']}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-
-    buttons.append([InlineKeyboardButton(text="➕ Сохранить новый", callback_data="sig:save_new")])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить", callback_data="sig:save_new")])
     if saved:
-        buttons.append([InlineKeyboardButton(text="🗑 Удалить сигнал", callback_data="sig:del_menu")])
-    buttons.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")])
+        buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data="sig:del_menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_delete_signals_menu(user_id):
@@ -557,7 +526,6 @@ def get_save_coins_keyboard(page=0):
         if i + 1 < len(coins_page):
             row.append(InlineKeyboardButton(text=coins_page[i + 1], callback_data=f"sig:do_save:{coins_page[i + 1]}"))
         buttons.append(row)
-
     total_pages = (len(POPULAR_COINS) + per_page - 1) // per_page
     nav = []
     if page > 0:
@@ -579,12 +547,12 @@ def get_saved_signal_view_keyboard(user_id, coin):
         buttons.append([InlineKeyboardButton(text="❌ Закрыл сделку", callback_data=f"pos:close:{coin}")])
     else:
         buttons.append([InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад к избранному", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sig:menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
-    news_status = "ВКЛ" if bot_flags["news_enabled"] else "ВЫКЛ"
-    scan_status = "ВКЛ" if bot_flags["alerts_enabled"] else "ВЫКЛ"
+    news_status = "🟢 ВКЛ" if bot_flags["news_enabled"] else "🔴 ВЫКЛ"
+    scan_status = "🟢 ВКЛ" if bot_flags["alerts_enabled"] else "🔴 ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
@@ -598,7 +566,7 @@ def get_admin_keyboard():
             InlineKeyboardButton(text=f"🚨 Сканер: {scan_status}", callback_data="admin:toggle_scan"),
             InlineKeyboardButton(text="🔍 Скан-тест", callback_data="admin:scan_test"),
         ],
-        [InlineKeyboardButton(text="⚡ Рассылка: сразу", callback_data="admin:broadcast_now")],
+        [InlineKeyboardButton(text="⚡ Рассылка сразу", callback_data="admin:broadcast_now")],
         [
             InlineKeyboardButton(text="🔧 Диагностика", callback_data="admin:diag"),
             InlineKeyboardButton(text="💾 Бэкап", callback_data="admin:backup"),
@@ -607,7 +575,7 @@ def get_admin_keyboard():
     ])
 
 # ============================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ВСПОМОГАТЕЛЬНЫЕ
 # ============================================================================
 def fmt(p):
     p = float(p)
@@ -619,6 +587,10 @@ def fmt(p):
     if a >= 0.01:
         return f"{p:.5f}"
     return f"{p:.8f}"
+
+def make_strength_bar(strength: float, length: int = 10) -> str:
+    filled = max(0, min(length, int(round(strength / 100 * length))))
+    return "🟩" * filled + "🟥" * (length - filled)
 
 async def first_success(coros, timeout=12):
     tasks = [asyncio.create_task(c) for c in coros]
@@ -658,7 +630,6 @@ def normalize_ticker(text):
     return t
 
 async def safe_delete(message):
-    """Аккуратно удаляет сообщение (временные меню)"""
     try:
         await message.delete()
     except Exception:
@@ -672,7 +643,6 @@ def add_indicators(df):
     df["ema20"] = c.ewm(span=20, adjust=False).mean()
     df["ema50"] = c.ewm(span=50, adjust=False).mean()
     df["ema200"] = c.ewm(span=200, adjust=False).mean()
-
     delta = c.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -682,7 +652,6 @@ def add_indicators(df):
     rsi = 100 - 100 / (1 + rs)
     rsi[(avg_loss == 0) & avg_gain.notna()] = 100
     df["rsi"] = rsi.fillna(50)
-
     prev = c.shift()
     tr = pd.concat([
         df["high"] - df["low"],
@@ -690,7 +659,6 @@ def add_indicators(df):
         (df["low"] - prev).abs()
     ], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean().fillna(tr.mean())
-
     macd_line = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     df["macd_hist"] = macd_line - signal_line
@@ -701,22 +669,17 @@ def calc_probability(df):
     ema50 = float(df["ema50"].iloc[-1]) or 1e-12
     rsi = float(df["rsi"].iloc[-1])
     macd_hist = float(df["macd_hist"].iloc[-1])
-
     score = 0.0
     diff_pct = abs(ema20 - ema50) / ema50 * 100
-
     if ema20 > ema50:
         score += 22 + min(18, diff_pct * 12)
     else:
         score -= 22 + min(18, diff_pct * 12)
-
     if rsi > 55:
         score += min(22, (rsi - 55) * 1.15)
     elif rsi < 45:
         score -= min(22, (45 - rsi) * 1.15)
-
     score += 22 if macd_hist > 0 else -22
-
     long_prob = max(8.0, min(92.0, 50 + score / 2))
     return round(long_prob, 1), round(100 - long_prob, 1)
 
@@ -849,26 +812,19 @@ async def get_simple_price(coin):
             return None
 
 # ============================================================================
-# СТРОГИЙ ТЕХНИЧЕСКИЙ ФИЛЬТР + УРОВНИ
+# СТРОГИЙ ТЕХ. ФИЛЬТР + УРОВНИ
 # ============================================================================
 def tech_check(tf_data):
-    """
-    Возвращает сигнал ТОЛЬКО при сильном согласии 4h + 1d.
-    Также определяет тип: Среднесрок или Быстрый сигнал.
-    """
     if "4h" not in tf_data or "1d" not in tf_data:
         return None
-
     d4 = tf_data["4h"]
     d1 = tf_data["1d"]
     p4 = d4["long_prob"]
     p1 = d1["long_prob"]
-
     is_long_4 = p4 >= 58
     is_long_1 = p1 >= 55
     is_short_4 = p4 <= 42
     is_short_1 = p1 <= 45
-
     if is_long_4 and is_long_1:
         is_long = True
         strength = (p4 + p1) / 2
@@ -877,22 +833,16 @@ def tech_check(tf_data):
         strength = ((100 - p4) + (100 - p1)) / 2
     else:
         return None
-
     if strength < 63:
         return None
-
-    # Определяем тип сигнала
     p15 = tf_data.get("15m", {}).get("long_prob", 50)
     p1h = tf_data.get("1h", {}).get("long_prob", 50)
-
     fast = False
     if is_long and p15 >= 60 and p1h >= 57:
         fast = True
     if (not is_long) and p15 <= 40 and p1h <= 43:
         fast = True
-
     signal_type = "Быстрый сигнал" if fast else "Среднесрок"
-
     return {
         "ok": True,
         "is_long": is_long,
@@ -903,29 +853,19 @@ def tech_check(tf_data):
     }
 
 def calc_levels(info, is_long):
-    """
-    Более точные уровни для среднесрока:
-    - Вход от структуры / EMA
-    - SL за свингом
-    - TP по риску 1.4 / 2.3 / 3.5
-    """
     price = info["price"]
     atr = info["atr"] if info["atr"] and info["atr"] > 0 else price * 0.012
     ema20 = info["ema20"]
     ema50 = info["ema50"]
     recent_low = info["recent_low"]
     recent_high = info["recent_high"]
-
     if is_long:
-        # Ищем откат к зоне EMA
         pullback = max(ema20, ema50)
         entry = min(price, pullback)
         if entry > price - 0.15 * atr:
             entry = price - 0.35 * atr
-
         sl1 = recent_low - 0.4 * atr
         sl2 = sl1 - 0.7 * atr
-
         risk = max(entry - sl1, 0.6 * atr)
         tp1 = entry + risk * 1.4
         tp2 = entry + risk * 2.3
@@ -935,19 +875,16 @@ def calc_levels(info, is_long):
         entry = max(price, pullback)
         if entry < price + 0.15 * atr:
             entry = price + 0.35 * atr
-
         sl1 = recent_high + 0.4 * atr
         sl2 = sl1 + 0.7 * atr
-
         risk = max(sl1 - entry, 0.6 * atr)
         tp1 = entry - risk * 1.4
         tp2 = entry - risk * 2.3
         tp3 = entry - risk * 3.5
-
     return entry, [tp1, tp2, tp3], [sl1, sl2]
 
 # ============================================================================
-# НОВОСТИ + ОДНА ОБЩАЯ ОЦЕНКА ВЛИЯНИЯ
+# НОВОСТИ + ОДНА ОБЩАЯ ОЦЕНКА
 # ============================================================================
 NEWS_FEEDS = [
     "https://cointelegraph.com/rss",
@@ -995,18 +932,27 @@ async def get_world_titles(n=6):
         _world_cache["titles"] = titles
     return titles[:n]
 
+def extract_image(entry):
+    if hasattr(entry, "media_content") and entry.media_content:
+        return entry.media_content[0].get("url")
+    if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get("url")
+    if hasattr(entry, "links"):
+        for link in entry.links:
+            if link.get("type", "").startswith("image"):
+                return link.get("href")
+    if hasattr(entry, "summary"):
+        m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', entry.summary or "")
+        if m:
+            return m.group(1)
+    return None
+
 async def update_market_bias():
-    """
-    Делает ОДНУ общую оценку влияния новостей на крипторынок.
-    Результат сохраняется в market_bias и используется везде.
-    """
     global market_bias
     try:
         crypto_titles = [e.title for e in await get_news_entries()]
         world_titles = await get_world_titles(7)
-
-        prompt = f"""Ты опытный макро- и крипто-аналитик.
-На основе новостей ниже дай ОДНУ общую оценку влияния на крипторынок на ближайшие 1–3 дня.
+        prompt = f"""Ты макро-аналитик. Дай ОДНУ короткую оценку влияния новостей на крипторынок на 1-3 дня.
 
 МИРОВЫЕ НОВОСТИ:
 {chr(10).join('- ' + t for t in world_titles) or '- нет данных'}
@@ -1014,43 +960,32 @@ async def update_market_bias():
 КРИПТО-НОВОСТИ:
 {chr(10).join('- ' + t for t in crypto_titles) or '- нет данных'}
 
-Ответь СТРОГО в таком формате (без лишнего текста):
-
+Ответь СТРОГО:
 BIAS: BULLISH
-REASON: краткое объяснение на русском (1-2 предложения)
+REASON: короткое объяснение на русском (1-2 предложения)
 
-или
-
-BIAS: BEARISH
-REASON: ...
-
-или
-
-BIAS: NEUTRAL
-REASON: ...
+или BIAS: BEARISH
+или BIAS: NEUTRAL
 """
         text, engine = await ask_ai_named(prompt, timeout=18)
         bias = 0
         reason = "Нейтральный фон"
-
         if text:
             upper = text.upper()
             if "BULLISH" in upper:
                 bias = 1
             elif "BEARISH" in upper:
                 bias = -1
-
             m = re.search(r"REASON:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
             if m:
-                reason = m.group(1).strip()[:240]
-
+                reason = m.group(1).strip()[:220]
         market_bias = {
             "bias": bias,
             "text": reason,
             "ts": time.time(),
             "engine": engine
         }
-        log.info(f"Market bias обновлён → {bias} | {reason}")
+        log.info(f"Market bias → {bias} | {reason}")
     except Exception as e:
         log.warning(f"Ошибка обновления market_bias: {e}")
 
@@ -1058,14 +993,13 @@ REASON: ...
 # ИИ
 # ============================================================================
 async def _ask_gemini(prompt, json_mode=False):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.15}
     }
     if json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
-
     for key in GEMINI_API_KEYS:
         try:
             async with http.post(
@@ -1090,17 +1024,16 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode=False):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.15,
-        "max_tokens": 1400
+        "max_tokens": 1200
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-
     try:
         async with http.post(
             f"{base_url}/chat/completions",
             json=payload,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=22)
+            timeout=aiohttp.ClientTimeout(total=20)
         ) as r:
             j = await r.json(content_type=None)
             if r.status == 200 and "choices" in j:
@@ -1115,16 +1048,14 @@ async def ask_ai_named(prompt, json_mode=False, timeout=16):
         tasks.append(("Gemini", lambda: _ask_gemini(prompt, json_mode)))
     if GROQ_API_KEY:
         tasks.append(("Groq", lambda: _ask_openai_compat(
-            "https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, json_mode
+            "https://api.groq.com/openai/v1", GROQ_API_KEY, "llama-3.1-8b-instant", prompt, json_mode
         )))
     if OPENROUTER_API_KEY:
         tasks.append(("OpenRouter", lambda: _ask_openai_compat(
-            "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, json_mode
+            "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, "meta-llama/llama-3.3-70b-instruct:free", prompt, json_mode
         )))
-
     if not tasks:
         return None, None
-
     async def wrap(name, fn):
         try:
             text = await asyncio.wait_for(fn(), timeout=timeout)
@@ -1133,7 +1064,6 @@ async def ask_ai_named(prompt, json_mode=False, timeout=16):
         except Exception:
             pass
         return None
-
     res = await first_success([wrap(n, f) for n, f in tasks], timeout=timeout + 3)
     return res if res else (None, None)
 
@@ -1143,24 +1073,20 @@ def has_russian(text, min_letters=25):
 def ai_to_html(text):
     text = html.escape((text or "").strip())
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    return text[:3400]
+    return text[:3200]
 
 # ============================================================================
-# СКАНЕР СИГНАЛОВ
+# СКАНЕР
 # ============================================================================
 SCAN_INTERVAL = 17 * 60
 
 async def scan_once(send=True):
     global last_signals_data
     t0 = time.time()
-
-    # Обновляем новостной фон, если он устарел
     if time.time() - market_bias["ts"] > 12 * 60:
         await update_market_bias()
-
     bias = market_bias["bias"]
     bias_text = market_bias["text"]
-
     sem = asyncio.Semaphore(3)
     candidates = []
 
@@ -1171,13 +1097,10 @@ async def scan_once(send=True):
                 tech = tech_check(tf_data)
                 if not tech or not tech["ok"]:
                     return
-
-                # Фильтр по новостному фону
                 if bias == 1 and not tech["is_long"]:
                     return
                 if bias == -1 and tech["is_long"]:
                     return
-
                 candidates.append({
                     "coin": coin,
                     "source": source,
@@ -1201,34 +1124,32 @@ async def scan_once(send=True):
         info = tf_data["4h"]
         is_long = tech["is_long"]
         entry, tps, sls = calc_levels(info, is_long)
-
-        side = "🟢 LONG" if is_long else "🔴 SHORT"
-        sig_type = tech["type"]
-
+        side_emoji = "🟢" if is_long else "🔴"
+        side = "LONG" if is_long else "SHORT"
+        bar = make_strength_bar(tech["strength"])
         text = (
-            f"<b>{side}  ·  {coin}</b>\n"
+            f"{side_emoji} <b>{side}  ·  {coin}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Тип сигнала: <b>{sig_type}</b>\n"
-            f"Сила: <b>{tech['strength']}%</b>  ·  ТФ: 4h + 1d\n\n"
-            f"💰 Текущая цена: <code>{fmt(info['price'])}</code>\n"
-            f"📥 Рекомендуемый вход: <code>{fmt(entry)}</code>\n\n"
-            f"🎯 <b>Тейк-профиты</b>\n"
+            f"📌 Тип: <b>{tech['type']}</b>\n"
+            f"💪 Сила: <b>{tech['strength']}%</b>\n"
+            f"{bar}\n\n"
+            f"💰 Цена: <code>{fmt(info['price'])}</code>\n"
+            f"📥 Вход: <code>{fmt(entry)}</code>\n\n"
+            f"🎯 <b>Тейки</b>\n"
             f"   TP1  <code>{fmt(tps[0])}</code>\n"
             f"   TP2  <code>{fmt(tps[1])}</code>\n"
             f"   TP3  <code>{fmt(tps[2])}</code>\n\n"
-            f"🛡 <b>Стоп-лоссы</b>\n"
+            f"🛡 <b>Стопы</b>\n"
             f"   SL1  <code>{fmt(sls[0])}</code>\n"
             f"   SL2  <code>{fmt(sls[1])}</code>\n\n"
-            f"🌍 <b>Новостной фон:</b>\n{html.escape(bias_text)}"
+            f"🌍 Фон: {html.escape(bias_text)}"
         )
-
         try:
             img_bytes = await asyncio.to_thread(
                 draw_chart, coin, tf_data, "4h", is_long, entry, tps, sls
             )
         except Exception:
             img_bytes = None
-
         signals.append({
             "coin": coin,
             "text": text,
@@ -1237,15 +1158,14 @@ async def scan_once(send=True):
             "entry": entry,
             "tps": tps,
             "sls": sls,
-            "type": sig_type,
+            "type": tech["type"],
             "strength": tech["strength"],
         })
-
         hist.append({
             "ts": time.time(),
             "coin": coin,
-            "side": "LONG" if is_long else "SHORT",
-            "type": sig_type,
+            "side": side,
+            "type": tech["type"],
             "strength": tech["strength"],
             "entry": entry,
             "text": text,
@@ -1265,19 +1185,16 @@ async def scan_once(send=True):
                     callback_data=f"c:{s['coin']}"
                 )
             ])
-
         lines.append(f"\n🌍 {html.escape(bias_text)}")
         final_text = "\n".join(lines)
-        kb_rows.append([InlineKeyboardButton(text="📋 Меню", callback_data="menu")])
+        kb_rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="menu")])
         markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
         last_signals_data = {
             "text": final_text,
             "kb": markup,
             "ts": time.time(),
             "signals": signals
         }
-
         sent, failed, _, _ = await broadcast({
             "kind": "text",
             "text": final_text,
@@ -1286,7 +1203,6 @@ async def scan_once(send=True):
         stats["signals"] += len(signals)
         stats["alerts_sent"] += sent
         log.info(f"Сканер: {len(signals)} сигналов, отправлено {sent}, время {time.time() - t0:.1f}с")
-
     return signals
 
 async def scanner_loop():
@@ -1300,50 +1216,40 @@ async def scanner_loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 # ============================================================================
-# ОТРИСОВКА ГРАФИКА
+# ГРАФИК
 # ============================================================================
 def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
     df = tf_data[main_tf]["df"].tail(55).reset_index(drop=True)
     width, height = 820, 440
     img = Image.new("RGB", (width, height), (17, 17, 23))
     draw = ImageDraw.Draw(img)
-
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
         font_b = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 15)
     except Exception:
         font = ImageFont.load_default()
         font_b = font
-
     side = "LONG" if is_long else "SHORT"
     color = (0, 200, 90) if is_long else (220, 55, 55)
     draw.text((18, 11), f"{coin}   {main_tf}   {side}", fill=color, font=font_b)
     draw.text((18, 30), f"Entry {fmt(entry)}", fill=(190, 190, 190), font=font)
-
     pad_l, pad_r, pad_t, pad_b = 58, 18, 52, 32
     chart_w = width - pad_l - pad_r
     chart_h = height - pad_t - pad_b
-
     highs = df["high"].values
     lows = df["low"].values
     opens = df["open"].values
     closes = df["close"].values
-
     min_p = min(lows.min(), entry, min(sls), min(tps)) * 0.997
     max_p = max(highs.max(), entry, max(sls), max(tps)) * 1.003
     price_range = max_p - min_p or 1.0
-
     def y(p):
         return pad_t + chart_h - (p - min_p) / price_range * chart_h
-
-    # сетка
     for i in range(5):
         py = pad_t + i * chart_h / 4
         draw.line([(pad_l, py), (width - pad_r, py)], fill=(38, 38, 48), width=1)
-
     n = len(df)
     candle_w = max(3, int(chart_w / n) - 1)
-
     for i in range(n):
         x = pad_l + i * (chart_w / n) + candle_w // 2
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
@@ -1352,7 +1258,6 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
         top = min(y(o), y(c))
         bot = max(y(o), y(c))
         draw.rectangle([x - candle_w // 2, top, x + candle_w // 2, bot], fill=col)
-
     def draw_level(price, label, col, dashed=False):
         yy = y(price)
         if dashed:
@@ -1361,13 +1266,11 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
         else:
             draw.line([(pad_l, yy), (width - pad_r, yy)], fill=col, width=2)
         draw.text((pad_l + 4, yy - 13), f"{label} {fmt(price)}", fill=col, font=font)
-
     draw_level(entry, "Entry", (255, 195, 0))
     for i, tp in enumerate(tps):
         draw_level(tp, f"TP{i+1}", (0, 195, 95), dashed=True)
     for i, sl in enumerate(sls):
         draw_level(sl, f"SL{i+1}", (220, 55, 55), dashed=True)
-
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
@@ -1379,7 +1282,6 @@ async def broadcast(payload, only_ids=None):
     targets = only_ids if only_ids is not None else list(active_chats)
     sent = failed = removed = 0
     removed_ids = []
-
     for chat_id in targets:
         try:
             if payload.get("kind") == "photo" and payload.get("data"):
@@ -1420,7 +1322,6 @@ async def broadcast(payload, only_ids=None):
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
             try:
-                # повторная попытка
                 if payload.get("kind") == "photo" and payload.get("data"):
                     photo = BufferedInputFile(payload["data"], filename="chart.png")
                     await bot.send_photo(chat_id, photo, caption=payload.get("text", "")[:1024], parse_mode="HTML")
@@ -1431,10 +1332,8 @@ async def broadcast(payload, only_ids=None):
                 failed += 1
         except Exception:
             failed += 1
-
     if removed_ids:
         set_users_active(removed_ids, False)
-
     stats["broadcasts"] += 1
     return sent, failed, removed, removed_ids
 
@@ -1448,50 +1347,45 @@ async def analyze_coin(coin, user_id=None):
         return None, f"⚠️ Монета <b>{coin}</b> не найдена на биржах."
     except Exception as e:
         return None, f"⚠️ Ошибка получения данных: {html.escape(str(e))}"
-
     tech = tech_check(tf_data)
-
     if tech and tech["ok"]:
         is_long = tech["is_long"]
         strength = tech["strength"]
         sig_type = tech["type"]
     else:
-        # Даже если строгого сигнала нет — показываем текущую картину
         d4 = tf_data["4h"]
         is_long = d4["long_prob"] >= 50
         strength = max(d4["long_prob"], 100 - d4["long_prob"])
         sig_type = "Среднесрок"
-
     info = tf_data["4h"]
     entry, tps, sls = calc_levels(info, is_long)
-
-    side = "🟢 LONG" if is_long else "🔴 SHORT"
+    side_emoji = "🟢" if is_long else "🔴"
+    side = "LONG" if is_long else "SHORT"
+    bar = make_strength_bar(strength)
     bias_text = market_bias.get("text", "Нейтральный фон")
-
     text = (
-        f"<b>{side}  ·  {coin}</b>\n"
+        f"{side_emoji} <b>{side}  ·  {coin}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Тип сигнала: <b>{sig_type}</b>\n"
-        f"Сила: <b>{strength}%</b>  ·  Источник: {source}\n\n"
-        f"💰 Текущая цена: <code>{fmt(info['price'])}</code>\n"
-        f"📥 Рекомендуемый вход: <code>{fmt(entry)}</code>\n\n"
-        f"🎯 <b>Тейк-профиты</b>\n"
+        f"📌 Тип: <b>{sig_type}</b>\n"
+        f"💪 Сила: <b>{strength}%</b>\n"
+        f"{bar}\n\n"
+        f"💰 Цена: <code>{fmt(info['price'])}</code>\n"
+        f"📥 Вход: <code>{fmt(entry)}</code>\n\n"
+        f"🎯 <b>Тейки</b>\n"
         f"   TP1  <code>{fmt(tps[0])}</code>\n"
         f"   TP2  <code>{fmt(tps[1])}</code>\n"
         f"   TP3  <code>{fmt(tps[2])}</code>\n\n"
-        f"🛡 <b>Стоп-лоссы</b>\n"
+        f"🛡 <b>Стопы</b>\n"
         f"   SL1  <code>{fmt(sls[0])}</code>\n"
         f"   SL2  <code>{fmt(sls[1])}</code>\n\n"
-        f"🌍 <b>Новостной фон:</b>\n{html.escape(bias_text)}"
+        f"🌍 Фон: {html.escape(bias_text)}"
     )
-
     try:
         img = await asyncio.to_thread(
             draw_chart, coin, tf_data, "4h", is_long, entry, tps, sls
         )
     except Exception:
         img = None
-
     return {
         "text": text,
         "img": img,
@@ -1500,14 +1394,14 @@ async def analyze_coin(coin, user_id=None):
         "tps": tps,
         "sls": sls,
         "is_long": is_long,
-        "side": "LONG" if is_long else "SHORT",
+        "side": side,
         "price": info["price"],
         "type": sig_type,
         "strength": strength,
     }, None
 
 # ============================================================================
-# МОНИТОРИНГ ОТКРЫТЫХ ПОЗИЦИЙ
+# МОНИТОРИНГ ПОЗИЦИЙ
 # ============================================================================
 async def position_monitor_loop():
     await asyncio.sleep(55)
@@ -1531,18 +1425,15 @@ async def position_monitor_loop():
 async def check_and_notify_position(user_id, coin, pos):
     if pos.get("notified_close"):
         return
-
     price = await get_simple_price(coin)
     if not price:
         return
-
     side = pos["side"]
     entry = pos["entry_price"]
     tp1 = pos["tp1"]
     tp2 = pos["tp2"]
     tp3 = pos["tp3"]
     sl1 = pos["sl1"]
-
     if side == "LONG":
         pnl_pct = (price - entry) / entry * 100
         hit_tp1 = price >= tp1
@@ -1555,70 +1446,51 @@ async def check_and_notify_position(user_id, coin, pos):
         hit_tp2 = price <= tp2
         hit_tp3 = price <= tp3
         hit_sl = price >= sl1
-
     reason = None
     urgency = "info"
-
     if hit_sl:
-        reason = (
-            f"Сработал стоп-лосс (SL1 = {fmt(sl1)}).\n"
-            f"Цена ушла против позиции. Рекомендую закрыть."
-        )
+        reason = f"🛑 Сработал стоп-лосс (SL1 = {fmt(sl1)}).\nРекомендую закрыть."
         urgency = "danger"
     elif hit_tp3:
-        reason = (
-            f"Достигнут TP3 ({fmt(tp3)}).\n"
-            f"Цель полностью отработана. Можно фиксировать всю позицию."
-        )
+        reason = f"✅ Достигнут TP3 ({fmt(tp3)}).\nЦель полностью отработана."
         urgency = "success"
     elif hit_tp2 and not pos.get("notified_tp"):
-        reason = (
-            f"Достигнут TP2 ({fmt(tp2)}).\n"
-            f"Хороший момент частично зафиксировать прибыль и перенести стоп в безубыток."
-        )
+        reason = f"✅ Достигнут TP2 ({fmt(tp2)}).\nЧастично фиксируем + стоп в безубыток."
         urgency = "success"
         pos["notified_tp"] = True
         set_user_open_position(user_id, coin, pos)
     elif hit_tp1 and not pos.get("notified_tp"):
-        reason = (
-            f"Достигнут TP1 ({fmt(tp1)}).\n"
-            f"Можно закрыть часть позиции."
-        )
+        reason = f"✅ Достигнут TP1 ({fmt(tp1)}).\nМожно закрыть часть позиции."
         urgency = "success"
         pos["notified_tp"] = True
         set_user_open_position(user_id, coin, pos)
-
-    # Новостной фон против позиции
     if not reason and time.time() - market_bias["ts"] < 25 * 60:
         bias = market_bias["bias"]
         if side == "LONG" and bias == -1:
             reason = (
-                f"Новостной фон стал медвежьим.\n"
+                f"⚠️ Новостной фон стал медвежьим.\n"
                 f"{market_bias['text']}\n"
-                f"Рекомендую зафиксировать текущий результат ({pnl_pct:+.1f}%)."
+                f"Рекомендую зафиксировать ({pnl_pct:+.1f}%)."
             )
             urgency = "warning"
         elif side == "SHORT" and bias == 1:
             reason = (
-                f"Новостной фон стал бычьим.\n"
+                f"⚠️ Новостной фон стал бычьим.\n"
                 f"{market_bias['text']}\n"
                 f"Рекомендую закрыть шорт ({pnl_pct:+.1f}%)."
             )
             urgency = "warning"
-
     if not reason:
         return
-
     emoji = {"danger": "🛑", "success": "✅", "warning": "⚠️", "info": "ℹ️"}.get(urgency, "ℹ️")
     text = (
-        f"{emoji} <b>Рекомендация по позиции {coin}</b>\n\n"
+        f"{emoji} <b>Рекомендация по {coin}</b>\n\n"
         f"Направление: <b>{side}</b>\n"
         f"Вход: <code>{fmt(entry)}</code>\n"
         f"Сейчас: <code>{fmt(price)}</code>\n"
         f"PnL: <b>{pnl_pct:+.2f}%</b>\n\n"
-        f"<b>Почему сейчас:</b>\n{reason}"
+        f"{reason}"
     )
-
     try:
         await bot.send_message(
             user_id,
@@ -1706,20 +1578,12 @@ async def cb_coin(cb: types.CallbackQuery):
         return
     busy_users.add(uid)
     try:
-        await cb.answer("Анализирую…")
+        await cb.answer("⏳ Анализирую…")
         res, err = await analyze_coin(coin, uid)
         if err:
             await cb.message.answer(err, parse_mode="HTML")
             return
-
-        # Удаляем временное меню (но не трогаем сохранённые сигналы)
-        if not (cb.message.reply_markup and any(
-            "sig:view" in (btn.callback_data or "") 
-            for row in (cb.message.reply_markup.inline_keyboard or []) 
-            for btn in row
-        )):
-            await safe_delete(cb.message)
-
+        await safe_delete(cb.message)
         if res["img"]:
             await bot.send_photo(
                 cb.message.chat.id,
@@ -1756,9 +1620,9 @@ async def cb_last_signals(cb: types.CallbackQuery):
         hist = _load_signal_history()
         if not hist:
             await cb.message.answer(
-                "Свежих сигналов нет",
+                "📭 Свежих сигналов нет",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📋 Меню", callback_data="menu")]
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")]
                 ])
             )
         else:
@@ -1770,7 +1634,7 @@ async def cb_last_signals(cb: types.CallbackQuery):
                 text,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📋 Меню", callback_data="menu")]
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")]
                 ])
             )
     await cb.answer()
@@ -1778,7 +1642,7 @@ async def cb_last_signals(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "show_stats")
 async def cb_show_stats(cb: types.CallbackQuery):
     await safe_delete(cb.message)
-    await cb.answer("Собираю статистику…")
+    await cb.answer("📊 Собираю статистику…")
     try:
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
         data = {item["symbol"]: item for item in j}
@@ -1795,7 +1659,6 @@ async def cb_show_stats(cb: types.CallbackQuery):
                     losers.append((coin, ch, open_p, last_p))
         gainers.sort(key=lambda x: x[1], reverse=True)
         losers.sort(key=lambda x: x[1])
-
         text = "📊 <b>Статистика рынка за 24 часа</b>\n\n"
         if gainers:
             text += "🟢 <b>ТОП РОСТА:</b>\n"
@@ -1806,12 +1669,11 @@ async def cb_show_stats(cb: types.CallbackQuery):
             for c, ch, op, lp in losers[:10]:
                 text += f"<code>{c}</code>  <b>{ch:.1f}%</b>\n└ {fmt(op)} → {fmt(lp)}\n\n"
         text += f"<i>Показаны Топ-10 из {len(POPULAR_COINS)} монет.</i>"
-
         await cb.message.answer(
             text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Меню", callback_data="menu")]
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")]
             ])
         )
     except Exception as e:
@@ -1820,14 +1682,13 @@ async def cb_show_stats(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "interesting_menu")
 async def cb_interesting(cb: types.CallbackQuery):
     await safe_delete(cb.message)
-    await cb.answer("Ищу интересные графики…")
+    await cb.answer("🧐 Ищу интересные графики…")
     try:
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
         movers = [x for x in j if x["symbol"] in [f"{c}USDT" for c in POPULAR_COINS]]
         movers.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
         top_gainers = movers[:4]
         top_losers = movers[-4:]
-
         text = "🧐 <b>Интересные графики за 24ч</b>\n\n"
         text += "🟢 <b>Топ роста:</b>\n"
         for g in top_gainers:
@@ -1840,7 +1701,6 @@ async def cb_interesting(cb: types.CallbackQuery):
             ch = float(l["priceChangePercent"])
             text += f"<code>{coin}</code> {ch:.1f}%\n"
         text += "\n<i>Нажми на монету в меню для полного анализа.</i>"
-
         await cb.message.answer(text, parse_mode="HTML", reply_markup=get_coins_keyboard())
     except Exception:
         await cb.message.answer("Не удалось получить данные", reply_markup=get_coins_keyboard())
@@ -1882,7 +1742,7 @@ async def msg_ticker(message: types.Message):
     finally:
         busy_users.discard(uid)
 
-# -------------------- ИЗБРАННОЕ --------------------
+# Избранное
 @dp.callback_query(F.data == "sig:menu")
 async def cb_sig_menu(cb: types.CallbackQuery):
     await safe_delete(cb.message)
@@ -1937,7 +1797,6 @@ async def cb_sig_view(cb: types.CallbackQuery):
     if not item:
         await cb.answer("Сигнал не найден", show_alert=True)
         return
-    # Сохранённый сигнал НЕ удаляем
     await cb.message.answer(
         item["text"],
         parse_mode="HTML",
@@ -1965,7 +1824,7 @@ async def cb_sig_del(cb: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-# -------------------- ПОЗИЦИИ --------------------
+# Позиции
 @dp.callback_query(F.data.startswith("pos:enter:"))
 async def cb_pos_enter(cb: types.CallbackQuery):
     coin = cb.data.split(":")[2]
@@ -1974,7 +1833,6 @@ async def cb_pos_enter(cb: types.CallbackQuery):
     if err:
         await cb.answer("Не удалось получить актуальные уровни", show_alert=True)
         return
-
     data = {
         "side": res["side"],
         "entry_price": res["entry"],
@@ -1989,7 +1847,6 @@ async def cb_pos_enter(cb: types.CallbackQuery):
         "notified_tp": False,
     }
     set_user_open_position(uid, coin, data)
-
     side_emoji = "🟢" if res["side"] == "LONG" else "🔴"
     await cb.message.answer(
         f"{side_emoji} <b>Позиция открыта</b>\n\n"
@@ -2019,19 +1876,16 @@ async def cb_pos_status(cb: types.CallbackQuery):
     if not pos:
         await cb.answer("Позиция не найдена", show_alert=True)
         return
-
     price = await get_simple_price(coin)
     if not price:
         await cb.answer("Не удалось получить цену", show_alert=True)
         return
-
     entry = pos["entry_price"]
     side = pos["side"]
     if side == "LONG":
         pnl_pct = (price - entry) / entry * 100
     else:
         pnl_pct = (entry - price) / entry * 100
-
     pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
     text = (
         f"📈 <b>Статус позиции {coin}</b>\n\n"
@@ -2046,15 +1900,13 @@ async def cb_pos_status(cb: types.CallbackQuery):
     await cb.message.answer(text, parse_mode="HTML")
     await cb.answer()
 
-# -------------------- АДМИН-ПАНЕЛЬ --------------------
+# Админ
 @dp.callback_query(F.data.startswith("admin:"))
 async def cb_admin(cb: types.CallbackQuery):
     if cb.from_user.id not in ADMIN_IDS:
         await cb.answer("⛔ Нет доступа", show_alert=True)
         return
-
     action = cb.data.split(":")[1]
-
     if action == "stats":
         total, active, new_t, new_w = user_counts()
         uptime = int(time.time() - stats["started"])
@@ -2074,7 +1926,6 @@ async def cb_admin(cb: types.CallbackQuery):
             f"Bias: {market_bias['bias']} | {html.escape(market_bias['text'][:100])}"
         )
         await cb.message.answer(text, parse_mode="HTML")
-
     elif action == "users":
         users = _load_users()
         lines = [f"👥 <b>Пользователи ({len(users)})</b>\n"]
@@ -2085,17 +1936,14 @@ async def cb_admin(cb: types.CallbackQuery):
         if len(users) > 45:
             lines.append(f"\n… и ещё {len(users) - 45}")
         await cb.message.answer("\n".join(lines), parse_mode="HTML")
-
     elif action == "toggle_news":
         bot_flags["news_enabled"] = not bot_flags["news_enabled"]
         await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
         await cb.answer(f"Новости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}")
-
     elif action == "toggle_scan":
         bot_flags["alerts_enabled"] = not bot_flags["alerts_enabled"]
         await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
         await cb.answer(f"Сканер: {'ВКЛ' if bot_flags['alerts_enabled'] else 'ВЫКЛ'}")
-
     elif action == "news_now":
         await cb.answer("Отправляю новость…")
         try:
@@ -2103,16 +1951,35 @@ async def cb_admin(cb: types.CallbackQuery):
             if not entries:
                 await cb.message.answer("Нет свежих новостей")
                 return
-            # упрощённая отправка
-            title = entries[0].title
-            await broadcast({
-                "kind": "text",
-                "text": f"📰 <b>Свежая новость</b>\n\n{html.escape(title)}"
-            })
+            entry = entries[0]
+            title = entry.title
+            img_url = extract_image(entry)
+            short_text = (
+                f"📰 <b>Свежая новость</b>\n\n"
+                f"{html.escape(title)}\n\n"
+                f"🌍 {html.escape(market_bias.get('text', 'Нейтральный фон'))}"
+            )
+            if img_url:
+                try:
+                    async with http.get(img_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        if r.status == 200:
+                            img_data = await r.read()
+                            await broadcast({
+                                "kind": "photo",
+                                "data": img_data,
+                                "text": short_text,
+                                "filename": "news.jpg"
+                            })
+                            stats["news_sent"] += 1
+                            await cb.message.answer("Новость с картинкой отправлена")
+                            return
+                except Exception:
+                    pass
+            await broadcast({"kind": "text", "text": short_text})
+            stats["news_sent"] += 1
             await cb.message.answer("Новость отправлена")
         except Exception as e:
             await cb.message.answer(f"Ошибка: {e}")
-
     elif action == "scan_test":
         await cb.answer("Запускаю тестовый скан…")
         try:
@@ -2120,7 +1987,6 @@ async def cb_admin(cb: types.CallbackQuery):
             await cb.message.answer(f"✅ Скан завершён. Найдено сигналов: {len(signals)}")
         except Exception as e:
             await cb.message.answer(f"Ошибка скана: {e}")
-
     elif action == "broadcast_now":
         if last_signals_data.get("text"):
             sent, failed, _, _ = await broadcast({
@@ -2131,7 +1997,6 @@ async def cb_admin(cb: types.CallbackQuery):
             await cb.message.answer(f"✅ Рассылка: {sent} доставлено, {failed} ошибок")
         else:
             await cb.message.answer("Нет сохранённых сигналов для рассылки")
-
     elif action == "diag":
         text = (
             f"🔧 <b>Диагностика</b>\n\n"
@@ -2147,7 +2012,6 @@ async def cb_admin(cb: types.CallbackQuery):
             f"RSS peak: {_rss_mb()} MB"
         )
         await cb.message.answer(text, parse_mode="HTML")
-
     elif action == "backup":
         users = _load_users()
         data = json.dumps(users, ensure_ascii=False, indent=2)
@@ -2156,7 +2020,6 @@ async def cb_admin(cb: types.CallbackQuery):
             file,
             caption=f"💾 Бэкап базы\nПользователей: {len(users)}"
         )
-
     elif action == "restore":
         await cb.message.answer(
             "📥 <b>Восстановление базы</b>\n\n"
@@ -2164,7 +2027,6 @@ async def cb_admin(cb: types.CallbackQuery):
             "Я полностью заменю текущую базу.",
             parse_mode="HTML"
         )
-
     await cb.answer()
 
 @dp.message(F.document)
@@ -2175,16 +2037,13 @@ async def handle_document(message: types.Message):
     if not doc.file_name or not doc.file_name.lower().endswith(".json"):
         await message.answer("Нужен файл .json (users.json)")
         return
-
     try:
         file = await bot.get_file(doc.file_id)
         content = await bot.download_file(file.file_path)
         data = json.loads(content.read().decode("utf-8"))
-
         if not isinstance(data, dict):
             await message.answer("Неверный формат файла")
             return
-
         if users_col is not None:
             users_col.delete_many({})
             for uid, udata in data.items():
@@ -2192,7 +2051,6 @@ async def handle_document(message: types.Message):
         else:
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-
         load_active_chats()
         await message.answer(
             f"✅ База восстановлена!\n"
@@ -2215,20 +2073,15 @@ async def main():
     init_mongo()
     load_active_chats()
     _load_news_history()
-
     http = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=28),
-        headers={"User-Agent": "IXCLY/2.10.15"}
+        headers={"User-Agent": "IXCLY/2.10.18"}
     )
-
-    # Фоновые задачи
     asyncio.create_task(scanner_loop())
     asyncio.create_task(position_monitor_loop())
     asyncio.create_task(update_market_bias())
-
     runtime["main_bot"] = "запущен"
     log.info(f"🚀 IXCLY v{VERSION} стартовал | получателей: {len(active_chats)}")
-
     try:
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
