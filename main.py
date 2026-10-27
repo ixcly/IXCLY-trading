@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.7
-- MongoDB для пользователей (фоновое подключение, чтобы не падал Render)
+IXCLY Trading bot v2.10.8
+- MongoDB для пользователей (фоновое подключение)
 - АВТОСОХРАНЕНИЕ: любой клик или сообщение сохраняет пользователя в базу
-- СОХРАНЕНИЕ СИГНАЛОВ: меню "Избранное", сохранение картинок и точек входа в базу
+- СОХРАНЕНИЕ СИГНАЛОВ: исправлена ошибка await None при сохранении
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
 - Учёт макро-новостей (ФРС, ставки) в решениях ИИ
-- Исправлен запуск Flask для Render и добавлены подробные логи
+- 184 популярные монеты
 """
 import asyncio
 import html
@@ -128,7 +128,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.7"
+VERSION = "2.10.8"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -1425,6 +1425,10 @@ def local_verdict(tf_data, news_text):
     else: entry_reason = "Новостной фон против сигнала."
     return {"dominant_tf": tf, "reason": local_reason(tf, d), "entry_status": "ENTER" if enter else "WAIT", "entry_reason": entry_reason, "news": ns}
 
+# --- ИСПРАВЛЕНИЕ ОШИБКИ AWAIT NONE ---
+async def _noop_status(_t):
+    return
+
 async def build_signal(coin, status, force=False):
     cached = result_cache.get(coin)
     if cached and not force and time.time() - cached[0] < RESULT_TTL: return cached[1], cached[2]
@@ -1637,18 +1641,21 @@ async def callback_handler(cb: types.CallbackQuery):
         await cb.message.edit_text("➕ <b>Выберите монету:</b>", reply_markup=get_save_coins_keyboard(int(data.split(":")[2])))
     elif data == "sig:save_new":
         await cb.message.edit_text("➕ <b>Выберите монету:</b>", reply_markup=get_save_coins_keyboard(0))
+    
+    # --- ИСПРАВЛЕНО ТУТ ---
     elif data.startswith("sig:do_save:") or data.startswith("sig:quick_save:"):
         coin = data.split(":")[-1]
         await cb.message.edit_text(f"⏳ Анализирую {coin}...")
         try:
             async with analysis_sem:
-                text, png = await asyncio.wait_for(build_signal(coin, status=lambda x: None, force=True), timeout=70)
+                text, png = await asyncio.wait_for(build_signal(coin, status=_noop_status, force=True), timeout=70)
             photo_msg = await bot.send_photo(chat_id, BufferedInputFile(png, filename=f"{coin}.png"))
             await asyncio.to_thread(add_user_saved_signal, user_id, coin, text, photo_msg.photo[-1].file_id)
             await bot.send_message(chat_id, f"✅ Сигнал <b>{coin}</b> сохранен в Избранное!", parse_mode="HTML")
             await cb.message.delete()
         except Exception as e:
             await cb.message.edit_text(f"❌ Ошибка: {html.escape(str(e))[:100]}", reply_markup=get_saved_signals_menu(user_id))
+    
     elif data.startswith("sig:view:"):
         sig = next((s for s in get_user_saved_signals(user_id) if s['coin'] == data.split(":")[2]), None)
         if sig: await bot.send_photo(chat_id, sig['photo_id'], caption=sig['text'], parse_mode="HTML")
