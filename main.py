@@ -2282,4 +2282,210 @@ if input_dp:
             users = _load_users()
             last = sorted(users.items(), key=lambda kv: str(kv[1].get("joined_at", "")))[-10:]
             rows = []
-            for k,
+            for k, u in reversed(last):
+                name = html.escape(str(u.get("first_name") or "—"))
+                uname = f"@{html.escape(u['username'])}" if u.get("username") else ""
+                rows.append(f"• {name} {uname} · {str(u.get('joined_at', ''))[:10]} · <code>{k}</code>")
+            await _edit(cb, f"👥 <b>Последние пользователи</b> (всего {len(users)})\n\n" + ("\n".join(rows) or "пусто"),
+                        back_kb())
+        elif action == "tglnews":
+            bot_flags["news_enabled"] = not bot_flags["news_enabled"]
+            await _edit(cb, panel_text(), panel_kb())
+        elif action == "tglalerts":
+            bot_flags["alerts_enabled"] = not bot_flags["alerts_enabled"]
+            await _edit(cb, panel_text(), panel_kb())
+        elif action == "tglinst":
+            bot_flags["instant"] = not bot_flags["instant"]
+            await _edit(cb, panel_text(), panel_kb())
+        elif action == "scan":
+            await _edit(cb, "⏳ Сканирую все монеты (около минуты)...", None)
+            try:
+                res = await scan_once(send=False)
+                await _edit(cb, scan_report(res), back_kb())
+            except Exception as e:
+                await _edit(cb, f"❌ Ошибка скана: {html.escape(str(e))}", back_kb())
+        elif action == "news":
+            await _edit(cb, "⏳ Готовлю последнюю новость...", None)
+            check_text = await check_past_news()
+            text, image_url, ok = await fetch_and_analyze_news()
+            if not ok:
+                await _edit(cb, f"{text}", back_kb())
+                return
+            full_text = check_text + text if check_text else text
+            img = await download_bytes(image_url) if image_url else None
+            payload = {"kind": "photo" if img else "text", "text": full_text, "data": img, "filename": "news.jpg"}
+            await run_broadcast(cb.message.chat.id, payload)
+        elif action == "diag":
+            await _edit(cb, "⏳ Проверяю источники и анализ (до 30 секунд)...", None)
+            try:
+                result = await run_diagnostics()
+            except Exception as e:
+                result = f"❌ Ошибка диагностики: {html.escape(str(e))}"
+            await _edit(cb, result, back_kb())
+        elif action == "backup":
+            ok = await send_backup()
+            await cb.message.answer("💾 Бэкап отправлен выше." if ok else "База пуста, бэкапить нечего.")
+        elif action == "restore":
+            admin_mode[uid] = "restore"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm:panel")]])
+            await _edit(cb, "📤 Пришлите файл <b>users.json</b> (последний бэкап). "
+                            "Новые пользователи добавятся, существующие не изменятся.", kb)
+        elif action == "send":
+            payload = pending_payload.pop(uid, None)
+            if payload is None:
+                await cb.message.answer("Нечего отправлять: сообщение уже разослано или отменено.")
+                return
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await run_broadcast(cb.message.chat.id, payload)
+        elif action == "drop":
+            pending_payload.pop(uid, None)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await cb.message.answer("Отменено.")
+
+    @input_dp.message()
+    async def adm_deny(message: types.Message):
+        uid = message.from_user.id if message.from_user else 0
+        log.warning("Админ-бот: обращение от не-админа, id=%s", uid)
+        text = f"⛔ Нет доступа.\n\nВаш Telegram ID: <code>{uid}</code>"
+        if ADMIN_IDS:
+            text += ("\n\nЕсли вы владелец, в переменных Render задайте "
+                     f"<code>ADMIN_ID={uid}</code> (сейчас там другой ID) и перезапустите сервис.")
+        else:
+            text += f"\n\nЕсли вы владелец, добавьте в переменные Render: <code>ADMIN_ID={uid}</code>"
+        await message.answer(text, parse_mode="HTML")
+
+    @input_dp.callback_query()
+    async def adm_deny_cb(cb: types.CallbackQuery):
+        await cb.answer("Нет доступа", show_alert=True)
+
+
+# ----------------------------------------------------------------------------
+# ЗАПУСК
+# ----------------------------------------------------------------------------
+def _log_task_result(t):
+    try:
+        t.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.error("Фоновая задача завершилась ошибкой: %s", e, exc_info=True)
+
+
+async def startup_notice():
+    total, _, _, _ = user_counts()
+    text = f"✅ Бот запущен (v{VERSION}).\nПользователей в базе: {total}"
+    if total == 0:
+        text += ("\n\n⚠️ База пуста. Если MongoDB не подключена, файл стирается при деплое: "
+                 "нажмите «📤 Восстановить базу» и пришлите последний users.json из бэкапа.")
+    for aid in ADMIN_IDS:
+        try:
+            await input_bot.send_message(aid, text, reply_markup=panel_kb())
+        except Exception as e:
+            log.warning("Не удалось написать админу %s в админ-бот (нажмите /start в админ-боте): %s", aid, e)
+
+
+async def main():
+    global http, analysis_sem
+    keep_alive()  # порт открываем первым, чтобы Render видел живой сервис
+    http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.10)"})
+    analysis_sem = asyncio.Semaphore(4)
+    
+    # Инициализация БД в фоне, чтобы не блокировать запуск веб-сервера и polling
+    asyncio.create_task(asyncio.to_thread(init_mongo))
+    
+    await asyncio.to_thread(load_active_chats)
+    _load_news_history()
+    log.info("Бот запущен...")
+    background = []
+    try:
+        await bot.set_my_commands([
+            types.BotCommand(command="menu", description="🚀 Меню"),
+            types.BotCommand(command="news", description="📰 Новости"),
+        ])
+        try:
+            me = await bot.get_me()
+            runtime["main_bot"] = f"@{me.username}"
+            log.info("Основной бот: @%s", me.username)
+        except Exception as e:
+            runtime["main_bot"] = f"ошибка: {e}"
+            log.error("Основной бот: get_me не удался: %s (проверьте BOT_TOKEN)", e)
+
+        background.append(asyncio.create_task(news_watcher()))
+        background.append(asyncio.create_task(backup_loop()))
+        background.append(asyncio.create_task(alert_loop()))
+        background.append(asyncio.create_task(daily_stats_loop()))
+        background.append(asyncio.create_task(heartbeat_loop()))
+
+        if input_bot and input_dp:
+            if not ADMIN_IDS:
+                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки (покажет ваш ID)")
+            try:
+                me = await input_bot.get_me()
+                runtime["admin_bot"] = f"@{me.username}"
+                log.info("Админ-бот: @%s (id %s)", me.username, me.id)
+                await input_bot.delete_webhook(drop_pending_updates=True)
+                await input_bot.set_my_commands([
+                    types.BotCommand(command="panel", description="🛠 Панель"),
+                    types.BotCommand(command="stats", description="📊 Статистика"),
+                    types.BotCommand(command="backup", description="💾 Бэкап базы"),
+                ])
+                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False,
+                                                               close_bot_session=False))
+                t.add_done_callback(_log_task_result)
+                background.append(t)
+                await asyncio.sleep(2)
+                if t.done():
+                    runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
+                else:
+                    log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
+                if ADMIN_IDS:
+                    await startup_notice()
+            except Exception as e:
+                runtime["admin_bot"] = f"ошибка: {e}"
+                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "unauthorized" in str(e) else ""
+                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
+        else:
+            if not INPUT_BOT_TOKEN:
+                reason = "переменная INPUT_BOT_TOKEN не задана"
+            elif INPUT_BOT_TOKEN == BOT_TOKEN:
+                reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
+            else:
+                reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
+            runtime["admin_bot"] = f"выключен: {reason}"
+            log.warning("Админ-бот выключен: %s", reason)
+
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    finally:
+        for t in background:
+            t.cancel()
+        if input_bot:
+            try:
+                await input_bot.session.close()
+            except Exception:
+                pass
+        await http.close()
+        await bot.session.close()
+
+
+async def run_forever():
+    """Если main() упал из-за ошибки, поднимаем бота заново, не дожидаясь перезапуска контейнера Render."""
+    while True:
+        try:
+            await main()
+            break  # штатная остановка (SIGTERM при деплое)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            log.error("main() упал: %s. Перезапуск через 10 секунд", e, exc_info=True)
+            await asyncio.sleep(10)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_forever())
