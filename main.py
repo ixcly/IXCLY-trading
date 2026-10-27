@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.1
-- MongoDB для пользователей (не теряются при перезапуске Render)
+IXCLY Trading bot v2.10.2
+- MongoDB для пользователей (фоновое подключение, чтобы не падал Render)
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
 - Учёт макро-новостей (ФРС, ставки) в решениях ИИ
 - Админ-панель во втором боте (рассылка, статистика, диагностика, бэкап)
-- Оптимизация памяти (исправление падения на Render), /health и супервизор
+- Оптимизация памяти и супервизор для 100% аптайма
 """
 import asyncio
 import html
@@ -125,7 +125,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.1"
+VERSION = "2.10.2"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -2359,7 +2359,10 @@ async def main():
     keep_alive()  # порт открываем первым, чтобы Render видел живой сервис
     http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.10)"})
     analysis_sem = asyncio.Semaphore(4)
-    await asyncio.to_thread(init_mongo)
+    
+    # Инициализация БД в фоне, чтобы не блокировать запуск веб-сервера и polling
+    asyncio.create_task(asyncio.to_thread(init_mongo))
+    
     await asyncio.to_thread(load_active_chats)
     _load_news_history()
     log.info("Бот запущен...")
