@@ -4,7 +4,7 @@ IXCLY Trading bot v2.9.1
 - Цепочка ИИ: Gemini/Groq/OpenRouter (с ключами) -> бесплатный GPT без ключа (Pollinations) -> локальный движок
 - Локальный движок работает ВСЕГДА (мульти-ТФ + волатильность + новостной сентимент) и даёт ENTER/WAIT
 - Мировые + крипто-новости идут в анализ каждой монеты
-- СКАНЕР СИГНАЛОВ: каждые 17 минут ищет сильные сигналы (1 запрос к ИИ на все монеты) и рассылает их
+- СКАНЕР СИГНАЛОВ: каждые 17 минут ищет сильные сигналы (1 запрос к ИИ) и присылает ОДНО сообщение с кнопками
 - ПАМЯТЬ НОВОСТЕЙ: проверка сбывшихся прогнозов по кнопке /news
 - ЕЖЕДНЕВНАЯ СТАТИСТИКА: в 00:00 МСК отчет по всем монетам
 - ИЗВЛЕЧЕНИЕ ДАТ: указывает конкретную дату/время события из новости
@@ -1087,51 +1087,16 @@ def calc_levels(info, is_long):
     tps = [entry + sign * dist * m for m in (1, 2, 3)]
     return entry, tps, sls
 
-def format_scanner_message(coin, tf_data, source, ai_reason, tech):
-    tf = tech["tf"]
-    info = tf_data[tf]
-    long_prob, short_prob = calc_probability(info["df"])
-    is_long = tech["is_long"]
-    
-    entry, tps, sls = calc_levels(info, is_long)
-    
-    direction = "🟢 <b>LONG</b>" if is_long else "🔴 <b>SHORT</b>"
-    green_n = max(0, min(10, round(long_prob / 10)))
-    bar = "🟩" * green_n + "🟥" * (10 - green_n)
-    multi = "  ·  ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
-    
-    def pct(p): return f"{(p - entry) / entry * 100:+.1f}%"
-    tp_lines = "\n".join(f"TP{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(tps))
-    sl_lines = "\n".join(f"SL{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls))
-
-    return (
-        f"📊 <b>{coin}/USDT</b> · {tf}\n"
-        f"<i>Данные: {source}</i>\n\n"
-        f"✅ <b>ВХОДИТЬ</b>\n"
-        f"<i>{html.escape(ai_reason)}</i>\n\n"
-        f"{direction} · сильный сигнал\n"
-        f"{bar}\n"
-        f"Лонг <b>{long_prob:.0f}%</b>  ·  Шорт <b>{short_prob:.0f}%</b>\n\n"
-        f"🕐 <b>По таймфреймам</b> <i>(шанс лонга)</i>\n"
-        f"{multi}\n\n"
-        f"💵 <b>Лимит-вход</b> · <code>{fmt(entry)}</code>\n"
-        f"<i>(текущая цена: {fmt(info['price'])})</i>\n\n"
-        f"🎯 <b>Цели</b>\n{tp_lines}\n\n"
-        f"🛑 <b>Стопы</b>\n{sl_lines}\n\n"
-        f"⚠️ <i>Не является финансовой рекомендацией</i>"
-    )
-
 async def scan_once(send=True):
     t0 = time.time()
     
-    # ИЗМЕНЕНО: УЧЕТ МАКРО - собираем больше мировых новостей и отдельно блок
     try:
         entries = await asyncio.wait_for(get_news_entries(), timeout=10)
         crypto_titles = [e.title for e in entries[:8]]
     except Exception:
         crypto_titles = []
     try:
-        world_titles = await asyncio.wait_for(get_world_titles(6), timeout=10) # Берем 6 заголовков
+        world_titles = await asyncio.wait_for(get_world_titles(6), timeout=10)
     except Exception:
         world_titles = []
         
@@ -1166,7 +1131,6 @@ async def scan_once(send=True):
             t = c["tech"]
             cands_text += f"Монета {c['coin']}: ТФ согласованы {t['aligned']}/{t['total']}, перевес {t['prob']:.0f}%, тренд {'LONG' if t['is_long'] else 'SHORT'}.\n"
             
-        # ИЗМЕНЕНО: УЧЕТ МАКРО - в промпт добавлены мировые новости и правила ФРС
         prompt = f"""Ты профессиональный крипто-трейдер и макро-аналитик.
 Оцени макроэкономический фон и реши, какие монеты из списка реально можно брать прямо сейчас.
 
@@ -1204,6 +1168,9 @@ async def scan_once(send=True):
 
     sent = []
     if send and approved_coins:
+        lines = ["🚨 <b>Найдены сильные сигналы!</b>\n"]
+        buttons = []
+        row = []
         for app in approved_coins:
             if len(sent) >= MAX_ALERTS_PER_SCAN: break
             coin = app.get("coin")
@@ -1217,21 +1184,29 @@ async def scan_once(send=True):
             if time.time() - alert_history.get(key, 0) < ALERT_COOLDOWN:
                 continue
                 
-            text = format_scanner_message(coin, cand["tf_data"], cand["source"], reason, cand["tech"])
+            side_emoji = "🟢" if is_long else "🔴"
+            side_text = "LONG" if is_long else "SHORT"
+            lines.append(f"{side_emoji} <b>{coin}</b> ({side_text}) — {reason}")
             
-            tf = cand["tech"]["tf"]
-            info = cand["tf_data"][tf]
-            entry, tps, sls = calc_levels(info, is_long)
-            png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls, tf, cand["tech"]["prob"], cand["source"], "ENTER")
-            
-            payload = {"kind": "photo", "text": text, "data": png, "filename": f"{coin}.png"}
-            ok, fail, removed = await broadcast(payload)
+            row.append(InlineKeyboardButton(text=f"{side_emoji} {coin}", callback_data=f"c:{coin}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
             
             alert_history[key] = time.time()
             _save_alert_history()
             stats["alerts_sent"] += 1
             sent.append(coin)
-            log.info("СИГНАЛ %s разослан: %d доставлено, %d ошибок", coin, ok, fail)
+            
+        if sent:
+            if row:
+                buttons.append(row)
+            kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+            text = "\n".join(lines)
+            text += "\n\n👇 <i>Нажми на кнопку, чтобы получить полный разбор с точкой входа и графиком.</i>"
+            payload = {"kind": "text", "text": text, "markup": kb}
+            ok, fail, removed = await broadcast(payload)
+            log.info("Групповой сигнал разослан: %d доставлено, %d ошибок", ok, fail)
 
     return {"scanned": len(POPULAR_COINS), "failed": sorted(failed), "cands": local_candidates,
             "sent": sent, "secs": int(time.time() - t0)}
@@ -1408,7 +1383,6 @@ async def build_signal(coin, status, force=False):
     crypto_block = "\n".join(f"- {t}" for t in crypto_titles) or "- нет данных"
     world_block = "\n".join(f"- {t}" for t in world_titles) or "- нет данных"
 
-    # ИЗМЕНЕНО: УЧЕТ МАКРО - в промпт добавлено указание на ФРС и мировые новости
     prompt = f"""Ты профессиональный крипто-трейдер и макро-аналитик. Проанализируй {coin} по индикаторам:
 {tf_text}
 Крипто-новости:
@@ -1616,20 +1590,21 @@ async def notify_admins(text):
 async def send_payload(chat_id, p, cache):
     kind = p["kind"]
     text = p.get("text") or ""
+    markup = p.get("markup") # <--- Добавлена поддержка кнопок
     if kind == "text":
-        await bot.send_message(chat_id, text[:4000] or "…", parse_mode="HTML", disable_web_page_preview=True)
+        await bot.send_message(chat_id, text[:4000] or "…", parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
         return
 
     media = cache.get("file_id") or BufferedInputFile(p["data"], filename=p.get("filename") or "file")
     caption = text if 0 < len(text) <= 1024 else None
     senders = {"photo": bot.send_photo, "video": bot.send_video, "document": bot.send_document, "animation": bot.send_animation, "audio": bot.send_audio, "voice": bot.send_voice}
-    m = await senders[kind](chat_id, media, caption=caption, parse_mode="HTML")
+    m = await senders[kind](chat_id, media, caption=caption, parse_mode="HTML", reply_markup=markup)
 
     if "file_id" not in cache:
         obj = {"photo": m.photo[-1] if m.photo else None, "video": m.video, "document": m.document, "animation": m.animation, "audio": m.audio, "voice": m.voice}.get(kind)
         if obj: cache["file_id"] = obj.file_id
     if text and not caption:
-        await bot.send_message(chat_id, text[:4000], parse_mode="HTML", disable_web_page_preview=True)
+        await bot.send_message(chat_id, text[:4000], parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
 
 async def broadcast(payload, progress=None):
     chats = list(active_chats)
