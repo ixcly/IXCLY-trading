@@ -28,7 +28,8 @@ import pandas as pd
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter, TelegramConflictError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter, TelegramConflictError, TelegramNetworkError
+from aiogram.client.session.aiohttp import AiohttpSession
 from flask import Flask, jsonify
 from PIL import Image, ImageDraw, ImageFont
 
@@ -135,13 +136,16 @@ runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
-bot = Bot(token=BOT_TOKEN)
+# Увеличенный таймаут сессии для предотвращения разрывов
+session = AiohttpSession(timeout=30.0)
+bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 
 admin_bot = None
 admin_dp = None
 if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
-    admin_bot = Bot(token=INPUT_BOT_TOKEN)
+    admin_session = AiohttpSession(timeout=30.0)
+    admin_bot = Bot(token=INPUT_BOT_TOKEN, session=admin_session)
     admin_dp = Dispatcher()
     log.info("Админ-бот активирован")
 elif INPUT_BOT_TOKEN:
@@ -449,6 +453,21 @@ class UserTrackerMiddleware(BaseMiddleware):
 
 
 dp.update.middleware(UserTrackerMiddleware())
+
+# ====================== ОБРАБОТЧИК СЕТЕВЫХ ОШИБОК ======================
+@dp.errors()
+async def errors_handler(update: types.Update, exception: Exception):
+    if isinstance(exception, TelegramNetworkError):
+        log.warning(f"Сетевая ошибка Telegram при обработке запроса: {exception}")
+        try:
+            if update.message:
+                await update.message.answer("⏳ Пожалуйста, подождите... Соединение с серверами Telegram нестабильно.")
+            elif update.callback_query:
+                await update.callback_query.answer("⏳ Пожалуйста, подождите... Соединение нестабильно.", show_alert=True)
+        except Exception:
+            pass
+        return True
+    return False
 
 # ====================== КЛАВИАТУРЫ ======================
 MENU_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]])
@@ -2080,6 +2099,12 @@ async def cb_ignore(cb: types.CallbackQuery):
 
 # ====================== АДМИН-БОТ ======================
 if admin_dp:
+    @admin_dp.errors()
+    async def admin_errors_handler(update: types.Update, exception: Exception):
+        if isinstance(exception, TelegramNetworkError):
+            log.warning(f"Сетевая ошибка Telegram (админ): {exception}")
+            return True
+        return False
 
     @admin_dp.message(Command("panel", "start", "admin"))
     async def admin_cmd_panel(m: types.Message):
@@ -2244,13 +2269,27 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
             except Exception as e:
                 log.debug(f"{name}: не удалось удалить вебхук: {e}")
             
-            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False)
+            await dispatcher.start_polling(
+                tg_bot,
+                handle_signals=False,
+                close_bot_session=False,
+                polling_timeout=30,
+            )
             
             if not stop_event.is_set():
                 log.warning(f"{name}: start_polling завершился неожиданно. Перезапуск через 5 сек...")
                 await asyncio.sleep(5)
         except asyncio.CancelledError:
             raise
+        except TelegramNetworkError as e:
+            log.warning(f"{name}: сетевая ошибка Telegram (попытка {attempt}): {e}")
+            try:
+                await tg_bot.session.close()
+            except Exception:
+                pass
+            delay = min(2 ** attempt, 30)
+            log.info(f"{name}: ожидание {delay} с перед перезапуском")
+            await asyncio.sleep(delay)
         except TelegramConflictError as e:
             log.warning(f"{name}: конфликт getUpdates (попытка {attempt}): {e}")
             try:
