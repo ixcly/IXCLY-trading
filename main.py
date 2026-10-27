@@ -1,16 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 IXCLY Trading bot v2.11.0 - многослойный движок сигналов
-
-Слои (сигнал выходит только если проходит все):
- 1. Индикаторы уровня TradingView на ЗАКРЫТЫХ свечах (без перерисовки): EMA 9/20/50/200, RSI, StochRSI, MACD,
-    ATR, ADX/DI, Bollinger (+сжатие), Supertrend, Ichimoku, VWAP, MFI, CCI, Williams %R, OBV, Donchian,
-    дивергенции RSI, 15 свечных паттернов с учётом контекста, поддержки/сопротивления по пивотам.
- 2. Три модели (тренд / моментум / price action + объём) с весами, зависящими от режима рынка (ADX).
- 3. Мульти-таймфрейм: 1d 30% + 4h 30% + 1h 25% + 15m 15%, жёсткий гейт 4h и 1d в одну сторону.
- 4. Контекст: тренд BTC, Fear & Greed, funding rate, новости, ликвидность, защита от «погони за ценой».
- 5. БЭКТЕСТ этой же стратегии на ~1000 свечах 4h по монете: сигнал идёт дальше, только если история положительная.
- 6. ИИ-аналитик (Gemini / Groq / OpenRouter / бесплатный GPT) как последний вето-слой и комментарий.
 """
 
 import asyncio
@@ -146,15 +136,15 @@ runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
-# ---- пороги движка сигналов (можно менять через переменные окружения) ----
-CONF_STAGE1 = float(os.getenv("CONF_STAGE1", "60"))      # быстрый отбор по 4h + 1d
-CONF_FINAL = float(os.getenv("CONF_FINAL", "66"))        # итоговая уверенность после всех поправок
-BT_CONF = float(os.getenv("BT_CONF", "60"))              # порог сигнала внутри бэктеста (на одном ТФ)
-BT_MIN_TRADES = int(os.getenv("BT_MIN_TRADES", "5"))     # ИЗМЕНЕНО: теперь достаточно 5 сделок
-BT_MIN_AVG_R = float(os.getenv("BT_MIN_AVG_R", "0.10"))  # минимальное мат. ожидание в R (оставили 0.10)
-BT_MIN_WINRATE = float(os.getenv("BT_MIN_WINRATE", "30")) # ИЗМЕНЕНО: минимальный винрейт снижен до 30%
-MIN_QV24 = float(os.getenv("MIN_QV24", "1000000"))       # минимальный оборот за ~24ч в USDT (по свечам 4h)
-DEPOSIT = float(os.getenv("DEPOSIT", "1000"))            # условный депозит для Risk Gate
+# ---- пороги движка сигналов ----
+CONF_STAGE1 = float(os.getenv("CONF_STAGE1", "60"))
+CONF_FINAL = float(os.getenv("CONF_FINAL", "66"))
+BT_CONF = float(os.getenv("BT_CONF", "60"))
+BT_MIN_TRADES = int(os.getenv("BT_MIN_TRADES", "5"))
+BT_MIN_AVG_R = float(os.getenv("BT_MIN_AVG_R", "0.10"))
+BT_MIN_WINRATE = float(os.getenv("BT_MIN_WINRATE", "30"))
+MIN_QV24 = float(os.getenv("MIN_QV24", "1000000"))
+DEPOSIT = float(os.getenv("DEPOSIT", "1000"))
 RISK_PCT = 0.01
 
 session = AiohttpSession(timeout=30.0)
@@ -177,6 +167,7 @@ news_lock = None
 TFS = ["15m", "1h", "4h", "1d"]
 MIN_CANDLES = 60
 
+# ВАШ РАСШИРЕННЫЙ СПИСОК МОНЕТ
 POPULAR_COINS = [
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
     "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
@@ -244,9 +235,9 @@ SIGNAL_HISTORY_FILE = "signal_history.json"
 active_chats = set()
 busy_users = set()
 result_cache = {}
-analysis_cache = {}      # coin -> (ts, ttl, res)
-bt_cache = {}            # coin -> (ts, bt)
-preferred_source = {}    # coin -> (тикер, биржа)
+analysis_cache = {}
+bt_cache = {}
+preferred_source = {}
 last_signals_data = {"text": "", "kb": None, "ts": 0}
 current_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
@@ -261,7 +252,7 @@ last_news_link = None
 users_dirty = False
 last_backup_msg = {}
 msg_history = {}
-next_timers = {"scanner": 0, "positions": 0, "news_watcher": 0, "backup": 0}
+next_timers = {"scanner": 0, "positions": 0, "news_watcher": 0, "backup": 0, "global_signals": 0}
 users_col = None
 
 
@@ -411,7 +402,7 @@ def _load_signal_history():
     try:
         with open(SIGNAL_HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return [x for x in data if time.time() - x.get("ts", 0) < 86400]
+        return [x for x in data if time.time() - x.get("ts", 0) < 30 * 86400] # 30 дней
     except Exception:
         return []
 
@@ -419,7 +410,7 @@ def _load_signal_history():
 def _save_signal_history(data):
     try:
         with open(SIGNAL_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(data[-40:], f, ensure_ascii=False, indent=2)
+            json.dump(data[-2000:], f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -561,7 +552,7 @@ def get_coins_keyboard():
         [InlineKeyboardButton(text="📰  Новости", callback_data="news_menu")],
         [InlineKeyboardButton(text="🧐  Интересные графики", callback_data="interesting_menu")],
         [InlineKeyboardButton(text="🔥  Последние сигналы", callback_data="last_signals")],
-        [InlineKeyboardButton(text="📊  Статистика сигналов", callback_data="global_stats")], # НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="📊  Статистика сигналов", callback_data="global_stats")],
         [InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu")],
         [InlineKeyboardButton(text="📈  Топ монет 24ч", callback_data="show_stats")],
         [InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")],
@@ -721,23 +712,6 @@ def make_strength_bar(strength: float, length: int = 10) -> str:
     return "🟩" * filled + "🟥" * (length - filled)
 
 
-def get_leverage_recommendation(strength: float, sig_type: str) -> tuple:
-    if sig_type == "Быстрый сигнал":
-        if strength >= 80:
-            return "X25–X50", "1–2%"
-        elif strength >= 70:
-            return "X15–X35", "1–2%"
-        else:
-            return "X10–X25", "1–1.5%"
-    else:
-        if strength >= 80:
-            return "X15–X30", "1–2%"
-        elif strength >= 70:
-            return "X10–X20", "1–1.5%"
-        else:
-            return "X5–X15", "0.5–1%"
-
-
 def get_moscow_time_from_entry(entry) -> str:
     msk = timezone(timedelta(hours=3))
     try:
@@ -761,7 +735,6 @@ def get_moscow_time_from_entry(entry) -> str:
 
 
 async def first_success(coros, timeout=11):
-    """Первый НЕпустой результат; провайдер с ошибкой или None остальных не отменяет."""
     tasks = [asyncio.create_task(c) for c in coros]
     try:
         pending = set(tasks)
@@ -862,7 +835,6 @@ async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_
 # =====================================================================
 #                    СЛОЙ 1: ИНДИКАТОРЫ И СВЕЧНЫЕ ПАТТЕРНЫ
 # =====================================================================
-# name: (рус. название, сторона, вес, вид, англ. метка для картинки)
 PATTERNS = {
     "bull_engulf": ("Бычье поглощение", 1, 12, "rev", "BULL ENGULF"),
     "bear_engulf": ("Медвежье поглощение", -1, 12, "rev", "BEAR ENGULF"),
@@ -972,7 +944,6 @@ def add_indicators(df):
     for n in (9, 20, 50, 200):
         df[f"ema{n}"] = c.ewm(span=n, adjust=False).mean()
 
-    # RSI + StochRSI
     delta = c.diff()
     ag = _wilder(delta.clip(lower=0), 14)
     al = _wilder(-delta.clip(upper=0), 14)
@@ -983,13 +954,11 @@ def add_indicators(df):
     stoch = (df["rsi"] - rmin) / (rmax - rmin).replace(0, np.nan)
     df["stoch_k"] = stoch.rolling(3).mean().fillna(0.5)
 
-    # MACD
     macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     df["macd"] = macd
     df["macd_sig"] = macd.ewm(span=9, adjust=False).mean()
     df["macd_hist"] = df["macd"] - df["macd_sig"]
 
-    # ATR, ADX/DI
     prev = c.shift()
     tr = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
     df["atr"] = _wilder(tr, 14).fillna(tr.mean())
@@ -1002,7 +971,6 @@ def add_indicators(df):
     dx = 100 * (df["plus_di"] - df["minus_di"]).abs() / (df["plus_di"] + df["minus_di"]).replace(0, np.nan)
     df["adx"] = _wilder(dx.fillna(0), 14)
 
-    # Bollinger + сжатие
     mid = c.rolling(20).mean()
     std = c.rolling(20).std()
     upper_b, lower_b = mid + 2 * std, mid - 2 * std
@@ -1010,11 +978,9 @@ def add_indicators(df):
     bw = ((upper_b - lower_b) / mid.replace(0, np.nan))
     df["squeeze"] = (bw <= bw.rolling(100, min_periods=30).quantile(0.15)).fillna(False)
 
-    # Supertrend (10, 3)
     atr10 = _wilder(tr, 10).fillna(tr.mean())
     df["st_dir"] = _supertrend(h, l, c, atr10, 3.0)
 
-    # Ichimoku (без заглядывания вперёд: облако сдвинуто на 26 баров назад)
     tenkan = (h.rolling(9).max() + l.rolling(9).min()) / 2
     kijun = (h.rolling(26).max() + l.rolling(26).min()) / 2
     span_a = ((tenkan + kijun) / 2).shift(26)
@@ -1023,7 +989,6 @@ def add_indicators(df):
     df["tenkan"], df["kijun"] = tenkan.fillna(c), kijun.fillna(c)
     df["ichi_pos"] = np.where(top.isna(), 0, np.where(c > top, 1, np.where(c < bot, -1, 0)))
 
-    # VWAP(20), MFI, CCI, Williams %R
     tp = (h + l + c) / 3
     df["vwap"] = ((tp * v).rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)).fillna(c)
     raw = tp * v
@@ -1036,18 +1001,15 @@ def add_indicators(df):
     hh, ll = h.rolling(14).max(), l.rolling(14).min()
     df["wr"] = (-100 * (hh - c) / (hh - ll).replace(0, np.nan)).fillna(-50)
 
-    # объём
     df["obv"] = (np.sign(c.diff()) * v).fillna(0).cumsum()
     df["obv_ema"] = df["obv"].ewm(span=20, adjust=False).mean()
     df["rel_vol"] = (v / v.rolling(20).mean().replace(0, np.nan)).fillna(1.0)
     df["vol_delta"] = ((c - o) / (h - l).replace(0, np.nan) * v).fillna(0)
 
-    # статистика цены
     std50 = c.rolling(50).std().replace(0, np.nan)
     df["z_score"] = ((c - df["ema50"]) / std50).fillna(0)
     df["momentum"] = c.pct_change(10).fillna(0)
 
-    # Donchian-пробой и дивергенции RSI (без заглядывания вперёд)
     df["brk_up"] = (c > h.shift(1).rolling(20).max()).fillna(False)
     df["brk_dn"] = (c < l.shift(1).rolling(20).min()).fillna(False)
     low_min, high_max = l.shift(1).rolling(14).min(), h.shift(1).rolling(14).max()
@@ -1059,7 +1021,6 @@ def add_indicators(df):
 
 
 def add_scores(df):
-    """Три модели с весами по режиму рынка. На выходе long_p (5..95) для КАЖДОЙ свечи (нужно и для бэктеста)."""
     n = len(df)
     c = df["close"].values
     adx = df["adx"].values
@@ -1072,7 +1033,6 @@ def add_scores(df):
     hist = df["macd_hist"].values
     hist_prev = np.concatenate([[hist[0]], hist[:-1]])
 
-    # --- модель 1: тренд ---
     stack = np.where((c > ema20) & (ema20 > ema50), 20, np.where((c < ema20) & (ema20 < ema50), -20, 0))
     stack = stack + np.where(c > ema200, 10, -10)
     st = np.where(df["st_dir"].values > 0, 20, -20)
@@ -1081,7 +1041,6 @@ def add_scores(df):
     di = np.where(adx >= 20, np.where(df["plus_di"].values > df["minus_di"].values, 10, -10), 0)
     trend = np.clip(stack + st + ichi + macd_s + di, -100, 100)
 
-    # --- модель 2: моментум / возврат к среднему ---
     rsi, sk, cci = df["rsi"].values, df["stoch_k"].values, df["cci"].values
     wr, mfi, bbp = df["wr"].values, df["mfi"].values, df["bb_pct"].values
     z, mom_roc = df["z_score"].values, df["momentum"].values
@@ -1096,7 +1055,6 @@ def add_scores(df):
            + mix(np.clip(mom_roc * 400, -10, 10), zeros))
     mom = np.clip(mom, -100, 100)
 
-    # --- модель 3: price action + объём ---
     o = df["open"].values
     pat = pattern_scores(df)
     vol_conf = np.where(df["rel_vol"].values > 1.5, np.where(c > o, 10, -10), 0)
@@ -1115,7 +1073,6 @@ def add_scores(df):
 
 
 def explain_last(df):
-    """Человекочитаемые причины по последней закрытой свече: [{w, side, text}]."""
     r = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else r
     out = []
@@ -1165,7 +1122,6 @@ def explain_last(df):
 
 
 def last_patterns(df, depth=2):
-    """Паттерны на последних `depth` закрытых свечах: [(ru, side, en)]."""
     res = []
     for i in range(1, min(depth, len(df)) + 1):
         r = df.iloc[-i]
@@ -1181,7 +1137,6 @@ def last_patterns(df, depth=2):
 
 
 def support_resistance(df, price, k=3, lookback=120):
-    """Ближайшие поддержка и сопротивление по подтверждённым пивотам."""
     hv, lv = df["high"].values[-lookback:], df["low"].values[-lookback:]
     n = len(hv)
     res, sup = [], []
@@ -1209,7 +1164,6 @@ def prepare_df(df):
 
 
 def build_tf_data(rows_by_tf):
-    """Индикаторы считаем ТОЛЬКО по закрытым свечам (последнюю формирующуюся отбрасываем), цена берётся живая."""
     out = {}
     for tf, rows in rows_by_tf.items():
         price = float(rows[-1][4])
@@ -1290,7 +1244,6 @@ async def get_market_data(coin, tfs=tuple(TFS)):
 
 
 async def get_market_data_light(coin, tfs=tuple(TFS)):
-    """Сначала биржа, где монета уже находилась (меньше запросов), иначе полный поиск."""
     pref = preferred_source.get(coin)
     if pref:
         ex = next((e for e in EXCHANGES if e["name"] == pref[1]), None)
@@ -1387,7 +1340,6 @@ TF_WEIGHTS = {"1d": 0.30, "4h": 0.30, "1h": 0.25, "15m": 0.15}
 
 
 def quick_check(tf_data):
-    """Быстрый отбор по 4h + 1d: одна сторона, достаточная уверенность, не мёртвый рынок, есть ликвидность."""
     if "4h" not in tf_data or "1d" not in tf_data:
         return None
     p4, p1 = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
@@ -1425,7 +1377,6 @@ def pattern_lines(tf_data):
 
 
 def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False):
-    """Итоговая оценка сетапа. Возвращает dict; valid=True только если прошли все гейты."""
     out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрок",
            "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": []}
     tfs = [t for t in TF_WEIGHTS if t in tf_data]
@@ -1439,7 +1390,7 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False):
     strength = max(wp, 100 - wp)
     notes = []
 
-    def cs(p):  # уверенность в нашу сторону
+    def cs(p):
         return p if is_long else 100 - p
 
     p4, p1d = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
@@ -1517,11 +1468,8 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False):
 # =====================================================================
 #                 УРОВНИ, РИСК, БЭКТЕСТ (СЛОЙ 5)
 # =====================================================================
-
 def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=None, resistance=None):
-    """Строго лимитный вход. Бот ждет отката цены к EMA или поддержке/сопротивлению, не покупая по рынку."""
     if is_long:
-        # Вход строго на откате: либо к EMA20/50, либо чуть ниже текущей цены
         entry = min(price, max(ema20, ema50))
         if entry > price - 0.2 * atr:
             entry = price - 0.35 * atr
@@ -1532,7 +1480,6 @@ def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=No
         sl1 = max(sl1, entry - 2.5 * atr)
         return entry, sl1, entry - sl1
     
-    # Для шорта: ждем отката вверх к EMA или сопротивлению
     entry = max(price, min(ema20, ema50))
     if entry < price + 0.2 * atr:
         entry = price + 0.35 * atr
@@ -1563,7 +1510,6 @@ def calc_levels_and_risk(info, is_long):
 
 
 def backtest_df(df, conf_min=BT_CONF, rr1=1.5, fill_bars=6, max_hold=30, fee=0.001):
-    """Бэктест той же стратегии (модель + те же уровни) на истории монеты. Лимитный вход с проверкой исполнения."""
     n = len(df)
     if n < 150:
         return None
@@ -1762,7 +1708,6 @@ async def run_ai_diag():
     return "\n".join(lines)
 
 
-# ---------- ИИ-аналитик по конкретному сетапу (последний вето-слой) ----------
 _ai_cache = {}
 
 
@@ -2062,14 +2007,12 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
     for col_name, colr in (("ema20", (255, 205, 60)), ("ema50", (80, 150, 255))):
         pts = [(pad_l + i * step + step / 2, y(v)) for i, v in enumerate(df[col_name].values)]
         draw.line(pts, fill=colr, width=2)
-    # объём
     vmax = df["volume"].max() or 1.0
     for i in range(n):
         x = pad_l + i * step + step / 2
         vh = (vol_bottom - vol_top) * (df["volume"].iloc[i] / vmax)
         color = (0, 120, 60) if df["close"].iloc[i] >= df["open"].iloc[i] else (140, 40, 40)
         draw.rectangle([x - cwid / 2, vol_bottom - vh, x + cwid / 2, vol_bottom], fill=color)
-    # уровни
     sr = info.get("sr", {})
     for lvl_p, lbl in ((sr.get("support"), "SUP"), (sr.get("resistance"), "RES")):
         if lvl_p:
@@ -2125,7 +2068,7 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         else:
             verdict = local_verdict(setup, bt)
             comment = "ИИ-аналитик недоступен: решение принято по правилам модели и истории."
-        # жёсткие правила поверх ИИ
+        
         if bt and bt["trades"] >= BT_MIN_TRADES and not bt_ok(bt):
             verdict = "WAIT"
             comment = "История этой монеты по такой стратегии слабая, вход не рекомендую. " + comment
@@ -2251,7 +2194,6 @@ async def scan_once(send=True):
     bias_text = market_bias.get("impact", "Нейтральный фон")
     sem = asyncio.Semaphore(3)
 
-    # ---- этап 1: быстрый отбор по 4h + 1d ----
     stage1 = []
 
     async def s1(coin):
@@ -2273,7 +2215,6 @@ async def scan_once(send=True):
     stage1.sort(key=lambda x: x[2], reverse=True)
     stage1 = stage1[:18]
 
-    # ---- этап 2: полный мульти-ТФ + контекст ----
     stage2 = []
 
     async def s2(item):
@@ -2294,7 +2235,6 @@ async def scan_once(send=True):
     stage2.sort(key=lambda x: x[2]["strength"], reverse=True)
     stage2 = stage2[:8]
 
-    # ---- этап 3: бэктест + ИИ-аналитик ----
     final = []
     bt_pass = 0
     sem3 = asyncio.Semaphore(2)
@@ -2344,32 +2284,34 @@ async def scan_once(send=True):
         now = time.time()
         hist = _load_signal_history()
         
-        # 1. Рассылаем сами сигналы всем пользователям с графиком и кнопками
         for r in to_broadcast:
             signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
-            hist.append({"ts": now, "coin": r["coin"], "side": r["side"], "type": r["type"], "strength": r["strength"], "text": r["text"]})
+            hist.append({
+                "ts": now, 
+                "coin": r["coin"], 
+                "side": r["side"], 
+                "type": r["type"], 
+                "strength": r["strength"], 
+                "text": r["text"],
+                "entry": r["entry"],
+                "tp1": r["tps"][0],
+                "sl1": r["sls"][0],
+                "status": "active"
+            })
             
-            # Получаем кнопки (Обновить, Сохранить, Вошёл в сделку)
             kb = result_keyboard(r["coin"])
-            
-            # Формируем сообщение (если есть картинка - шлем фото, если нет - текст)
             payload = {
                 "kind": "photo" if r["img"] else "text",
                 "text": r["text"],
                 "data": r["img"],
                 "markup": kb
             }
-            
-            # Отправляем всем активным пользователям
             await broadcast(payload)
-            
-            # Пауза 1.5 секунды между сигналами, чтобы Telegram не забанил бота за спам
-            await asyncio.sleep(1.5) 
+            await asyncio.sleep(1.5)
             
         _save_signal_history(hist)
         stats["signals"] += len(to_broadcast)
 
-        # 2. Обновляем данные для кнопки "Последние сигналы" в меню
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
         text = f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
         kb = [
@@ -2380,6 +2322,8 @@ async def scan_once(send=True):
         ]
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
+
+    return to_broadcast
 
 
 async def scanner_loop():
@@ -2392,6 +2336,42 @@ async def scanner_loop():
             log.error(f"scanner: {e}")
         next_timers["scanner"] = time.time() + SCAN_INTERVAL
         await asyncio.sleep(SCAN_INTERVAL)
+
+
+async def global_signal_monitor_loop():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            hist = _load_signal_history()
+            updated = False
+            for x in hist:
+                if x.get("status") == "active":
+                    price = await get_simple_price(x["coin"])
+                    if price:
+                        is_long = x["side"] == "LONG"
+                        tp1 = x.get("tp1", 0)
+                        sl1 = x.get("sl1", 0)
+                        if is_long:
+                            if price >= tp1:
+                                x["status"] = "win"
+                                updated = True
+                            elif price <= sl1:
+                                x["status"] = "loss"
+                                updated = True
+                        else:
+                            if price <= tp1:
+                                x["status"] = "win"
+                                updated = True
+                            elif price >= sl1:
+                                x["status"] = "loss"
+                                updated = True
+                    await asyncio.sleep(0.2)
+            if updated:
+                _save_signal_history(hist)
+        except Exception as e:
+            log.error(f"global_signal_monitor: {e}")
+        next_timers["global_signals"] = time.time() + 600
+        await asyncio.sleep(600)
 
 
 # ====================== BROADCAST ======================
@@ -2513,6 +2493,38 @@ async def cmd_start(m: types.Message):
 @dp.callback_query(F.data == "menu")
 async def cb_menu(cb: types.CallbackQuery):
     await safe_edit(cb.message, f"👋 <b>IXCLY v{VERSION}</b>\n\nГлавное меню:", reply_markup=get_coins_keyboard(), user_id=cb.from_user.id)
+    await safe_answer(cb)
+
+
+@dp.callback_query(F.data == "global_stats")
+async def cb_global_stats(cb: types.CallbackQuery):
+    hist = _load_signal_history()
+    total = len(hist)
+    wins = sum(1 for x in hist if x.get("status") == "win")
+    losses = sum(1 for x in hist if x.get("status") == "loss")
+    active = sum(1 for x in hist if x.get("status") == "active")
+    
+    closed = wins + losses
+    winrate = (wins / closed * 100) if closed > 0 else 0.0
+    
+    fast_wins = sum(1 for x in hist if x.get("status") == "win" and x.get("type") == "Быстрый сигнал")
+    fast_total = sum(1 for x in hist if x.get("status") in ("win", "loss") and x.get("type") == "Быстрый сигнал")
+    fast_wr = (fast_wins / fast_total * 100) if fast_total > 0 else 0.0
+
+    text = (
+        f"📊 <b>Статистика сигналов бота</b>\n\n"
+        f"📈 Всего отправлено: <b>{total}</b>\n"
+        f"⏳ В работе (ждут TP/SL): <b>{active}</b>\n\n"
+        f"✅ Успешных (TP1): <b>{wins}</b>\n"
+        f"❌ Убыточных (SL1): <b>{losses}</b>\n"
+        f"🎯 Общий винрейт: <b>{winrate:.1f}%</b>\n"
+    )
+    if fast_total > 0:
+        text += f"⚡ Винрейт (Быстрые): <b>{fast_wr:.1f}%</b> (из {fast_total})\n"
+    
+    text += f"\n<i>* Статистика ведется автоматически. Учитываются сделки, где цена дошла до TP1 или SL1.</i>"
+    
+    await safe_edit(cb.message, text, reply_markup=MENU_KB, user_id=cb.from_user.id)
     await safe_answer(cb)
 
 
@@ -2934,6 +2946,7 @@ if admin_dp:
                      f"🤖 Сканер: {fmt_time(next_timers['scanner'] - now)}",
                      f"📈 Мониторинг: {fmt_time(next_timers['positions'] - now)}",
                      f"📰 Новости: {fmt_time(next_timers['news_watcher'] - now)}",
+                     f"📊 Статистика: {fmt_time(next_timers['global_signals'] - now)}",
                      f"💾 Бэкап: {fmt_time(next_timers['backup'] - now)}"]
             await cb.message.answer("\n".join(lines), parse_mode="HTML")
 
@@ -3020,4 +3033,68 @@ async def main():
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot:
                 await admin_bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_my_commands([typ
+            await bot.set_my_commands([
+                types.BotCommand(command="menu", description="🚀 Меню")
+            ])
+        except Exception:
+            pass
+
+        if POLL_START_DELAY > 0:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
+            except asyncio.TimeoutError:
+                pass
+        if stop.is_set():
+            return
+
+        restored = await telegram_restore()
+        if restored:
+            log.info(f"✅ База восстановлена: {restored}")
+        load_active_chats()
+
+        background += [
+            asyncio.create_task(scanner_loop()),
+            asyncio.create_task(position_monitor_loop()),
+            asyncio.create_task(global_signal_monitor_loop()),
+            asyncio.create_task(news_watcher_loop()),
+            asyncio.create_task(backup_loop()),
+            asyncio.create_task(update_market_bias()),
+            asyncio.create_task(cleanup_loop()),
+        ]
+
+        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
+        if admin_bot and admin_dp:
+            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
+
+        log.info(f"🚀 IXCLY v{VERSION} запущен.")
+        waiter = asyncio.create_task(stop.wait())
+        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
+        waiter.cancel()
+    finally:
+        for t in pollers:
+            t.cancel()
+        await asyncio.gather(*pollers, return_exceptions=True)
+        try:
+            await asyncio.wait_for(telegram_backup("перед остановкой"), timeout=12)
+        except Exception:
+            pass
+        for t in background:
+            t.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        if admin_bot:
+            try:
+                await admin_bot.session.close()
+            except Exception:
+                pass
+        await http.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Остановлен")
