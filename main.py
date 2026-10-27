@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.11.0 - многослойный движок сигналов
+IXCLY Trading bot v2.11.2 - многослойный движок сигналов (полный код)
 """
 
 import asyncio
@@ -131,7 +131,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.11.0"
+VERSION = "2.11.2"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -167,7 +167,6 @@ news_lock = None
 TFS = ["15m", "1h", "4h", "1d"]
 MIN_CANDLES = 60
 
-# ВАШ РАСШИРЕННЫЙ СПИСОК МОНЕТ
 POPULAR_COINS = [
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
     "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
@@ -402,7 +401,7 @@ def _load_signal_history():
     try:
         with open(SIGNAL_HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return [x for x in data if time.time() - x.get("ts", 0) < 30 * 86400] # 30 дней
+        return [x for x in data if time.time() - x.get("ts", 0) < 30 * 86400]
     except Exception:
         return []
 
@@ -1800,9 +1799,7 @@ async def translate_text(text, target="ru"):
 
 
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
-WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml"]
 _news_cache = {"ts": 0, "entries": []}
-_world_cache = {"ts": 0, "titles": []}
 
 
 async def _load_feed(url):
@@ -1861,9 +1858,9 @@ def _valid_news_ai(text):
 
 
 IMPACT_TEMPLATES = {
-    1: "Новостной фон оценивается как позитивный (бычий). Наблюдается приток интереса к рисковым активам, что может поддержать спрос на криптовалюту и привести к росту цен на ключевые активы (BTC, ETH). Рекомендуется следить за точками входа в лонг.",
-    -1: "Новостной фон оценивается как негативный (медвежий). Возможны локальные распродажи, рост волатильности и уход инвесторов в защищённые активы. Стоит проявлять осторожность и строго соблюдать риск-менеджмент.",
-    0: "Новостной фон нейтрален. Рынок находится в стадии консолидации, участники ожидают новых триггеров для формирования тренда. В таких условиях сигналы могут требовать дополнительного подтверждения.",
+    1: "Новостной фон оценивается как позитивный (бычий). Наблюдается приток интереса к рисковым активам, что может поддержать спрос на криптовалюту и привести к росту цен на ключевые активы (BTC, ETH).",
+    -1: "Новостной фон оценивается как негативный (медвежий). Возможны локальные распродажи, рост волатильности и уход инвесторов в защищённые активы. Стоит проявлять осторожность.",
+    0: "Новостной фон нейтрален. Рынок находится в стадии консолидации, участники ожидают новых триггеров для формирования тренда.",
 }
 
 
@@ -2043,7 +2040,7 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
 
 
 # =====================================================================
-#                  СБОРКА АНАЛИЗА (общая для сканера и ручного режима)
+#                  СБОРКА АНАЛИЗА
 # =====================================================================
 def local_verdict(setup, bt):
     if not setup["valid"]:
@@ -2177,7 +2174,7 @@ async def send_analysis(chat_id, res, uid):
 
 
 # =====================================================================
-#                              СКАНЕР
+#                              СКАНЕР (С УЧЕТОМ ТРЕБОВАНИЙ К УВЕДОМЛЕНИЯМ)
 # =====================================================================
 SCAN_INTERVAL = 25 * 60
 SIGNAL_COOLDOWN = 3 * 3600
@@ -2262,7 +2259,7 @@ async def scan_once(send=True):
     new_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
     for r in final:
         new_db[r["type"]].append({"coin": r["coin"], "is_long": r["is_long"], "strength": r["strength"], "type": r["type"],
-                                  "side": r["side"], "text": r["text"]})
+                                  "side": r["side"], "text": r["text"], "price": r["price"], "img": r["img"]})
     for k in new_db:
         new_db[k] = new_db[k][:10]
     current_signals_db = new_db
@@ -2287,22 +2284,28 @@ async def scan_once(send=True):
         for r in to_broadcast:
             signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
             hist.append({
-                "ts": now, 
-                "coin": r["coin"], 
-                "side": r["side"], 
-                "type": r["type"], 
-                "strength": r["strength"], 
-                "text": r["text"],
-                "entry": r["entry"],
-                "tp1": r["tps"][0],
-                "sl1": r["sls"][0],
-                "status": "active"
+                "ts": now, "coin": r["coin"], "side": r["side"], "type": r["type"], 
+                "strength": r["strength"], "text": r["text"], "entry": r["entry"],
+                "tp1": r["tps"][0], "sl1": r["sls"][0], "status": "active"
             })
             
-            kb = result_keyboard(r["coin"])
+            # КОМПАКТНОЕ УВЕДОМЛЕНИЕ С ФОТО И ОДНИМ СТОЛБЦОМ КНОПОК
+            emoji = "🟢" if r["is_long"] else "🔴"
+            compact_text = (
+                f"{emoji} <b>Новый сигнал: {r['coin']}</b> ({r['side']})\n"
+                f"📊 Тип: <b>{r['type']}</b> | Уверенность: <b>{r['strength']}%</b>\n"
+                f"💰 Цена: <code>{fmt(r['price'])}</code>"
+            )
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📄 Полная информация", callback_data=f"sig:full:{r['coin']}")],
+                [InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{r['coin']}")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+            ])
+            
             payload = {
                 "kind": "photo" if r["img"] else "text",
-                "text": r["text"],
+                "text": compact_text,
                 "data": r["img"],
                 "markup": kb
             }
@@ -2311,17 +2314,6 @@ async def scan_once(send=True):
             
         _save_signal_history(hist)
         stats["signals"] += len(to_broadcast)
-
-        msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
-        text = f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
-        kb = [
-            [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
-            [InlineKeyboardButton(text=f"⏳ Среднесрок ({len(current_signals_db['Среднесрок'])})", callback_data="sig_list:Среднесрок")],
-            [InlineKeyboardButton(text=f"🛡 Долгосрок ({len(current_signals_db['Долгосрок'])})", callback_data="sig_list:Долгосрок")],
-            [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
-        ]
-        markup = InlineKeyboardMarkup(inline_keyboard=kb)
-        last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
 
     return to_broadcast
 
@@ -2385,14 +2377,8 @@ async def broadcast(payload, only_ids=None):
                 if payload.get("kind") == "photo" and payload.get("data"):
                     photo = BufferedInputFile(payload["data"], filename="image.png")
                     text = payload.get("text", "")
-                    if len(text) <= 1024:
-                        msg = await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
-                        track_msg(cid, msg)
-                    else:
-                        msg_photo = await bot.send_photo(cid, photo)
-                        track_msg(cid, msg_photo)
-                        msg = await bot.send_message(cid, text[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
-                        track_msg(cid, msg)
+                    msg = await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
+                    track_msg(cid, msg)
                 else:
                     msg = await bot.send_message(cid, payload.get("text", "")[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
                     track_msg(cid, msg)
@@ -2558,6 +2544,19 @@ async def cb_coin(cb: types.CallbackQuery):
         busy_users.discard(uid)
 
 
+# ОБРАБОТЧИК КНОПКИ "ПОЛНАЯ ИНФОРМАЦИЯ"
+@dp.callback_query(F.data.startswith("sig:full:"))
+async def cb_sig_full(cb: types.CallbackQuery):
+    coin, uid = cb.data.split(":")[2], cb.from_user.id
+    await safe_answer(cb, "⏳ Загружаю полную информацию…")
+    res, err = await analyze_coin(coin)
+    if err:
+        await cb.message.answer(err, parse_mode="HTML")
+        return
+    await safe_delete(cb.message)
+    await send_analysis(cb.message.chat.id, res, uid)
+
+
 @dp.callback_query(F.data.startswith("r:"))
 async def cb_refresh(cb: types.CallbackQuery):
     coin, uid = cb.data.split(":")[1], cb.from_user.id
@@ -2591,12 +2590,7 @@ async def cb_news_menu(cb: types.CallbackQuery):
         img = await download_bytes(img_url) if img_url else None
         await safe_delete(cb.message)
         if img:
-            if len(text) <= 1024:
-                msg = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"), caption=text, parse_mode="HTML", reply_markup=MENU_KB)
-            else:
-                msg_photo = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"))
-                track_msg(uid, msg_photo)
-                msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
+            msg = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"), caption=text, parse_mode="HTML", reply_markup=MENU_KB)
         else:
             msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
         track_msg(uid, msg)
@@ -2605,7 +2599,8 @@ async def cb_news_menu(cb: types.CallbackQuery):
         await safe_edit(cb.message, "Ошибка при загрузке новости.", reply_markup=MENU_KB, user_id=uid)
 
 
-def _signals_overview_text_kb():
+@dp.callback_query(F.data == "last_signals")
+async def cb_last(cb: types.CallbackQuery):
     text = f"🔥 <b>Сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(market_bias.get('impact', 'Нейтральный фон'))}\n\nВыберите категорию:"
     kb = [
         [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
@@ -2613,16 +2608,7 @@ def _signals_overview_text_kb():
         [InlineKeyboardButton(text=f"🛡 Долгосрок ({len(current_signals_db['Долгосрок'])})", callback_data="sig_list:Долгосрок")],
         [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
     ]
-    return text, InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-@dp.callback_query(F.data == "last_signals")
-async def cb_last(cb: types.CallbackQuery):
-    if last_signals_data.get("text") and time.time() - last_signals_data.get("ts", 0) < 3600:
-        await safe_edit(cb.message, last_signals_data["text"], reply_markup=last_signals_data.get("kb"), user_id=cb.from_user.id)
-    else:
-        text, kb = _signals_overview_text_kb()
-        await safe_edit(cb.message, text, reply_markup=kb, user_id=cb.from_user.id)
+    await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
     await safe_answer(cb)
 
 
@@ -2631,18 +2617,17 @@ async def cb_sig_list(cb: types.CallbackQuery):
     category = cb.data.split(":")[1]
     sigs = current_signals_db.get(category, [])[:10]
     if not sigs:
-        text = (f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас сигналов в этой категории нет. Это нормально: бот присылает только те идеи, "
-                f"что прошли индикаторы, 4 таймфрейма, контекст рынка и бэктест.</i>")
+        text = (f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас сигналов в этой категории нет. Бот присылает только те идеи, "
+                f"что прошли индикаторы, таймфреймы и бэктест.</i>")
         kb = [[InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")]]
         await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
         await safe_answer(cb, "Пусто", False)
         return
-    text = f"📋 <b>Сигналы: {category}</b>\n\n"
+    text = f"📋 <b>Сигналы: {category}</b>\n\nВыберите монету в один столбец:"
     kb = []
     for s in sigs:
         emoji = "🟢" if s["is_long"] else "🔴"
-        text += f"{emoji} <b>{s['coin']}</b> · Conf: {s['strength']}%\n"
-        kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
+        kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']} ({s['strength']}%)", callback_data=f"sig:full:{s['coin']}")])
     kb.append([InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")])
     await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
     await safe_answer(cb)
@@ -2916,7 +2901,7 @@ if admin_dp:
                 lines = [f"{'🟢' if s['is_long'] else '🔴'} {s['coin']} · {s['type']} · Conf {s['strength']}%" for s in sigs]
                 await cb.message.answer(f"🔍 Тест сканера\n{head}\n\n" + "\n".join(lines))
             else:
-                await cb.message.answer(f"🔍 Тест сканера: сигналов нет\n{head}\n\nЭто нормально: пороги строгие (CONF_FINAL={CONF_FINAL:.0f}, бэктест).")
+                await cb.message.answer(f"🔍 Тест сканера: сигналов нет\n{head}\n\nЭто нормально: пороги строгие.")
         elif act == "broadcast_now":
             if last_signals_data.get("text"):
                 sent, _, _, _ = await broadcast({"kind": "text", "text": last_signals_data["text"], "markup": last_signals_data.get("kb")})
