@@ -954,7 +954,7 @@ async def _ask_openai_compat(name, base, key, model, prompt, extra_headers=None)
     return None
 
 async def _ask_free_gpt(prompt):
-    system = "Ты опытный крипто-аналитик. Отвечай на русском языке, кратко."
+    system = "Ты опытный крипто-аналитик. Отвечай на русском языке, подробно и по делу."
     short = quote(prompt[:3000], safe="")
     try:
         async with http.get(f"https://text.pollinations.ai/{short}", params={"model": POLLINATIONS_MODEL, "system": system}, timeout=aiohttp.ClientTimeout(total=14)) as r:
@@ -1098,7 +1098,13 @@ def parse_news_ai(text):
 
 def _valid_news_ai(text):
     p = parse_news_ai(text)
-    return has_cyr(p.get("TITLE_RU", ""), 6) and has_cyr(p.get("SUMMARY", ""), 20)
+    return has_cyr(p.get("TITLE_RU", ""), 6) and has_cyr(p.get("SUMMARY", ""), 20) and has_cyr(p.get("IMPACT", ""), 10)
+
+IMPACT_TEMPLATES = {
+    1: "Новостной фон оценивается как позитивный (бычий). Наблюдается приток интереса к рисковым активам, что может поддержать спрос на криптовалюту и привести к росту цен на ключевые активы (BTC, ETH). Рекомендуется следить за точками входа в лонг.",
+    -1: "Новостной фон оценивается как негативный (медвежий). Возможны локальные распродажи, рост волатильности и уход инвесторов в защищенные активы. Стоит проявлять осторожность и строго соблюдать риск-менеджмент.",
+    0: "Новостной фон нейтрален. Рынок находится в стадии консолидации, участники ожидают новых триггеров для формирования тренда. В таких условиях сигналы могут требовать дополнительного подтверждения."
+}
 
 async def update_market_bias(force=False):
     global market_bias
@@ -1115,7 +1121,16 @@ async def update_market_bias(force=False):
             summary = clean_summary(getattr(entry, "summary", ""))
             published = get_moscow_time_from_entry(entry)
             
-            prompt = f"Новость: {title}\nТекст: {summary}\nПереведи на русский и разбери в формате:\nBIAS: BULLISH/BEARISH/NEUTRAL\nTITLE_RU: перевод\nSUMMARY: суть\nIMPACT: влияние\nCOINS: тикеры"
+            # Расширенный промпт для более подробного анализа
+            prompt = f"""Новость: {title}
+Текст: {summary}
+Переведи на русский и разбери в формате:
+BIAS: BULLISH/BEARISH/NEUTRAL
+TITLE_RU: перевод
+SUMMARY: суть
+IMPACT: 3-4 предложения: подробный анализ влияния новости на рынок, оценка текущего фона (бычий/медвежий), на какие активы и почему это повлияет в первую очередь.
+COINS: тикеры"""
+            
             text, engine = await ask_ai_named(prompt, validate=_valid_news_ai)
             parsed = parse_news_ai(text) if text else {}
 
@@ -1124,14 +1139,14 @@ async def update_market_bias(force=False):
                 bias = 1 if "BULL" in up else -1 if "BEAR" in up else 0
                 title_ru = parsed["TITLE_RU"][:170]
                 summ = shorten(parsed["SUMMARY"], 380)
-                impact = shorten(parsed["IMPACT"], 260)
+                impact = shorten(parsed["IMPACT"], 500) # Увеличен лимит до 500 символов
                 coins = parsed.get("COINS", "BTC, ETH")
                 eng = engine
             else:
                 title_ru = await translate_text(title)
                 summ = shorten(title_ru, 380)
                 bias = news_sentiment(f"{title}. {summary}")
-                impact = "Нейтральное влияние" if bias == 0 else "Позитив" if bias == 1 else "Негатив"
+                impact = IMPACT_TEMPLATES[bias] # Используем подробный шаблон
                 coins = ", ".join(mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"])
                 eng = "fallback"
 
@@ -1176,7 +1191,7 @@ async def news_watcher_loop():
 
 
 # ====================== СКАНЕР ======================
-SCAN_INTERVAL = 17 * 60
+SCAN_INTERVAL = 25 * 60  # 25 минут
 SIGNAL_COOLDOWN = 3 * 3600
 signal_sent_at = {}
 scan_skip = {}
@@ -1253,6 +1268,8 @@ async def scan_once(send=True):
         _save_signal_history(hist)
 
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
+        
+        # Здесь используется подробный bias_text
         text = f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
         kb = [
             [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
