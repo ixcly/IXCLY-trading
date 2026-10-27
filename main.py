@@ -8,6 +8,7 @@ IXCLY Trading bot v2.10.11
 - ИСТОРИЯ СИГНАЛОВ: если нет свежих, можно посмотреть историю за 24 часа
 - ИНТЕРЕСНЫЕ ГРАФИКИ: топ-4 роста и падения за 24 часа с ожидаемым сценарием
 - ВОЗВРАЩЕН daily_stats_loop (ежедневная статистика в 00:00)
+- МОНИТОРИНГ ОТКРЫТЫХ ПОЗИЦИЙ: кнопка «Вошёл в сделку» + уведомления когда лучше закрыть
 """
 import asyncio
 import html
@@ -331,6 +332,43 @@ def del_user_saved_signal(user_id, coin):
         return False
 
 
+def get_user_open_positions(user_id):
+    users = _load_users()
+    u = users.get(str(user_id), {})
+    return u.get("open_positions", {})
+
+
+def set_user_open_position(user_id, coin, data):
+    """data = dict или None (чтобы удалить)"""
+    key = str(user_id)
+    if users_col is not None:
+        try:
+            if data is None:
+                users_col.update_one({"_id": key}, {"$unset": {f"open_positions.{coin}": ""}})
+            else:
+                users_col.update_one({"_id": key}, {"$set": {f"open_positions.{coin}": data}}, upsert=True)
+            return True
+        except Exception as e:
+            log.error(f"Mongo open_pos error: {e}")
+            return False
+    else:
+        users = _load_users()
+        if key not in users:
+            users[key] = {}
+        if "open_positions" not in users[key]:
+            users[key]["open_positions"] = {}
+        if data is None:
+            users[key]["open_positions"].pop(coin, None)
+        else:
+            users[key]["open_positions"][coin] = data
+        _save_users(users)
+        return True
+
+
+def get_open_position(user_id, coin):
+    return get_user_open_positions(user_id).get(coin)
+
+
 def set_users_active(ids, active):
     users = _load_users()
     changed = {}
@@ -526,6 +564,20 @@ def get_save_coins_keyboard(page=0):
         nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"sig:save_page:{page + 1}"))
     buttons.append(nav)
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sig:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_saved_signal_view_keyboard(user_id, coin):
+    pos = get_open_position(user_id, coin)
+    buttons = [
+        [InlineKeyboardButton(text="🔄 Обновить анализ", callback_data=f"c:{coin}")],
+    ]
+    if pos:
+        buttons.append([InlineKeyboardButton(text="📈 Статус позиции", callback_data=f"pos:status:{coin}")])
+        buttons.append([InlineKeyboardButton(text="❌ Закрыл сделку", callback_data=f"pos:close:{coin}")])
+    else:
+        buttons.append([InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад к избранному", callback_data="sig:menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -1455,11 +1507,9 @@ async def scan_once(send=True):
                 pass
 
         if not approved_coins and local_candidates:
-            # fallback — берём топ-3 по edge
             approved_coins = local_candidates[:3]
             ai_reason = "AI не ответил / fallback по силе техники"
 
-    # Формируем сигналы
     signals = []
     hist = _load_signal_history()
 
@@ -1471,21 +1521,20 @@ async def scan_once(send=True):
         is_long = tech["is_long"]
         entry, tps, sls = calc_levels(info, is_long)
 
-        # локальный текст
-        side = "LONG 🟢" if is_long else "SHORT 🔴"
+        side = "🟢 LONG" if is_long else "🔴 SHORT"
         text = (
-            f"🔥 <b>{coin}</b> — {side}\n"
-            f"ТФ: <b>{tech['tf']}</b> | Сила: <b>{tech['prob']:.0f}%</b> | Совпадение: {tech['aligned']}/{tech['total']}\n\n"
+            f"<b>{side}  ·  {coin}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"ТФ: <b>{tech['tf']}</b>  ·  Сила: <b>{tech['prob']:.0f}%</b>  ·  Совпадение: {tech['aligned']}/{tech['total']}\n\n"
             f"💰 Цена: <code>{fmt(info['price'])}</code>\n"
-            f"📥 Вход: <code>{fmt(entry)}</code>\n"
-            f"🎯 TP1: <code>{fmt(tps[0])}</code> | TP2: <code>{fmt(tps[1])}</code> | TP3: <code>{fmt(tps[2])}</code>\n"
-            f"🛡 SL1: <code>{fmt(sls[0])}</code> | SL2: <code>{fmt(sls[1])}</code>\n\n"
-            f"<i>{local_reason(tech['tf'], info)}</i>\n"
+            f"📥 Вход: <code>{fmt(entry)}</code>\n\n"
+            f"🎯 TP1 <code>{fmt(tps[0])}</code>   TP2 <code>{fmt(tps[1])}</code>   TP3 <code>{fmt(tps[2])}</code>\n"
+            f"🛡 SL1 <code>{fmt(sls[0])}</code>   SL2 <code>{fmt(sls[1])}</code>\n\n"
+            f"<i>{local_reason(tech['tf'], info)}</i>"
         )
         if ai_reason:
-            text += f"\n🧠 <i>{html.escape(ai_reason[:200])}</i>"
+            text += f"\n\n🧠 <i>{html.escape(ai_reason[:180])}</i>"
 
-        # картинка
         try:
             img_bytes = await asyncio.to_thread(draw_chart, coin, tf_data, tech["tf"], is_long, entry, tps, sls)
         except Exception:
@@ -1500,7 +1549,6 @@ async def scan_once(send=True):
             "entry": entry,
         })
 
-        # история
         hist.append({
             "ts": time.time(),
             "coin": coin,
@@ -1514,7 +1562,6 @@ async def scan_once(send=True):
     _save_signal_history(hist)
 
     if signals and send:
-        # одно сообщение с кнопками
         lines = [f"🔥 <b>Сигналы сканера</b> ({datetime.now().strftime('%H:%M')})\n"]
         kb_rows = []
         for s in signals:
@@ -1552,7 +1599,6 @@ async def scanner_loop():
 # ОТРИСОВКА ГРАФИКА
 # ----------------------------------------------------------------------------
 def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
-    """Простой свечной график + уровни"""
     df = tf_data[main_tf]["df"].tail(60).reset_index(drop=True)
     width, height = 800, 450
     img = Image.new("RGB", (width, height), (18, 18, 24))
@@ -1565,13 +1611,11 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
         font = ImageFont.load_default()
         font_b = font
 
-    # заголовок
     side = "LONG" if is_long else "SHORT"
     color = (0, 200, 80) if is_long else (220, 60, 60)
     draw.text((20, 12), f"{coin}  {main_tf}  {side}", fill=color, font=font_b)
     draw.text((20, 32), f"Entry {fmt(entry)}", fill=(200, 200, 200), font=font)
 
-    # область графика
     pad_l, pad_r, pad_t, pad_b = 60, 20, 60, 40
     chart_w = width - pad_l - pad_r
     chart_h = height - pad_t - pad_b
@@ -1587,12 +1631,10 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
     def y(p):
         return pad_t + chart_h - (p - min_p) / price_range * chart_h
 
-    # сетка
     for i in range(5):
         py = pad_t + i * chart_h / 4
         draw.line([(pad_l, py), (width - pad_r, py)], fill=(40, 40, 50), width=1)
 
-    # свечи
     n = len(df)
     candle_w = max(3, chart_w // n - 2)
     for i in range(n):
@@ -1604,7 +1646,6 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
         bot = max(y(o), y(c))
         draw.rectangle([x - candle_w // 2, top, x + candle_w // 2, bot], fill=col)
 
-    # уровни
     def draw_level(price, label, col, style="solid"):
         yy = y(price)
         if style == "dashed":
@@ -1620,7 +1661,6 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
     for i, sl in enumerate(sls[:2]):
         draw_level(sl, f"SL{i+1}", (220, 60, 60), "dashed")
 
-    # EMA
     for i in range(1, n):
         x1 = pad_l + (i - 1) * (chart_w / n) + candle_w // 2
         x2 = pad_l + i * (chart_w / n) + candle_w // 2
@@ -1636,7 +1676,6 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
 # BROADCAST
 # ----------------------------------------------------------------------------
 async def broadcast(payload, only_ids=None):
-    """payload: kind=text|photo, text=, data=, filename=, markup="""
     targets = only_ids if only_ids is not None else list(active_chats)
     sent = failed = removed = 0
     removed_ids = []
@@ -1664,7 +1703,6 @@ async def broadcast(payload, only_ids=None):
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
             try:
-                # повтор
                 if payload.get("kind") == "photo" and payload.get("data"):
                     photo = BufferedInputFile(payload["data"], filename=payload.get("filename", "img.png"))
                     await bot.send_photo(chat_id, photo, caption=payload.get("text", "")[:1024], parse_mode="HTML",
@@ -1685,7 +1723,7 @@ async def broadcast(payload, only_ids=None):
 
 
 # ----------------------------------------------------------------------------
-# АНАЛИЗ МОНЕТЫ (для кнопок)
+# АНАЛИЗ МОНЕТЫ
 # ----------------------------------------------------------------------------
 async def analyze_coin(coin, user_id=None):
     try:
@@ -1695,13 +1733,11 @@ async def analyze_coin(coin, user_id=None):
     except Exception as e:
         return None, f"⚠️ Ошибка данных: {html.escape(str(e))}"
 
-    # выбираем доминирующий ТФ
     best_tf = max(tf_data.keys(), key=lambda t: abs(tf_data[t]["long_prob"] - 50))
     info = tf_data[best_tf]
     is_long = info["long_prob"] >= 50
     entry, tps, sls = calc_levels(info, is_long)
 
-    # AI-причина
     prompt = f"""Монета {coin}. Данные:
 15m: long_prob={tf_data['15m']['long_prob']:.0f}% RSI={tf_data['15m']['rsi']:.0f}
 1h: long_prob={tf_data['1h']['long_prob']:.0f}% RSI={tf_data['1h']['rsi']:.0f}
@@ -1714,15 +1750,26 @@ async def analyze_coin(coin, user_id=None):
     reason = ai_to_html(ai_text) if ai_text else local_reason(best_tf, info)
     tag = ENGINE_TAG.get(engine or "local", "l")
 
-    side = "LONG 🟢" if is_long else "SHORT 🔴"
+    side_emoji = "🟢 LONG" if is_long else "🔴 SHORT"
+    side_text = "LONG" if is_long else "SHORT"
+    prob = max(info["long_prob"], 100 - info["long_prob"])
+
     text = (
-        f"<b>{coin}</b> — {side}\n"
-        f"Источник: {source} | ТФ: <b>{best_tf}</b> | Вероятность: <b>{max(info['long_prob'], 100-info['long_prob']):.0f}%</b>\n\n"
-        f"💰 Цена: <code>{fmt(info['price'])}</code>\n"
-        f"📥 Вход: <code>{fmt(entry)}</code>\n"
-        f"🎯 TP1 <code>{fmt(tps[0])}</code>  TP2 <code>{fmt(tps[1])}</code>  TP3 <code>{fmt(tps[2])}</code>\n"
-        f"🛡 SL1 <code>{fmt(sls[0])}</code>  SL2 <code>{fmt(sls[1])}</code>\n\n"
-        f"{reason}\n\n{tag}"
+        f"<b>{side_emoji}  ·  {coin}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Источник: <code>{source}</code>  ·  ТФ: <b>{best_tf}</b>  ·  Вероятность: <b>{prob:.0f}%</b>\n\n"
+        f"💰 <b>Текущая цена:</b>  <code>{fmt(info['price'])}</code>\n"
+        f"📥 <b>Рекомендуемый вход:</b>  <code>{fmt(entry)}</code>\n\n"
+        f"🎯 <b>Тейк-профиты</b>\n"
+        f"   TP1  <code>{fmt(tps[0])}</code>\n"
+        f"   TP2  <code>{fmt(tps[1])}</code>\n"
+        f"   TP3  <code>{fmt(tps[2])}</code>\n\n"
+        f"🛡 <b>Стоп-лоссы</b>\n"
+        f"   SL1  <code>{fmt(sls[0])}</code>\n"
+        f"   SL2  <code>{fmt(sls[1])}</code>\n\n"
+        f"📌 <b>Анализ</b>\n"
+        f"{reason}\n\n"
+        f"<i>{tag}</i>"
     )
 
     try:
@@ -1730,7 +1777,153 @@ async def analyze_coin(coin, user_id=None):
     except Exception:
         img = None
 
-    return {"text": text, "img": img, "coin": coin, "entry": entry}, None
+    return {
+        "text": text,
+        "img": img,
+        "coin": coin,
+        "entry": entry,
+        "tps": tps,
+        "sls": sls,
+        "is_long": is_long,
+        "side": side_text,
+        "prob": prob,
+        "price": info["price"],
+    }, None
+
+
+# ----------------------------------------------------------------------------
+# МОНИТОРИНГ ОТКРЫТЫХ ПОЗИЦИЙ
+# ----------------------------------------------------------------------------
+async def position_monitor_loop():
+    await asyncio.sleep(40)
+    while True:
+        try:
+            users = _load_users()
+            for uid_str, u in users.items():
+                open_pos = u.get("open_positions") or {}
+                if not open_pos:
+                    continue
+                for coin, pos in list(open_pos.items()):
+                    try:
+                        await check_and_notify_position(int(uid_str), coin, pos)
+                    except Exception as e:
+                        log.warning(f"pos monitor {uid_str}/{coin}: {e}")
+                    await asyncio.sleep(0.3)
+        except Exception as e:
+            log.error(f"position_monitor_loop: {e}")
+        await asyncio.sleep(360)
+
+
+async def check_and_notify_position(user_id, coin, pos):
+    if pos.get("notified_close"):
+        return
+
+    price = await get_simple_price(coin)
+    if not price:
+        return
+
+    side = pos["side"]
+    entry = pos["entry_price"]
+    tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
+    sl1 = pos["sl1"]
+
+    if side == "LONG":
+        pnl_pct = (price - entry) / entry * 100
+        hit_tp1 = price >= tp1
+        hit_tp2 = price >= tp2
+        hit_tp3 = price >= tp3
+        hit_sl = price <= sl1
+    else:
+        pnl_pct = (entry - price) / entry * 100
+        hit_tp1 = price <= tp1
+        hit_tp2 = price <= tp2
+        hit_tp3 = price <= tp3
+        hit_sl = price >= sl1
+
+    reason = None
+    urgency = "info"
+
+    if hit_sl:
+        reason = (
+            f"Сработал стоп-лосс (SL1 = {fmt(sl1)}).\n"
+            f"Цена ушла против позиции. Рекомендую закрыть, чтобы не увеличивать убыток."
+        )
+        urgency = "danger"
+    elif hit_tp3:
+        reason = (
+            f"Достигнут TP3 ({fmt(tp3)}).\n"
+            f"Цель полностью отработана. Можно фиксировать всю позицию."
+        )
+        urgency = "success"
+    elif hit_tp2 and not pos.get("notified_tp"):
+        reason = (
+            f"Достигнут TP2 ({fmt(tp2)}).\n"
+            f"Хороший момент частично зафиксировать прибыль (например 50–70%) и перенести стоп в безубыток."
+        )
+        urgency = "success"
+        pos["notified_tp"] = True
+        set_user_open_position(user_id, coin, pos)
+    elif hit_tp1 and not pos.get("notified_tp"):
+        reason = (
+            f"Достигнут TP1 ({fmt(tp1)}).\n"
+            f"Можно закрыть часть позиции и перенести стоп ближе к входу."
+        )
+        urgency = "success"
+        pos["notified_tp"] = True
+        set_user_open_position(user_id, coin, pos)
+
+    if not reason:
+        try:
+            tf_data, _ = await get_market_data_light(coin)
+            tf4 = tf_data.get("4h") or list(tf_data.values())[-1]
+            long_prob = tf4["long_prob"]
+            rsi = tf4["rsi"]
+
+            if side == "LONG" and long_prob < 30 and rsi > 65:
+                reason = (
+                    f"На 4h вероятность лонга упала до {long_prob:.0f}%, RSI {rsi:.0f}.\n"
+                    f"Появились признаки разворота. Лучше зафиксировать текущий результат ({pnl_pct:+.1f}%)."
+                )
+                urgency = "warning"
+            elif side == "SHORT" and long_prob > 70 and rsi < 35:
+                reason = (
+                    f"На 4h вероятность лонга выросла до {long_prob:.0f}%, RSI {rsi:.0f}.\n"
+                    f"Медвежий импульс ослаб. Рекомендую закрыть шорт ({pnl_pct:+.1f}%)."
+                )
+                urgency = "warning"
+        except Exception:
+            pass
+
+    if not reason:
+        pos["last_price"] = price
+        set_user_open_position(user_id, coin, pos)
+        return
+
+    emoji = {"danger": "🛑", "success": "✅", "warning": "⚠️", "info": "ℹ️"}.get(urgency, "ℹ️")
+    text = (
+        f"{emoji} <b>Рекомендация по позиции {coin}</b>\n\n"
+        f"Направление: <b>{side}</b>\n"
+        f"Вход: <code>{fmt(entry)}</code>\n"
+        f"Сейчас: <code>{fmt(price)}</code>\n"
+        f"PnL: <b>{pnl_pct:+.2f}%</b>\n\n"
+        f"<b>Почему сейчас:</b>\n{reason}"
+    )
+
+    try:
+        await bot.send_message(
+            user_id,
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+                [InlineKeyboardButton(text="❌ Закрыл сделку", callback_data=f"pos:close:{coin}")],
+            ])
+        )
+        if urgency in ("danger", "success"):
+            pos["notified_close"] = True
+            set_user_open_position(user_id, coin, pos)
+    except Exception as e:
+        log.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
 
 # ----------------------------------------------------------------------------
@@ -1801,7 +1994,6 @@ async def cb_coin(cb: types.CallbackQuery):
             await send_with_image(cb.message.chat.id, res["text"], res["img"], f"{coin}.png", result_keyboard(coin))
         else:
             await cb.message.answer(res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin), disable_web_page_preview=True)
-        # кэш для быстрого сохранения
         result_cache[uid] = {"coin": coin, "text": res["text"], "ts": time.time()}
     finally:
         busy_users.discard(uid)
@@ -1810,7 +2002,7 @@ async def cb_coin(cb: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("r:"))
 async def cb_refresh(cb: types.CallbackQuery):
     coin = cb.data.split(":")[1]
-    await cb_coin(cb)  # просто повторный анализ
+    await cb_coin(cb)
 
 
 @dp.callback_query(F.data == "last_signals")
@@ -1865,9 +2057,6 @@ async def cb_search(cb: types.CallbackQuery):
 @dp.message(F.text.regexp(r"^[A-Za-z0-9]{2,10}$"))
 async def msg_ticker(message: types.Message):
     coin = normalize_ticker(message.text)
-    if coin not in POPULAR_COINS and coin not in SYMBOL_ALIASES:
-        # всё равно пробуем
-        pass
     uid = message.from_user.id
     if uid in busy_users:
         await message.answer("Уже обрабатываю…")
@@ -1911,7 +2100,6 @@ async def cb_sig_save_page(cb: types.CallbackQuery):
 async def cb_sig_do_save(cb: types.CallbackQuery):
     coin = cb.data.split(":")[2]
     uid = cb.from_user.id
-    # пробуем взять из кэша
     cached = result_cache.get(uid)
     if cached and cached.get("coin") == coin and time.time() - cached.get("ts", 0) < 300:
         text = cached["text"]
@@ -1946,7 +2134,12 @@ async def cb_sig_view(cb: types.CallbackQuery):
     if not item:
         await cb.answer("Не найдено", show_alert=True)
         return
-    await cb.message.answer(item["text"], parse_mode="HTML", reply_markup=result_keyboard(coin), disable_web_page_preview=True)
+    await cb.message.answer(
+        item["text"],
+        parse_mode="HTML",
+        reply_markup=get_saved_signal_view_keyboard(cb.from_user.id, coin),
+        disable_web_page_preview=True
+    )
     await cb.answer()
 
 
@@ -1962,6 +2155,88 @@ async def cb_sig_del(cb: types.CallbackQuery):
     del_user_saved_signal(cb.from_user.id, coin)
     await cb.answer(f"🗑 {coin} удалён")
     await cb.message.edit_text("⭐ <b>Избранные сигналы</b>", reply_markup=get_saved_signals_menu(cb.from_user.id), parse_mode="HTML")
+
+
+# --- ПОЗИЦИИ ---
+@dp.callback_query(F.data.startswith("pos:enter:"))
+async def cb_pos_enter(cb: types.CallbackQuery):
+    coin = cb.data.split(":")[2]
+    uid = cb.from_user.id
+
+    res, err = await analyze_coin(coin, uid)
+    if err:
+        await cb.answer("Не удалось получить актуальные уровни", show_alert=True)
+        return
+
+    data = {
+        "side": res["side"],
+        "entry_price": res["entry"],
+        "entered_at": time.time(),
+        "tp1": res["tps"][0],
+        "tp2": res["tps"][1],
+        "tp3": res["tps"][2],
+        "sl1": res["sls"][0],
+        "sl2": res["sls"][1],
+        "last_price": res["price"],
+        "notified_close": False,
+        "notified_tp": False,
+    }
+    set_user_open_position(uid, coin, data)
+
+    side_emoji = "🟢" if res["side"] == "LONG" else "🔴"
+    await cb.message.answer(
+        f"{side_emoji} <b>Позиция открыта</b>\n\n"
+        f"Монета: <b>{coin}</b>\n"
+        f"Направление: <b>{res['side']}</b>\n"
+        f"Вход: <code>{fmt(res['entry'])}</code>\n\n"
+        f"Я буду следить за позицией и сообщу, когда будет лучше закрыть.",
+        parse_mode="HTML",
+        reply_markup=get_saved_signal_view_keyboard(uid, coin)
+    )
+    await cb.answer("✅ Позиция зафиксирована")
+
+
+@dp.callback_query(F.data.startswith("pos:close:"))
+async def cb_pos_close(cb: types.CallbackQuery):
+    coin = cb.data.split(":")[2]
+    set_user_open_position(cb.from_user.id, coin, None)
+    await cb.answer("❌ Позиция закрыта вручную")
+    await cb.message.edit_reply_markup(reply_markup=get_saved_signal_view_keyboard(cb.from_user.id, coin))
+
+
+@dp.callback_query(F.data.startswith("pos:status:"))
+async def cb_pos_status(cb: types.CallbackQuery):
+    coin = cb.data.split(":")[2]
+    pos = get_open_position(cb.from_user.id, coin)
+    if not pos:
+        await cb.answer("Позиция не найдена", show_alert=True)
+        return
+
+    price = await get_simple_price(coin)
+    if not price:
+        await cb.answer("Не удалось получить цену", show_alert=True)
+        return
+
+    entry = pos["entry_price"]
+    side = pos["side"]
+    if side == "LONG":
+        pnl_pct = (price - entry) / entry * 100
+    else:
+        pnl_pct = (entry - price) / entry * 100
+
+    pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+    text = (
+        f"📈 <b>Статус позиции {coin}</b>\n\n"
+        f"Направление: <b>{side}</b>\n"
+        f"Вход: <code>{fmt(entry)}</code>\n"
+        f"Сейчас: <code>{fmt(price)}</code>\n"
+        f"PnL: {pnl_emoji} <b>{pnl_pct:+.2f}%</b>\n\n"
+        f"TP1: <code>{fmt(pos['tp1'])}</code>\n"
+        f"TP2: <code>{fmt(pos['tp2'])}</code>\n"
+        f"SL1: <code>{fmt(pos['sl1'])}</code>"
+    )
+    await cb.message.answer(text, parse_mode="HTML")
+    await cb.answer()
 
 
 @dp.callback_query(F.data == "ignore")
@@ -1986,10 +2261,10 @@ async def main():
     )
     analysis_sem = asyncio.Semaphore(3)
 
-    # фоновые задачи
     asyncio.create_task(news_watcher())
     asyncio.create_task(scanner_loop())
     asyncio.create_task(daily_stats_loop())
+    asyncio.create_task(position_monitor_loop())
 
     runtime["main_bot"] = "запущен"
     log.info(f"🚀 IXCLY v{VERSION} стартовал. Получателей: {len(active_chats)}")
