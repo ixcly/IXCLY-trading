@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.24
-MongoDB временно отключена (работаем через файл)
+IXCLY Trading bot v2.10.25
++ Рекомендация плеча (X10-X50) и % от баланса
 """
 
 import asyncio
@@ -87,7 +87,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.24"
+VERSION = "2.10.25"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -149,12 +149,11 @@ market_bias = {
 users_col = None
 
 def init_mongo():
-    """MongoDB временно полностью отключена"""
     global users_col
     users_col = None
     log.warning("⚠️ MongoDB отключена. Работаем через файл users.json")
 
-# ====================== ПОЛЬЗОВАТЕЛИ (через файл) ======================
+# ====================== ПОЛЬЗОВАТЕЛИ ======================
 def _load_users():
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -181,12 +180,11 @@ def save_user_data(user_id, username, first_name):
             "joined_at": now,
             "active": True
         }
-        _save_users(users)
     else:
         users[key]["username"] = username
         users[key]["first_name"] = first_name
         users[key]["active"] = True
-        _save_users(users)
+    _save_users(users)
 
 def get_user_saved_signals(user_id):
     return _load_users().get(str(user_id), {}).get("saved_signals", [])
@@ -403,6 +401,25 @@ def fmt(p):
 def make_strength_bar(strength: float, length: int = 10) -> str:
     filled = max(0, min(length, int(round(strength / 100 * length))))
     return "🟩" * filled + "🟥" * (length - filled)
+
+def get_leverage_recommendation(strength: float, sig_type: str) -> tuple:
+    """
+    Возвращает (плечо, % от баланса)
+    """
+    if sig_type == "Быстрый сигнал":
+        if strength >= 80:
+            return "X25–X50", "1–2%"
+        elif strength >= 70:
+            return "X15–X35", "1–2%"
+        else:
+            return "X10–X25", "1–1.5%"
+    else:  # Среднесрок
+        if strength >= 80:
+            return "X15–X30", "1–2%"
+        elif strength >= 70:
+            return "X10–X20", "1–1.5%"
+        else:
+            return "X5–X15", "0.5–1%"
 
 async def first_success(coros, timeout=11):
     tasks = [asyncio.create_task(c) for c in coros]
@@ -827,6 +844,9 @@ async def scan_once(send=True):
         side_emoji = "🟢" if is_long else "🔴"
         side = "LONG" if is_long else "SHORT"
         bar = make_strength_bar(tech["strength"])
+        
+        lev, risk = get_leverage_recommendation(tech["strength"], tech["type"])
+        
         text = (
             f"{side_emoji} <b>{side}  ·  {coin}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -842,6 +862,8 @@ async def scan_once(send=True):
             f"🛡 <b>Стопы</b>\n"
             f"   SL1  <code>{fmt(sls[0])}</code>\n"
             f"   SL2  <code>{fmt(sls[1])}</code>\n\n"
+            f"⚖️ <b>Плечо:</b> {lev}\n"
+            f"💵 <b>Риск:</b> {risk} от депозита\n\n"
             f"🌍 Фон: {html.escape(bias_text)}"
         )
         try:
@@ -980,6 +1002,9 @@ async def analyze_coin(coin, user_id=None):
     side_emoji = "🟢" if is_long else "🔴"
     side = "LONG" if is_long else "SHORT"
     bar = make_strength_bar(strength)
+    
+    lev, risk = get_leverage_recommendation(strength, sig_type)
+    
     text = (
         f"{side_emoji} <b>{side}  ·  {coin}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -995,6 +1020,8 @@ async def analyze_coin(coin, user_id=None):
         f"🛡 <b>Стопы</b>\n"
         f"   SL1  <code>{fmt(sls[0])}</code>\n"
         f"   SL2  <code>{fmt(sls[1])}</code>\n\n"
+        f"⚖️ <b>Плечо:</b> {lev}\n"
+        f"💵 <b>Риск:</b> {risk} от депозита\n\n"
         f"🌍 Фон: {html.escape(market_bias.get('impact', 'Нейтральный'))}"
     )
     try:
@@ -1542,7 +1569,7 @@ async def main():
     asyncio.create_task(position_monitor_loop())
     asyncio.create_task(update_market_bias())
 
-    log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)} | Mongo: отключена")
+    log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)}")
     
     tasks = [dp.start_polling(bot)]
     if admin_bot and admin_dp:
