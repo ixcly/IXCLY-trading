@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.34 - Ensemble ML & Risk Gate Edition
+IXCLY Trading bot v2.10.35 - Auto-cleanup & Ensemble ML
 """
 
 import asyncio
@@ -9,7 +9,7 @@ import io
 import json
 import logging
 import os
-import random  # Добавлено для случайной выборки монет
+import random
 import re
 import signal
 import sys
@@ -123,7 +123,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.34"
+VERSION = "2.10.35"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -183,20 +183,16 @@ current_signals_db = {"Быстрый сигнал": [], "Среднесрок":
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
 market_bias = {
-    "bias": 0,
-    "title_ru": "Нет данных",
-    "summary": "Нет данных",
-    "impact": "Нейтральный фон",
-    "coins": "BTC, ETH, SOL",
-    "published": "",
-    "link": "",
-    "engine": "none",
-    "ts": 0,
+    "bias": 0, "title_ru": "Нет данных", "summary": "Нет данных",
+    "impact": "Нейтральный фон", "coins": "BTC, ETH, SOL",
+    "published": "", "link": "", "engine": "none", "ts": 0,
 }
 last_news_link = None
 users_dirty = False
 last_backup_msg = {}
-last_user_msg = {} 
+
+# База для очистки сообщений
+msg_history = {} # {user_id: [msg_id1, msg_id2, ...]}
 
 next_timers = {"scanner": 0, "positions": 0, "news_watcher": 0, "backup": 0}
 users_col = None
@@ -206,6 +202,36 @@ def init_mongo():
     global users_col
     users_col = None
     log.warning("⚠ MongoDB отключена. Пользователи хранятся в users.json")
+
+
+# ====================== ОЧИСТКА ИСТОРИИ ======================
+def track_msg(user_id, msg):
+    if not msg: return
+    if user_id not in msg_history:
+        msg_history[user_id] = []
+    if msg.message_id not in msg_history[user_id]:
+        msg_history[user_id].append(msg.message_id)
+    # Ограничиваем историю до 50 сообщений, чтобы не забить память
+    if len(msg_history[user_id]) > 50:
+        msg_history[user_id] = msg_history[user_id][-50:]
+
+async def cleanup_loop():
+    """Фоновая задача: раз в 10 минут удаляет все старые сообщения бота, оставляя только последнее."""
+    await asyncio.sleep(60) # Небольшая задержка при старте
+    while True:
+        try:
+            for uid, mids in list(msg_history.items()):
+                if len(mids) > 1:
+                    # Оставляем только самый последний ID
+                    for mid in mids[:-1]:
+                        try:
+                            await bot.delete_message(uid, mid)
+                        except Exception:
+                            pass
+                    msg_history[uid] = [mids[-1]]
+        except Exception as e:
+            log.error(f"cleanup_loop: {e}")
+        await asyncio.sleep(600) # Ждем 10 минут (600 секунд)
 
 
 # ====================== ПОЛЬЗОВАТЕЛИ ======================
@@ -676,19 +702,22 @@ async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_
         if message.photo or message.video or message.document or message.animation:
             await message.delete()
             new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-            if user_id: last_user_msg[user_id] = new_msg
+            if user_id: track_msg(user_id, new_msg)
             return new_msg
         else:
             await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            if user_id: track_msg(user_id, message)
             return message
     except TelegramBadRequest as e:
         err = str(e).lower()
-        if "message is not modified" in err: return message
+        if "message is not modified" in err: 
+            if user_id: track_msg(user_id, message)
+            return message
         if "no text in the message" in err or "there is no text" in err:
             try: await message.delete()
             except Exception: pass
             new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-            if user_id: last_user_msg[user_id] = new_msg
+            if user_id: track_msg(user_id, new_msg)
             return new_msg
         return message
     except Exception: return message
@@ -701,7 +730,6 @@ def add_indicators(df):
     df["ema50"] = c.ewm(span=50, adjust=False).mean()
     df["ema200"] = c.ewm(span=200, adjust=False).mean()
     
-    # 1. Традиционные индикаторы (Слой 1)
     delta = c.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -717,37 +745,22 @@ def add_indicators(df):
     macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     df["macd_hist"] = macd - macd.ewm(span=9, adjust=False).mean()
 
-    # 2. Генерация продвинутых признаков (Слой 2: Feature Engineering)
-    # Z-score (отклонение от среднего)
     std50 = c.rolling(50).std().fillna(1.0)
     df["z_score"] = (c - df["ema50"]) / std50
-    
-    # Моментум (скорость изменения цены)
     df["momentum"] = c.pct_change(10).fillna(0)
-    
-    # Дельта объема (аппроксимация: если свеча бычья, объем идет в покупки, если медвежья - в продажи)
     df["vol_delta"] = (df["close"] - df["open"]) / (df["high"] - df["low"]).replace(0, 0.001) * df["volume"]
-    
-    # Скорость изменения волатильности (Volatility ROC)
     df["vol_roc"] = df["atr"].pct_change(5).fillna(0)
     
     return df
 
 
 def calc_ensemble_confidence(df):
-    """
-    Мета-модель (Stacking). Объединяет старый алгоритм и новые признаки.
-    Возвращает: (confidence_score, long_prob)
-    confidence_score - от 0 до 100 (уверенность в направлении).
-    long_prob - вероятность роста (от 0 до 100).
-    """
     last = df.iloc[-1]
     ema20 = float(last["ema20"])
     ema50 = float(last["ema50"]) or 1e-9
     rsi = float(last["rsi"])
     macd_h = float(last["macd_hist"])
     
-    # --- СТАРЫЙ АЛГОРИТМ (Базовая модель 1) ---
     old_score = 0.0
     diff = abs(ema20 - ema50) / ema50 * 100
     if ema20 > ema50: old_score += 25 + min(18, diff * 10)
@@ -757,38 +770,24 @@ def calc_ensemble_confidence(df):
     old_score += 22 if macd_h > 0 else -22
     long_p_old = max(8.0, min(92.0, 50 + old_score / 2))
     
-    # --- НОВЫЙ АЛГОРИТМ (Базовая модель 2: Микроструктура и Z-Score) ---
     z_s = float(last["z_score"])
     mom = float(last["momentum"])
     v_delta = float(last["vol_delta"])
     v_roc = float(last["vol_roc"])
     
     new_score = 0.0
-    # Z-score: если цена сильно ниже EMA (z < -2), ждем отскок (лонг). Если выше 2 - шорт.
-    if z_s < -2.0: new_score += 40 # Сильный лонг
-    elif z_s > 2.0: new_score -= 40 # Сильный шорт
-    
-    # Моментум
+    if z_s < -2.0: new_score += 40
+    elif z_s > 2.0: new_score -= 40
     if mom > 0.01: new_score += 20
     elif mom < -0.01: new_score -= 20
-    
-    # Дельта объема
     if v_delta > 0: new_score += 15
     elif v_delta < 0: new_score -= 15
-    
-    # Волатильность (если резко растет, направление текущей свечи усиливается)
     if v_roc > 0.5:
         if last["close"] > last["open"]: new_score += 15
         else: new_score -= 15
 
     long_p_new = max(8.0, min(92.0, 50 + new_score / 2))
-
-    # --- МЕТА-МОДЕЛЬ (Stacking) ---
-    # Взвешиваем: 40% старый алгоритм, 60% новый алгоритм (микроструктура)
     final_long_p = (long_p_old * 0.4) + (long_p_new * 0.6)
-    
-    # Confidence Score (насколько модель уверена в текущем тренде)
-    # Если вероятность > 50, уверенность в лонге. Если < 50, уверенность в шорте.
     confidence = max(final_long_p, 100 - final_long_p)
     
     return round(confidence, 1), round(final_long_p, 1)
@@ -861,31 +860,19 @@ async def get_simple_price(coin):
 
 
 def tech_check(tf_data):
-    """Фильтр сигналов. Использует Confidence Score."""
     if "4h" not in tf_data or "1d" not in tf_data: return None
-    
     d4 = tf_data["4h"]
     d1 = tf_data["1d"]
-    
-    # Берем средний Confidence Score между 4h и 1d
     avg_conf = (d4["confidence"] + d1["confidence"]) / 2
     p4, p1 = d4["long_prob"], d1["long_prob"]
-    
-    # Направление определяем по вероятности
     is_long = p4 >= 50
     
-    # Порог уверенности (Confidence Threshold) - 70%
-    if avg_conf < 70:
-        return None
-        
-    # Проверка на согласованность таймфреймов (оба смотрят в одну сторону)
-    if (is_long and p1 < 50) or (not is_long and p1 >= 50):
-        return None
+    if avg_conf < 70: return None
+    if (is_long and p1 < 50) or (not is_long and p1 >= 50): return None
 
     p15 = tf_data.get("15m", {}).get("long_prob", 50)
     p1h = tf_data.get("1h", {}).get("long_prob", 50)
     
-    # Быстрый сигнал, если младшие ТФ подтверждают
     fast = (is_long and p15 >= 60 and p1h >= 57) or (not is_long and p15 <= 40 and p1h <= 43)
     long_term = (is_long and p1 >= 70) or (not is_long and p1 <= 30)
     
@@ -893,29 +880,19 @@ def tech_check(tf_data):
     elif fast: sig_type = "Быстрый сигнал"
     else: sig_type = "Среднесрок"
         
-    return {
-        "ok": True,
-        "is_long": is_long,
-        "strength": round(avg_conf, 1), # Используем уверенность как "силу"
-        "type": sig_type,
-    }
+    return {"ok": True, "is_long": is_long, "strength": round(avg_conf, 1), "type": sig_type}
 
 
 def calc_levels_and_risk(info, is_long):
-    """
-    Risk Gate: расчет уровней и размера позиции.
-    Условный депозит: 1000 USDT. Риск на сделку: 1% (10 USDT).
-    """
     price = info["price"]
     atr = info["atr"] if info["atr"] > 0 else price * 0.012
     
-    # 1. Уровни (от ATR, как требует ТЗ)
     if is_long:
         entry = min(price, max(info["ema20"], info["ema50"]))
         if entry > price - 0.2 * atr: entry = price - 0.35 * atr
-        sl1 = info["recent_low"] - 0.5 * atr # Более безопасный стоп
+        sl1 = info["recent_low"] - 0.5 * atr
         risk_dist = max(entry - sl1, 0.6 * atr)
-        tp1 = entry + risk_dist * 1.5 # RR 1:1.5
+        tp1 = entry + risk_dist * 1.5
         tp2 = entry + risk_dist * 2.5
         tp3 = entry + risk_dist * 4.0
         sl2 = sl1 - 0.7 * atr
@@ -929,14 +906,10 @@ def calc_levels_and_risk(info, is_long):
         tp3 = entry - risk_dist * 4.0
         sl2 = sl1 + 0.7 * atr
 
-    # 2. Position Sizing (Размер позиции)
-    # Формула: (Депозит * Риск%) / Дистанция до стопа
-    # Для удобства показываем размер в USDT для депозита $1000
     account_balance = 1000.0
-    risk_percent = 0.01 # 1%
-    risk_amount = account_balance * risk_percent # $10
+    risk_percent = 0.01
+    risk_amount = account_balance * risk_percent
     
-    # Сколько монет купить, чтобы при стопе потерять ровно $10
     position_size_coins = risk_amount / risk_dist 
     position_size_usdt = position_size_coins * entry
     
@@ -1206,7 +1179,7 @@ async def news_watcher_loop():
 
 
 # ====================== СКАНЕР ======================
-SCAN_INTERVAL = 25 * 60  # 25 минут
+SCAN_INTERVAL = 25 * 60
 SIGNAL_COOLDOWN = 3 * 3600
 signal_sent_at = {}
 scan_skip = {}
@@ -1232,10 +1205,9 @@ async def scan_once(send=True):
             except Exception: pass
 
     await asyncio.gather(*[check(c) for c in POPULAR_COINS])
-    # Сортируем по уверенности
     candidates.sort(key=lambda x: x["tech"]["strength"], reverse=True)
     
-    log.info(f"Сканер: найдено {len(candidates)} сигналов с уверенностью >70% (bias={bias})")
+    log.info(f"Сканер: найдено {len(candidates)} сигналов (bias={bias})")
 
     new_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
     
@@ -1244,7 +1216,6 @@ async def scan_once(send=True):
         info = tf_data["4h"]
         is_long = tech["is_long"]
         
-        # Risk Gate: расчет уровней и размера позиции
         entry, tps, sls, pos_size_usdt, risk_usdt = calc_levels_and_risk(info, is_long)
         
         side_emoji = "🟢" if is_long else "🔴"
@@ -1271,11 +1242,9 @@ async def scan_once(send=True):
         sig_dict = {"coin": coin, "text": text, "is_long": is_long, "entry": entry, "tps": tps, "sls": sls, "type": tech["type"], "strength": tech["strength"], "side": side}
         new_signals_db[tech["type"]].append(sig_dict)
 
-    # Ограничиваем топ-10
     for k in new_signals_db: new_signals_db[k] = new_signals_db[k][:10]
     current_signals_db = new_signals_db
 
-    # Фильтруем для рассылки (кулдаун 3 часа)
     to_broadcast = []
     if send:
         now = time.time()
@@ -1377,12 +1346,17 @@ async def broadcast(payload, only_ids=None):
                 if payload.get("kind") == "photo" and payload.get("data"):
                     photo = BufferedInputFile(payload["data"], filename="image.png")
                     text = payload.get("text", "")
-                    if len(text) <= 1024: await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
+                    if len(text) <= 1024: 
+                        msg = await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
+                        track_msg(cid, msg)
                     else:
-                        await bot.send_photo(cid, photo)
-                        await bot.send_message(cid, text[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
+                        msg_photo = await bot.send_photo(cid, photo)
+                        track_msg(cid, msg_photo)
+                        msg = await bot.send_message(cid, text[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
+                        track_msg(cid, msg)
                 else:
-                    await bot.send_message(cid, payload.get("text", "")[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
+                    msg = await bot.send_message(cid, payload.get("text", "")[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
+                    track_msg(cid, msg)
                 sent += 1
                 break
             except TelegramRetryAfter as e: await asyncio.sleep(e.retry_after + 1)
@@ -1409,14 +1383,12 @@ async def analyze_coin(coin, user_id=None):
     if tech: 
         is_long, strength, sig_type = tech["is_long"], tech["strength"], tech["type"]
     else:
-        # Если не прошли фильтр по уверенности, берем данные 4h для отображения
         d4 = tf_data["4h"]
         is_long = d4["long_prob"] >= 50
         strength = d4["confidence"]
         sig_type = "Нет четкого сигнала (Conf < 70)"
         
     info = tf_data["4h"]
-    # Risk Gate
     entry, tps, sls, pos_size_usdt, risk_usdt = calc_levels_and_risk(info, is_long)
     
     side_emoji = "🟢" if is_long else "🔴"
@@ -1479,7 +1451,8 @@ async def check_position(user_id, coin, pos):
     if not reason: return
     text = f"{'🛑' if urgency == 'danger' else '✅'} <b>Рекомендация по {coin}</b>\n\nНаправление: <b>{side}</b>\nВход: <code>{fmt(entry)}</code>\nСейчас: <code>{fmt(price)}</code>\nPnL: <b>{pnl:+.2f}%</b>\n\n{html.escape(reason)}"
     try:
-        await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")], [InlineKeyboardButton(text="❌ Закрыл", callback_data=f"pos:close:{coin}")]]))
+        msg = await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")], [InlineKeyboardButton(text="❌ Закрыл", callback_data=f"pos:close:{coin}")]]))
+        track_msg(user_id, msg)
         if urgency in ("danger", "success"): pos["notified_close"] = True; set_user_open_position(user_id, coin, pos)
     except Exception: pass
 
@@ -1489,13 +1462,12 @@ async def check_position(user_id, coin, pos):
 async def cmd_start(m: types.Message):
     await asyncio.to_thread(save_user_data, m.from_user.id, m.from_user.username, m.from_user.first_name)
     active_chats.add(m.chat.id)
-    await cleanup_prev_menu(m.from_user.id)
     welcome_text = ("👋 <b>Привет! Добро пожаловать в IXCLY Trading Bot!</b>\n\nЯ твой персональный крипто-помощник.\n\n"
                     "📊 <b>Умный анализ</b> — покажу, куда движется цена.\n📈 <b>Слежение за сделками</b> — нажми «Вошёл в сделку», и я буду следить.\n"
                     "🔥 <b>Готовые сигналы</b> — автоматически ищу перспективные монеты.\n📰 <b>Новости и фон</b> — объясняю простым языком.\n"
                     "⭐ <b>Твоё избранное</b> — сохраняй идеи.\n\n⚠️ <i>Криптовалюта — это рискованно!</i>\n\n👇 Выбери раздел в меню ниже:")
     msg = await m.answer(welcome_text, reply_markup=get_coins_keyboard(), parse_mode="HTML")
-    last_user_msg[m.from_user.id] = msg
+    track_msg(m.from_user.id, msg)
 
 @dp.callback_query(F.data == "menu")
 async def cb_menu(cb: types.CallbackQuery):
@@ -1519,9 +1491,11 @@ async def cb_coin(cb: types.CallbackQuery):
         res, err = await analyze_coin(coin)
         if err: await safe_edit(cb.message, err, user_id=uid); return
         await cb.message.delete()
-        if res["img"]: msg = await cb.message.answer_photo(BufferedInputFile(res["img"], f"{coin}.png"), caption=res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin))
-        else: msg = await cb.message.answer(res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin), disable_web_page_preview=True)
-        last_user_msg[uid] = msg
+        if res["img"]: 
+            msg = await cb.message.answer_photo(BufferedInputFile(res["img"], f"{coin}.png"), caption=res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin))
+        else: 
+            msg = await cb.message.answer(res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin), disable_web_page_preview=True)
+        track_msg(uid, msg)
         result_cache[uid] = {**res, "coin": coin, "text": res["text"], "ts": time.time()}
     finally: busy_users.discard(uid)
 
@@ -1540,12 +1514,15 @@ async def cb_news_menu(cb: types.CallbackQuery):
         img = await download_bytes(img_url) if img_url else None
         await cb.message.delete()
         if img:
-            if len(text) <= 1024: msg = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"), caption=text, parse_mode="HTML", reply_markup=MENU_KB)
+            if len(text) <= 1024: 
+                msg = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"), caption=text, parse_mode="HTML", reply_markup=MENU_KB)
             else:
-                await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"))
+                msg_photo = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"))
+                track_msg(uid, msg_photo)
                 msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
-        else: msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
-        last_user_msg[uid] = msg
+        else: 
+            msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
+        track_msg(uid, msg)
     except Exception as e:
         log.error(f"news error: {e}")
         await safe_edit(cb.message, "Ошибка при загрузке новости.", reply_markup=MENU_KB, user_id=uid)
@@ -1613,22 +1590,18 @@ async def cb_interesting(cb: types.CallbackQuery):
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=9)
         movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
         
-        # Разделяем на чистых лидеров роста и падения
         gainers = [x for x in movers if float(x["priceChangePercent"]) > 0]
         losers = [x for x in movers if float(x["priceChangePercent"]) < 0]
         
         gainers.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
-        losers.sort(key=lambda x: float(x["priceChangePercent"])) # Самые сильные падения в начале
+        losers.sort(key=lambda x: float(x["priceChangePercent"]))
         
-        # Берем топ-15 в качестве пула для случайной выборки
         top_gainers_pool = gainers[:15]
         top_losers_pool = losers[:15]
         
-        # Выбираем 5 случайных монет из пула (при каждом запросе они будут разными)
         random_gainers = random.sample(top_gainers_pool, min(5, len(top_gainers_pool)))
         random_losers = random.sample(top_losers_pool, min(5, len(top_losers_pool)))
         
-        # Сортируем выбранные 5, чтобы они шли по убыванию/возрастанию
         random_gainers.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
         random_losers.sort(key=lambda x: float(x["priceChangePercent"]))
 
@@ -1655,13 +1628,17 @@ async def msg_ticker(m: types.Message):
     coin, uid = normalize_ticker(m.text), m.from_user.id
     if uid in busy_users: return
     busy_users.add(uid)
-    await cleanup_prev_menu(uid)
     try:
         res, err = await analyze_coin(coin)
-        if err: msg = await m.answer(err, parse_mode="HTML"); last_user_msg[uid] = msg; return
-        if res["img"]: msg = await m.answer_photo(BufferedInputFile(res["img"], f"{coin}.png"), caption=res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin))
-        else: msg = await m.answer(res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin), disable_web_page_preview=True)
-        last_user_msg[uid] = msg
+        if err: 
+            msg = await m.answer(err, parse_mode="HTML")
+            track_msg(uid, msg)
+            return
+        if res["img"]: 
+            msg = await m.answer_photo(BufferedInputFile(res["img"], f"{coin}.png"), caption=res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin))
+        else: 
+            msg = await m.answer(res["text"], parse_mode="HTML", reply_markup=result_keyboard(coin), disable_web_page_preview=True)
+        track_msg(uid, msg)
         result_cache[uid] = {**res, "coin": coin, "text": res["text"], "ts": time.time()}
     finally: busy_users.discard(uid)
 
@@ -1935,6 +1912,7 @@ async def main():
             asyncio.create_task(news_watcher_loop()),
             asyncio.create_task(backup_loop()),
             asyncio.create_task(update_market_bias()),
+            asyncio.create_task(cleanup_loop()), # <- ЗАПУСК ОЧИСТКИ СООБЩЕНИЙ
         ]
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
