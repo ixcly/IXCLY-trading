@@ -712,7 +712,6 @@ async def cleanup_prev_menu(user_id):
         await safe_delete(old)
 
 async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_mode="HTML", user_id=None):
-    """Редактирует сообщение. Если фото — удаляет и отправляет новое текстовое."""
     try:
         if message.photo or message.video or message.document or message.animation:
             await message.delete()
@@ -1204,15 +1203,11 @@ async def scan_once(send=True):
 
     await asyncio.gather(*[check(c) for c in POPULAR_COINS])
     candidates.sort(key=lambda x: x["tech"]["strength"], reverse=True)
-
-    if send and SIGNAL_COOLDOWN:
-        now = time.time()
-        candidates = [c for c in candidates if now - signal_sent_at.get(f"{c['coin']}:{'L' if c['tech']['is_long'] else 'S'}", 0) >= SIGNAL_COOLDOWN]
     
-    signals = []
-    hist = _load_signal_history()
-    new_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
+    log.info(f"Сканер: найдено {len(candidates)} подходящих сигналов (bias={bias})")
 
+    # 1. Сохраняем ВСЕ текущие сигналы в БД (без учета кулдауна)
+    new_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
     for cand in candidates:
         coin, tech, tf_data = cand["coin"], cand["tech"], cand["tf_data"]
         info = tf_data["4h"]
@@ -1226,16 +1221,35 @@ async def scan_once(send=True):
                 f"💰 Цена: <code>{fmt(info['price'])}</code>\n📥 Вход: <code>{fmt(entry)}</code>\n\n🎯 <b>Тейки</b>\n   TP1  <code>{fmt(tps[0])}</code>\n   TP2  <code>{fmt(tps[1])}</code>\n   TP3  <code>{fmt(tps[2])}</code>\n\n"
                 f"🛡 <b>Стопы</b>\n   SL1  <code>{fmt(sls[0])}</code>\n   SL2  <code>{fmt(sls[1])}</code>\n\n⚖ <b>Плечо:</b> {lev}\n💵 <b>Риск:</b> {risk} от депозита\n\n🌍 Фон: {html.escape(bias_text)}")
         sig_dict = {"coin": coin, "text": text, "is_long": is_long, "entry": entry, "tps": tps, "sls": sls, "type": tech["type"], "strength": tech["strength"], "side": side}
-        signals.append(sig_dict)
         new_signals_db[tech["type"]].append(sig_dict)
 
+    # Ограничиваем топ-10
+    for k in new_signals_db: new_signals_db[k] = new_signals_db[k][:10]
     current_signals_db = new_signals_db
 
-    if signals and send:
+    # 2. Фильтруем для рассылки (кулдаун 3 часа)
+    to_broadcast = []
+    if send:
         now = time.time()
-        for s in signals:
-            signal_sent_at[f"{s['coin']}:{'L' if s['is_long'] else 'S'}"] = now
-            hist.append({"ts": now, "coin": s["coin"], "side": s["side"], "type": s["type"], "strength": s["strength"], "text": s["text"]})
+        for cand in candidates:
+            key = f"{cand['coin']}:{'L' if cand['tech']['is_long'] else 'S'}"
+            if now - signal_sent_at.get(key, 0) >= SIGNAL_COOLDOWN:
+                to_broadcast.append(cand)
+                
+    to_broadcast = to_broadcast[:4] # Максимум 4 штуки в одном сообщении
+
+    if to_broadcast and send:
+        now = time.time()
+        hist = _load_signal_history()
+        for cand in to_broadcast:
+            key = f"{cand['coin']}:{'L' if cand['tech']['is_long'] else 'S'}"
+            signal_sent_at[key] = now
+            
+            # Ищем полный текст для сохранения в историю
+            for s in new_signals_db[cand['tech']['type']]:
+                if s['coin'] == cand['coin']:
+                    hist.append({"ts": now, "coin": s["coin"], "side": s["side"], "type": s["type"], "strength": s["strength"], "text": s["text"]})
+                    break
         _save_signal_history(hist)
 
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
@@ -1249,8 +1263,8 @@ async def scan_once(send=True):
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
         await broadcast({"kind": "text", "text": text, "markup": markup})
-        stats["signals"] += len(signals)
-    return signals
+        stats["signals"] += len(to_broadcast)
+    return to_broadcast
 
 async def scanner_loop():
     await asyncio.sleep(60)
@@ -1490,7 +1504,14 @@ async def cb_last(cb: types.CallbackQuery):
 async def cb_sig_list(cb: types.CallbackQuery):
     category = cb.data.split(":")[1]
     sigs = current_signals_db.get(category, [])[:10]
-    if not sigs: await safe_answer(cb, f"Нет сигналов в '{category}'", True); return
+    
+    if not sigs:
+        text = f"📋 <b>Сигналы: {category}</b>\n\n<i>В данный момент сигналов в этой категории нет. Рынок находится в нейтральной зоне или новостной фон блокирует входы.</i>"
+        kb = [[InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")]]
+        await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
+        await safe_answer(cb, "Пусто", False)
+        return
+
     text = f"📋 <b>Сигналы: {category}</b>\n\n"
     kb = []
     for s in sigs:
@@ -1805,7 +1826,6 @@ async def main():
         try:
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot: await admin_bot.delete_webhook(drop_pending_updates=True)
-            # Удаляем стандартные команды, чтобы убрать кнопку меню
             await bot.delete_my_commands()
         except Exception: pass
 
