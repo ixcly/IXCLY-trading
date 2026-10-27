@@ -1896,7 +1896,7 @@ async def cb_interesting(cb: types.CallbackQuery):
         text += "\n🔴 Топ падения:\n"
         for x in movers[-4:]:
             text += f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%\n"
-        msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=get_coins_keyboard())
+        msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB)
         last_user_msg[cb.from_user.id] = msg
     except Exception:
         msg = await cb.message.answer("Не удалось получить данные", reply_markup=MENU_KB)
