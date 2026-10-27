@@ -190,6 +190,7 @@ active_chats = set()
 busy_users = set()
 result_cache = {}
 last_signals_data = {"text": "", "kb": None, "ts": 0}
+current_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
 market_bias = {
@@ -884,16 +885,28 @@ def tech_check(tf_data):
         strength = ((100 - p4) + (100 - p1)) / 2
     else:
         return None
+    
     if strength < 63:
         return None
+    
     p15 = tf_data.get("15m", {}).get("long_prob", 50)
     p1h = tf_data.get("1h", {}).get("long_prob", 50)
+    
     fast = (is_long and p15 >= 60 and p1h >= 57) or (not is_long and p15 <= 40 and p1h <= 43)
+    long_term = (is_long and p1 >= 70) or (not is_long and p1 <= 30)
+    
+    if long_term and not fast:
+        sig_type = "Долгосрок"
+    elif fast:
+        sig_type = "Быстрый сигнал"
+    else:
+        sig_type = "Среднесрок"
+        
     return {
         "ok": True,
         "is_long": is_long,
         "strength": round(strength, 1),
-        "type": "Быстрый сигнал" if fast else "Среднесрок",
+        "type": sig_type,
     }
 
 
@@ -1380,7 +1393,7 @@ scan_skip = {}
 
 
 async def scan_once(send=True):
-    global last_signals_data
+    global last_signals_data, current_signals_db
     if time.time() - market_bias["ts"] > 900:
         await update_market_bias()
     bias = market_bias["bias"] if time.time() - market_bias["ts"] < 3 * 3600 else 0
@@ -1414,10 +1427,11 @@ async def scan_once(send=True):
         now = time.time()
         candidates = [c for c in candidates
                       if now - signal_sent_at.get(f"{c['coin']}:{'L' if c['tech']['is_long'] else 'S'}", 0) >= SIGNAL_COOLDOWN]
-    candidates = candidates[:4]
-
+    
+    # Собираем сигналы и распределяем по категориям
     signals = []
     hist = _load_signal_history()
+    new_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
 
     for cand in candidates:
         coin = cand["coin"]
@@ -1449,10 +1463,14 @@ async def scan_once(send=True):
             f"💵 <b>Риск:</b> {risk} от депозита\n\n"
             f"🌍 Фон: {html.escape(bias_text)}"
         )
-        signals.append({
+        sig_dict = {
             "coin": coin, "text": text, "is_long": is_long, "entry": entry, "tps": tps, "sls": sls,
             "type": tech["type"], "strength": tech["strength"], "side": side,
-        })
+        }
+        signals.append(sig_dict)
+        new_signals_db[tech["type"]].append(sig_dict)
+
+    current_signals_db = new_signals_db
 
     if signals and send:
         now = time.time()
@@ -1463,15 +1481,18 @@ async def scan_once(send=True):
         _save_signal_history(hist)
 
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
-        lines = [f"🔥 <b>Сигналы</b> · {msk_now} МСК\n"]
-        kb = []
-        for s in signals:
-            emoji = "🟢" if s["is_long"] else "🔴"
-            lines.append(f"{emoji} <b>{s['coin']}</b> · {s['type']} · {s['strength']}%")
-            kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
-        lines.append(f"\n🌍 {html.escape(bias_text)}")
-        text = "\n".join(lines)
-        kb.append([InlineKeyboardButton(text="🏠 Меню", callback_data="menu")])
+        text = (
+            f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n"
+            f"📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\n"
+            f"Выберите категорию для просмотра до 10 лучших сигналов:"
+        )
+        
+        kb = [
+            [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
+            [InlineKeyboardButton(text=f"⏳ Среднесрок ({len(current_signals_db['Среднесрок'])})", callback_data="sig_list:Среднесрок")],
+            [InlineKeyboardButton(text=f"🛡 Долгосрок ({len(current_signals_db['Долгосрок'])})", callback_data="sig_list:Долгосрок")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
+        ]
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
         await broadcast({"kind": "text", "text": text, "markup": markup})
@@ -1856,21 +1877,45 @@ async def cb_news_menu(cb: types.CallbackQuery):
 async def cb_last(cb: types.CallbackQuery):
     await cleanup_prev_menu(cb.from_user.id)
     await safe_delete(cb.message)
+    
     if last_signals_data.get("text") and time.time() - last_signals_data.get("ts", 0) < 3600:
         msg = await cb.message.answer(last_signals_data["text"], parse_mode="HTML", reply_markup=last_signals_data.get("kb"))
         last_user_msg[cb.from_user.id] = msg
     else:
-        hist = _load_signal_history()
-        if not hist:
-            msg = await cb.message.answer("📭 Свежих сигналов нет", reply_markup=MENU_KB)
-            last_user_msg[cb.from_user.id] = msg
-        else:
-            text = "📜 <b>История за 24ч</b>\n\n"
-            for h in hist[-8:][::-1]:
-                emoji = "🟢" if h.get("side") == "LONG" else "🔴"
-                text += f"{emoji} <b>{h['coin']}</b> · {h.get('type', '')} · {h.get('strength', 0)}%\n"
-            msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB)
-            last_user_msg[cb.from_user.id] = msg
+        text = (
+            f"🔥 <b>Сигналы</b>\n\n"
+            f"📊 <b>Кратко о рынке:</b>\n{html.escape(market_bias.get('impact', 'Нейтральный фон'))}\n\n"
+            f"Выберите категорию для просмотра до 10 лучших сигналов:"
+        )
+        kb = [
+            [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
+            [InlineKeyboardButton(text=f"⏳ Среднесрок ({len(current_signals_db['Среднесрок'])})", callback_data="sig_list:Среднесрок")],
+            [InlineKeyboardButton(text=f"🛡 Долгосрок ({len(current_signals_db['Долгосрок'])})", callback_data="sig_list:Долгосрок")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
+        ]
+        msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        last_user_msg[cb.from_user.id] = msg
+    await safe_answer(cb)
+
+
+@dp.callback_query(F.data.startswith("sig_list:"))
+async def cb_sig_list(cb: types.CallbackQuery):
+    category = cb.data.split(":")[1]
+    sigs = current_signals_db.get(category, [])[:10]
+
+    if not sigs:
+        await safe_answer(cb, f"Нет активных сигналов в категории '{category}'", True)
+        return
+
+    text = f"📋 <b>Сигналы: {category}</b>\n\n"
+    kb = []
+    for s in sigs:
+        emoji = "🟢" if s["is_long"] else "🔴"
+        text += f"{emoji} <b>{s['coin']}</b> · Сила: {s['strength']}%\n"
+        kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
+
+    kb.append([InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")])
+    await cb.message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await safe_answer(cb)
 
 
@@ -2248,172 +2293,3 @@ if admin_dp:
                 raise ValueError("ожидался JSON-объект {id: данные}")
             current = _load_users()
             added = 0
-            for k, v in data.items():
-                if k not in current and isinstance(v, dict):
-                    current[k] = v
-                    added += 1
-            _save_users(current)
-            load_active_chats()
-            await m.answer(f"✅ Восстановлено: добавлено {added}, всего {len(current)}, получателей {len(active_chats)}")
-        except Exception as e:
-            await m.answer(f"Ошибка: {html.escape(str(e))}", parse_mode="HTML")
-
-
-# ====================== MAIN ======================
-async def run_polling(dispatcher, tg_bot, name, stop_event):
-    attempt = 0
-    while not stop_event.is_set():
-        try:
-            attempt += 1
-            log.info(f"{name}: запуск поллинга (попытка {attempt})")
-            try:
-                await tg_bot.delete_webhook(drop_pending_updates=True)
-            except Exception as e:
-                log.debug(f"{name}: не удалось удалить вебхук: {e}")
-            
-            await dispatcher.start_polling(
-                tg_bot,
-                handle_signals=False,
-                close_bot_session=False,
-                polling_timeout=30,
-            )
-            
-            if not stop_event.is_set():
-                log.warning(f"{name}: start_polling завершился неожиданно. Перезапуск через 5 сек...")
-                await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            raise
-        except TelegramNetworkError as e:
-            log.warning(f"{name}: сетевая ошибка Telegram (попытка {attempt}): {e}")
-            try:
-                await tg_bot.session.close()
-            except Exception:
-                pass
-            delay = min(2 ** attempt, 30)
-            log.info(f"{name}: ожидание {delay} с перед перезапуском")
-            await asyncio.sleep(delay)
-        except TelegramConflictError as e:
-            log.warning(f"{name}: конфликт getUpdates (попытка {attempt}): {e}")
-            try:
-                await tg_bot.session.close()
-            except Exception:
-                pass
-            delay = min(2 ** attempt, 60)
-            log.info(f"{name}: ожидание {delay} с перед повторной попыткой")
-            await asyncio.sleep(delay)
-        except Exception as e:
-            log.error(f"{name}: поллинг упал: {e}. Перезапуск через 5 сек")
-            await asyncio.sleep(5)
-
-
-async def main():
-    global http, news_lock
-    keep_alive()
-    news_lock = asyncio.Lock()
-    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/2.10"})
-    init_mongo()
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:
-            pass
-
-    background = []
-    pollers = []
-    try:
-        try:
-            me = await bot.get_me()
-            runtime["main_bot"] = f"@{me.username}"
-            log.info(f"Основной бот: @{me.username}")
-        except Exception as e:
-            runtime["main_bot"] = f"ошибка: {e}"
-            log.error(f"get_me основного бота: {e} (проверьте BOT_TOKEN)")
-        if admin_bot:
-            try:
-                me = await admin_bot.get_me()
-                runtime["admin_bot"] = f"@{me.username}"
-                log.info(f"Админ-бот: @{me.username}")
-            except Exception as e:
-                runtime["admin_bot"] = f"ошибка: {e}"
-                log.error(f"get_me админ-бота: {e} (проверьте INPUT_BOT_TOKEN)")
-
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            if admin_bot:
-                await admin_bot.delete_webhook(drop_pending_updates=True)
-        except Exception as e:
-            log.warning(f"Не удалось удалить вебхук при старте: {e}")
-
-        try:
-            await bot.set_my_commands([
-                types.BotCommand(command="menu", description="🚀 Меню"),
-                types.BotCommand(command="news", description="📰 Последняя новость"),
-            ])
-        except Exception:
-            pass
-
-        if POLL_START_DELAY > 0:
-            log.info(f"Жду {POLL_START_DELAY} с, пока остановится предыдущий экземпляр (деплой Render)…")
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
-            except asyncio.TimeoutError:
-                pass
-        if stop.is_set():
-            return
-
-        restored = await telegram_restore()
-        if restored:
-            log.info(f"✅ База синхронизирована из бэкапа в Telegram: {restored} пользователей")
-        else:
-            log.warning("База пуста или бэкап не найден (нажмите /start в админ-боте, затем «💾 Бэкап»)")
-        
-        load_active_chats()
-
-        background += [
-            asyncio.create_task(scanner_loop()),
-            asyncio.create_task(position_monitor_loop()),
-            asyncio.create_task(news_watcher_loop()),
-            asyncio.create_task(backup_loop()),
-            asyncio.create_task(update_market_bias()),
-        ]
-
-        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
-        if admin_bot and admin_dp:
-            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
-
-        log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)}")
-        waiter = asyncio.create_task(stop.wait())
-        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
-        log.warning("Получен сигнал остановки, завершаюсь…")
-        waiter.cancel()
-    finally:
-        for t in pollers:
-            t.cancel()
-        await asyncio.gather(*pollers, return_exceptions=True)
-        try:
-            await asyncio.wait_for(telegram_backup("перед остановкой"), timeout=12)
-        except Exception as e:
-            log.info(f"Бэкап перед остановкой не отправлен: {e}")
-        for t in background:
-            t.cancel()
-        await asyncio.gather(*background, return_exceptions=True)
-        try:
-            await bot.session.close()
-        except Exception:
-            pass
-        if admin_bot:
-            try:
-                await admin_bot.session.close()
-            except Exception:
-                pass
-        await http.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Остановлен")
