@@ -9,6 +9,7 @@ IXCLY Trading bot v2.10.11
 - ИНТЕРЕСНЫЕ ГРАФИКИ: топ-4 роста и падения за 24 часа с ожидаемым сценарием
 - ВОЗВРАЩЕН daily_stats_loop (ежедневная статистика в 00:00)
 - МОНИТОРИНГ ОТКРЫТЫХ ПОЗИЦИЙ: кнопка «Вошёл в сделку» + уведомления когда лучше закрыть
+- ПОЛНАЯ АДМИН-ПАНЕЛЬ (/panel)
 """
 import asyncio
 import html
@@ -31,7 +32,7 @@ import pandas as pd
 import pymongo
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 from flask import Flask, jsonify
 from PIL import Image, ImageDraw, ImageFont
@@ -339,7 +340,6 @@ def get_user_open_positions(user_id):
 
 
 def set_user_open_position(user_id, coin, data):
-    """data = dict или None (чтобы удалить)"""
     key = str(user_id)
     if users_col is not None:
         try:
@@ -579,6 +579,35 @@ def get_saved_signal_view_keyboard(user_id, coin):
         buttons.append([InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад к избранному", callback_data="sig:menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_admin_keyboard():
+    news_status = "ВКЛ" if bot_flags["news_enabled"] else "ВЫКЛ"
+    scan_status = "ВКЛ" if bot_flags["alerts_enabled"] else "ВЫКЛ"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
+        ],
+        [
+            InlineKeyboardButton(text="📰 Новость сейчас", callback_data="admin:news_now"),
+            InlineKeyboardButton(text=f"🔔 Новости: {news_status}", callback_data="admin:toggle_news"),
+        ],
+        [
+            InlineKeyboardButton(text=f"🚨 Сканер: {scan_status}", callback_data="admin:toggle_scan"),
+            InlineKeyboardButton(text="🔍 Скан-тест", callback_data="admin:scan_test"),
+        ],
+        [
+            InlineKeyboardButton(text="⚡ Рассылка: сразу", callback_data="admin:broadcast_now"),
+        ],
+        [
+            InlineKeyboardButton(text="🔧 Диагностика", callback_data="admin:diag"),
+            InlineKeyboardButton(text="💾 Бэкап", callback_data="admin:backup"),
+        ],
+        [
+            InlineKeyboardButton(text="📥 Восстановить базу", callback_data="admin:restore"),
+        ],
+    ])
 
 
 # ----------------------------------------------------------------------------
@@ -1959,6 +1988,21 @@ async def cmd_stats(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
+@dp.message(Command("panel"))
+async def cmd_panel(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("⛔ Доступ запрещён")
+        return
+    total, active, _, _ = user_counts()
+    text = (
+        f"✅ <b>Бот запущен (v{VERSION})</b>\n"
+        f"Пользователей: {total} (активных {active})\n"
+    )
+    if total == 0:
+        text += "\n⚠️ База пуста. Восстановите из бэкапа."
+    await message.answer(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
+
+
 @dp.callback_query(F.data == "menu")
 async def cb_menu(cb: types.CallbackQuery):
     await cb.message.edit_text(
@@ -2237,6 +2281,164 @@ async def cb_pos_status(cb: types.CallbackQuery):
     )
     await cb.message.answer(text, parse_mode="HTML")
     await cb.answer()
+
+
+# --- АДМИН-ПАНЕЛЬ ---
+@dp.callback_query(F.data.startswith("admin:"))
+async def cb_admin(cb: types.CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS:
+        await cb.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    action = cb.data.split(":")[1]
+
+    if action == "stats":
+        total, active, new_t, new_w = user_counts()
+        uptime = int(time.time() - stats["started"])
+        text = (
+            f"📊 <b>Статистика бота</b>\n\n"
+            f"Версия: <code>{VERSION}</code>\n"
+            f"Пользователей: <b>{total}</b> (активных {active})\n"
+            f"Новых сегодня: {new_t} | за неделю: {new_w}\n"
+            f"Сигналов отправлено: {stats['signals']}\n"
+            f"Новостей: {stats['news_sent']}\n"
+            f"Алертов: {stats['alerts_sent']}\n"
+            f"Рассылок: {stats['broadcasts']}\n"
+            f"Аптайм: {uptime // 3600}ч {(uptime % 3600) // 60}м\n"
+            f"MongoDB: {'✅ подключена' if users_col else '❌ файл'}\n"
+            f"Новости: {'🟢 ВКЛ' if bot_flags['news_enabled'] else '🔴 ВЫКЛ'}\n"
+            f"Сканер: {'🟢 ВКЛ' if bot_flags['alerts_enabled'] else '🔴 ВЫКЛ'}"
+        )
+        await cb.message.answer(text, parse_mode="HTML")
+        await cb.answer()
+
+    elif action == "users":
+        users = _load_users()
+        lines = [f"👥 <b>Пользователи ({len(users)})</b>\n"]
+        for uid, u in list(users.items())[:40]:
+            name = u.get("first_name") or u.get("username") or "—"
+            active = "✅" if u.get("active", True) else "❌"
+            lines.append(f"{active} <code>{uid}</code> — {html.escape(str(name)[:20])}")
+        if len(users) > 40:
+            lines.append(f"\n… и ещё {len(users) - 40}")
+        await cb.message.answer("\n".join(lines), parse_mode="HTML")
+        await cb.answer()
+
+    elif action == "toggle_news":
+        bot_flags["news_enabled"] = not bot_flags["news_enabled"]
+        status = "ВКЛ" if bot_flags["news_enabled"] else "ВЫКЛ"
+        await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+        await cb.answer(f"Новости: {status}")
+
+    elif action == "toggle_scan":
+        bot_flags["alerts_enabled"] = not bot_flags["alerts_enabled"]
+        status = "ВКЛ" if bot_flags["alerts_enabled"] else "ВЫКЛ"
+        await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+        await cb.answer(f"Сканер: {status}")
+
+    elif action == "news_now":
+        await cb.answer("Отправляю новость…")
+        try:
+            entries = await get_news_entries()
+            if not entries:
+                await cb.message.answer("Нет свежих новостей")
+                return
+            text, image_url, ok = await fetch_and_analyze_news(entries[0])
+            if ok:
+                img = await download_bytes(image_url) if image_url else None
+                payload = {"kind": "photo" if img else "text", "text": text, "data": img, "filename": "news.jpg"}
+                sent, failed, removed, _ = await broadcast(payload)
+                await cb.message.answer(f"✅ Новость отправлена: {sent} доставлено, {failed} ошибок")
+            else:
+                await cb.message.answer("Не удалось проанализировать новость")
+        except Exception as e:
+            await cb.message.answer(f"Ошибка: {e}")
+
+    elif action == "scan_test":
+        await cb.answer("Запускаю тестовый скан…")
+        try:
+            signals = await scan_once(send=True)
+            await cb.message.answer(f"✅ Скан завершён. Найдено сигналов: {len(signals)}")
+        except Exception as e:
+            await cb.message.answer(f"Ошибка скана: {e}")
+
+    elif action == "broadcast_now":
+        if last_signals_data.get("text"):
+            payload = {"kind": "text", "text": last_signals_data["text"], "markup": last_signals_data.get("kb")}
+            sent, failed, removed, _ = await broadcast(payload)
+            await cb.message.answer(f"✅ Рассылка последних сигналов: {sent} доставлено")
+        else:
+            await cb.message.answer("Нет сохранённых сигналов для рассылки")
+        await cb.answer()
+
+    elif action == "diag":
+        text = (
+            f"🔧 <b>Диагностика</b>\n\n"
+            f"Версия: {VERSION}\n"
+            f"MongoDB: {'✅' if users_col else '❌ файл'}\n"
+            f"Активных чатов: {len(active_chats)}\n"
+            f"Gemini ключей: {len(GEMINI_API_KEYS)}\n"
+            f"Groq: {'✅' if GROQ_API_KEY else '❌'}\n"
+            f"OpenRouter: {'✅' if OPENROUTER_API_KEY else '❌'}\n"
+            f"CryptoCompare: {'✅' if CRYPTOCOMPARE_KEY else '❌'}\n"
+            f"Новости: {bot_flags['news_enabled']}\n"
+            f"Сканер: {bot_flags['alerts_enabled']}\n"
+            f"RSS peak: {_rss_mb()} MB"
+        )
+        await cb.message.answer(text, parse_mode="HTML")
+        await cb.answer()
+
+    elif action == "backup":
+        users = _load_users()
+        data = json.dumps(users, ensure_ascii=False, indent=2)
+        file = BufferedInputFile(data.encode("utf-8"), filename="users.json")
+        await cb.message.answer_document(
+            file,
+            caption=f"💾 Бэкап базы\nПользователей: {len(users)}"
+        )
+        await cb.answer("Бэкап отправлен")
+
+    elif action == "restore":
+        await cb.message.answer(
+            "📥 <b>Восстановление базы</b>\n\n"
+            "Пришли файл <code>users.json</code> (тот, который скачал через «Бэкап»).\n"
+            "Я полностью заменю текущую базу на содержимое файла.",
+            parse_mode="HTML"
+        )
+        await cb.answer()
+
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    doc = message.document
+    if not doc.file_name or not doc.file_name.endswith(".json"):
+        await message.answer("Нужен файл .json (users.json)")
+        return
+
+    try:
+        file = await bot.get_file(doc.file_id)
+        content = await bot.download_file(file.file_path)
+        data = json.loads(content.read().decode("utf-8"))
+
+        if not isinstance(data, dict):
+            await message.answer("Неверный формат файла")
+            return
+
+        # Полностью перезаписываем
+        if users_col is not None:
+            users_col.delete_many({})
+            for uid, udata in data.items():
+                users_col.update_one({"_id": str(uid)}, {"$set": udata}, upsert=True)
+        else:
+            with open(USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+
+        load_active_chats()
+        await message.answer(f"✅ База восстановлена!\nПользователей: {len(data)}\nАктивных чатов: {len(active_chats)}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка восстановления: {e}")
 
 
 @dp.callback_query(F.data == "ignore")
