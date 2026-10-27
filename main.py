@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.0
+IXCLY Trading bot v2.10.1
 - MongoDB для пользователей (не теряются при перезапуске Render)
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
 - Учёт макро-новостей (ФРС, ставки) в решениях ИИ
 - Админ-панель во втором боте (рассылка, статистика, диагностика, бэкап)
-- ВОССТАНОВЛЕН конец файла: main() и запуск (без них приложение сразу завершалось)
+- Оптимизация памяти (исправление падения на Render), /health и супервизор
 """
 import asyncio
 import html
@@ -47,9 +47,24 @@ def home():
     return "Bot is alive!"
 
 
+@app.route("/health")
+def health():
+    return "ok"
+
+
+def _rss_mb():
+    """Пиковая память процесса (МБ). На бесплатном Render лимит 512 МБ."""
+    try:
+        import resource
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
+    except Exception:
+        return None
+
+
 @app.route("/status")
 def status_page():
     return jsonify({
+        "peak_rss_mb": _rss_mb(),
         "version": VERSION,
         "uptime_s": int(time.time() - stats["started"]),
         "main_bot": runtime["main_bot"],
@@ -64,10 +79,17 @@ def status_page():
 
 def _run_web():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threaded=True, use_reloader=False)
+
+
+_web_started = False
 
 
 def keep_alive():
+    global _web_started
+    if _web_started:
+        return
+    _web_started = True
     Thread(target=_run_web, daemon=True).start()
 
 
@@ -103,7 +125,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.0"
+VERSION = "2.10.1"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -174,7 +196,7 @@ def init_mongo():
     global users_col
     if MONGO_URI:
         try:
-            client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=8000)
             db = client.get_database("ixcly_db")
             col = db["users"]
             client.server_info()  # проверка подключения
@@ -1279,7 +1301,7 @@ async def scan_once(send=True):
     world_block = "\n".join(f"- {t}" for t in world_titles) or "- Нет мировых новостей"
     crypto_block = "\n".join(f"- {t}" for t in crypto_titles) or "- Нет крипто-новостей"
 
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(2)  # Снижено с 5 до 2 для экономии памяти и CPU
     failed, local_candidates = [], []
 
     async def fetch_one(coin):
@@ -1290,7 +1312,7 @@ async def scan_once(send=True):
                 if t["ok"]:
                     local_candidates.append({
                         "coin": coin,
-                        "tf_data": tf_data,
+                        # "tf_data": tf_data,  # УБРАНО для экономии памяти (сканирование не строит график)
                         "source": source,
                         "tech": t
                     })
@@ -1432,7 +1454,7 @@ def scan_report(r):
 
 async def alert_loop():
     _load_alert_history()
-    await asyncio.sleep(60)
+    await asyncio.sleep(180)  # Увеличено до 3 минут для стабильности при старте
     while True:
         try:
             if bot_flags["alerts_enabled"] and active_chats:
@@ -1758,11 +1780,13 @@ async def start_handler(message: types.Message):
     active_chats.add(message.chat.id)
     user_name = message.from_user.first_name or "User"
     username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
-    is_new = save_user_data(message.from_user.id, message.from_user.username, user_name)
+    
+    # Обернуто в to_thread, чтобы база не блокировала бота
+    is_new = await asyncio.to_thread(save_user_data, message.from_user.id, message.from_user.username, user_name)
 
     if is_new and message.from_user.id not in notified_users:
         notified_users.add(message.from_user.id)
-        total = len(_load_users())
+        total = len(await asyncio.to_thread(_load_users))
         await notify_admins(f"👤 <b>Новый пользователь!</b>\n\nИмя: {html.escape(user_name)}\nЮзернейм: {html.escape(username)}\nID: <code>{message.from_user.id}</code>\nВсего: {total}")
         if total % 5 == 0:
             asyncio.create_task(send_backup("💾 Авто-бэкап"))
@@ -1946,6 +1970,14 @@ async def backup_loop():
         except Exception as e:
             log.warning("backup_loop: %s", e)
         await asyncio.sleep(24 * 3600)
+
+
+async def heartbeat_loop():
+    while True:
+        await asyncio.sleep(600)
+        up = int(time.time() - stats["started"])
+        log.info("♥ heartbeat: аптайм %d мин, пик памяти %s МБ, получателей %d, сигналов %d",
+                 up // 60, _rss_mb(), len(active_chats), stats["signals"])
 
 
 async def run_diagnostics():
@@ -2349,6 +2381,7 @@ async def main():
         background.append(asyncio.create_task(backup_loop()))
         background.append(asyncio.create_task(alert_loop()))
         background.append(asyncio.create_task(daily_stats_loop()))
+        background.append(asyncio.create_task(heartbeat_loop()))
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
@@ -2376,7 +2409,7 @@ async def main():
                     await startup_notice()
             except Exception as e:
                 runtime["admin_bot"] = f"ошибка: {e}"
-                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "nauthorized" in str(e) else ""
+                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "unauthorized" in str(e) else ""
                 log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
         else:
             if not INPUT_BOT_TOKEN:
@@ -2402,5 +2435,18 @@ async def main():
         await bot.session.close()
 
 
+async def run_forever():
+    """Если main() упал из-за ошибки, поднимаем бота заново, не дожидаясь перезапуска контейнера Render."""
+    while True:
+        try:
+            await main()
+            break  # штатная остановка (SIGTERM при деплое)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            log.error("main() упал: %s. Перезапуск через 10 секунд", e, exc_info=True)
+            await asyncio.sleep(10)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run_forever())
