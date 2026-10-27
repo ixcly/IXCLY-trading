@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.25
-+ Рекомендация плеча (X10-X50) и % от баланса
+IXCLY Trading bot v2.10.26
++ Правильное московское время публикации новости
++ Улучшенные новости на русском
 """
 
 import asyncio
@@ -13,8 +14,9 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from threading import Thread
+from email.utils import parsedate_to_datetime
 
 import aiohttp
 import feedparser
@@ -87,7 +89,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.25"
+VERSION = "2.10.26"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -143,6 +145,7 @@ market_bias = {
     "summary": "Нет данных",
     "impact": "Нейтральный фон",
     "coins": "BTC, ETH, SOL",
+    "published": "",
     "ts": 0
 }
 
@@ -403,9 +406,6 @@ def make_strength_bar(strength: float, length: int = 10) -> str:
     return "🟩" * filled + "🟥" * (length - filled)
 
 def get_leverage_recommendation(strength: float, sig_type: str) -> tuple:
-    """
-    Возвращает (плечо, % от баланса)
-    """
     if sig_type == "Быстрый сигнал":
         if strength >= 80:
             return "X25–X50", "1–2%"
@@ -413,13 +413,39 @@ def get_leverage_recommendation(strength: float, sig_type: str) -> tuple:
             return "X15–X35", "1–2%"
         else:
             return "X10–X25", "1–1.5%"
-    else:  # Среднесрок
+    else:
         if strength >= 80:
             return "X15–X30", "1–2%"
         elif strength >= 70:
             return "X10–X20", "1–1.5%"
         else:
             return "X5–X15", "0.5–1%"
+
+def get_moscow_time_from_entry(entry) -> str:
+    """Возвращает время публикации новости по Москве"""
+    try:
+        # Пробуем разные поля RSS
+        published = None
+        if hasattr(entry, "published_parsed") and entry.published_parsed:
+            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
+            published = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+        elif hasattr(entry, "published"):
+            try:
+                published = parsedate_to_datetime(entry.published)
+            except Exception:
+                pass
+
+        if published:
+            # Переводим в Москву (UTC+3)
+            moscow = published.astimezone(timezone(timedelta(hours=3)))
+            return moscow.strftime("%d.%m.%Y %H:%M") + " МСК"
+    except Exception:
+        pass
+    
+    # Фоллбэк — текущее время по Москве
+    now_msk = datetime.now(timezone(timedelta(hours=3)))
+    return now_msk.strftime("%d.%m.%Y %H:%M") + " МСК"
 
 async def first_success(coros, timeout=11):
     tasks = [asyncio.create_task(c) for c in coros]
@@ -627,15 +653,21 @@ def calc_levels(info, is_long):
     return entry, [tp1, tp2, tp3], [sl1, sl2]
 
 # ====================== НОВОСТИ ======================
-NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
-WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml"]
+NEWS_FEEDS = [
+    "https://cointelegraph.com/rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/"
+]
+
+WORLD_FEEDS = [
+    "https://feeds.bbci.co.uk/news/business/rss.xml"
+]
 
 _news_cache = {"ts": 0, "entries": []}
 _world_cache = {"ts": 0, "titles": []}
 
 async def _load_feed(url):
     try:
-        async with http.get(url, timeout=aiohttp.ClientTimeout(total=9)) as r:
+        async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status != 200:
                 return []
             text = await r.text()
@@ -645,23 +677,26 @@ async def _load_feed(url):
         return []
 
 async def get_news_entries():
-    if _news_cache["entries"] and time.time() - _news_cache["ts"] < 280:
+    if _news_cache["entries"] and time.time() - _news_cache["ts"] < 300:
         return _news_cache["entries"]
+    
     for url in NEWS_FEEDS:
         entries = await _load_feed(url)
         if entries:
             _news_cache["ts"] = time.time()
-            _news_cache["entries"] = entries[:6]
+            _news_cache["entries"] = entries[:5]
             return _news_cache["entries"]
     return _news_cache["entries"]
 
-async def get_world_titles(n=5):
-    if _world_cache["titles"] and time.time() - _world_cache["ts"] < 280:
+async def get_world_titles(n=4):
+    if _world_cache["titles"] and time.time() - _world_cache["ts"] < 300:
         return _world_cache["titles"][:n]
+    
     titles = []
     for url in WORLD_FEEDS:
         entries = await _load_feed(url)
         titles.extend([e.title for e in entries[:3]])
+    
     if titles:
         _world_cache["ts"] = time.time()
         _world_cache["titles"] = titles
@@ -686,35 +721,44 @@ async def update_market_bias():
     global market_bias
     try:
         entries = await get_news_entries()
-        crypto = [e.title for e in entries]
-        world = await get_world_titles(5)
+        if not entries:
+            return
 
-        prompt = f"""Ты профессиональный крипто-аналитик. 
-Переведи и разбери новость на русском языке.
+        main_entry = entries[0]
+        original_title = main_entry.title
+        published_msk = get_moscow_time_from_entry(main_entry)
+        crypto_titles = [e.title for e in entries[:3]]
+        world = await get_world_titles(4)
 
-Новости:
-{chr(10).join('- ' + t for t in crypto[:3])}
+        prompt = f"""Ты профессиональный крипто-аналитик. Переведи и проанализируй новость строго на русском языке.
 
-Мировые:
+Главная новость:
+{original_title}
+
+Другие новости:
+{chr(10).join('- ' + t for t in crypto_titles)}
+
+Мировые новости:
 {chr(10).join('- ' + t for t in world)}
 
-Ответь СТРОГО в формате:
+Ответь ТОЛЬКО в таком формате (без лишнего текста):
 
-BIAS: BULLISH / BEARISH / NEUTRAL
+BIAS: BULLISH или BEARISH или NEUTRAL
 
-TITLE_RU: перевод заголовка на русский
+TITLE_RU: [полный перевод заголовка на русский]
 
-SUMMARY: 2-4 предложения — в чём суть новости и почему это важно
+SUMMARY: [2-3 предложения — в чём суть новости]
 
-IMPACT: как это влияет на крипторынок (1-2 предложения)
+IMPACT: [как это влияет на крипторынок]
 
-COINS: какие монеты больше всего затронет (BTC, ETH, SOL, ZEC и т.д.)
+COINS: [какие монеты затронет, например BTC, ETH, SOL, ZEC]
 """
-        text, _ = await ask_ai_named(prompt, timeout=18)
-        
+
+        text, source = await ask_ai_named(prompt, timeout=20)
+
         bias = 0
-        title_ru = "Новость"
-        summary = "Нет данных"
+        title_ru = original_title
+        summary = "Информация обновляется..."
         impact = "Нейтральный фон"
         coins = "BTC, ETH, SOL"
 
@@ -727,19 +771,25 @@ COINS: какие монеты больше всего затронет (BTC, ET
 
             m = re.search(r"TITLE_RU:\s*(.+)", text, re.I)
             if m:
-                title_ru = m.group(1).strip().split("\n")[0][:130]
+                title_ru = m.group(1).strip().split("\n")[0][:140]
 
             m = re.search(r"SUMMARY:\s*(.+?)(?=IMPACT:|$)", text, re.I | re.S)
             if m:
-                summary = m.group(1).strip()[:380]
+                summary = re.sub(r'\s+', ' ', m.group(1).strip())[:350]
 
             m = re.search(r"IMPACT:\s*(.+?)(?=COINS:|$)", text, re.I | re.S)
             if m:
-                impact = m.group(1).strip()[:220]
+                impact = re.sub(r'\s+', ' ', m.group(1).strip())[:220]
 
             m = re.search(r"COINS:\s*(.+)", text, re.I)
             if m:
-                coins = m.group(1).strip()[:90]
+                coins = m.group(1).strip()[:100]
+
+        if title_ru == original_title or "Нет данных" in summary:
+            title_ru = original_title
+            summary = f"Новость: {original_title}"
+            impact = "Влияние на рынок оценивается..."
+            coins = "BTC, ETH, SOL"
 
         market_bias = {
             "bias": bias,
@@ -747,9 +797,11 @@ COINS: какие монеты больше всего затронет (BTC, ET
             "summary": summary,
             "impact": impact,
             "coins": coins,
+            "published": published_msk,
             "ts": time.time()
         }
-        log.info(f"Bias обновлён: {bias} | {title_ru}")
+        log.info(f"Bias обновлён ({source}): {bias} | {title_ru[:50]} | {published_msk}")
+
     except Exception as e:
         log.warning(f"bias error: {e}")
 
@@ -1180,28 +1232,34 @@ async def cb_refresh(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "news_menu")
 async def cb_news_menu(cb: types.CallbackQuery):
     await safe_delete(cb.message)
-    await cb.answer("📰 Загружаю и перевожу новость…")
+    await cb.answer("📰 Загружаю новость...")
+
     try:
-        if time.time() - market_bias.get("ts", 0) > 600:
+        if time.time() - market_bias.get("ts", 0) > 400:
             await update_market_bias()
 
         entries = await get_news_entries()
         if not entries:
-            await cb.message.answer("📭 Свежих новостей пока нет", reply_markup=get_coins_keyboard())
+            await cb.message.answer(
+                "📭 Свежих новостей пока нет",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+                ])
+            )
             return
 
         entry = entries[0]
         img_url = extract_image(entry)
 
-        title_ru = market_bias.get("title_ru", entry.title)
-        summary = market_bias.get("summary", "Нет подробностей")
-        impact = market_bias.get("impact", "Нейтральный фон")
-        coins = market_bias.get("coins", "BTC, ETH, SOL")
-        moscow_time = datetime.now().strftime("%H:%M") + " МСК"
+        title_ru = market_bias.get("title_ru") or entry.title
+        summary = market_bias.get("summary") or "Информация обновляется..."
+        impact = market_bias.get("impact") or "Нейтральный фон"
+        coins = market_bias.get("coins") or "BTC, ETH, SOL"
+        published = market_bias.get("published") or get_moscow_time_from_entry(entry)
 
         text = (
             f"📰 <b>Последняя новость</b>\n"
-            f"<i>{moscow_time}</i>\n\n"
+            f"<i>{published}</i>\n\n"
             f"<b>{html.escape(title_ru)}</b>\n\n"
             f"📌 <b>Суть:</b>\n{html.escape(summary)}\n\n"
             f"📊 <b>Влияние на рынок:</b>\n{html.escape(impact)}\n\n"
@@ -1228,8 +1286,15 @@ async def cb_news_menu(cb: types.CallbackQuery):
                 pass
 
         await cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
     except Exception as e:
-        await cb.message.answer(f"Ошибка загрузки новости: {e}", reply_markup=get_coins_keyboard())
+        log.error(f"news_menu error: {e}")
+        await cb.message.answer(
+            "Ошибка при загрузке новости. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+            ])
+        )
 
 @dp.callback_query(F.data == "last_signals")
 async def cb_last(cb: types.CallbackQuery):
@@ -1494,8 +1559,10 @@ if admin_dp:
                 summary = market_bias.get("summary", "")
                 impact = market_bias.get("impact", "")
                 coins = market_bias.get("coins", "")
+                published = market_bias.get("published", "")
                 short = (
-                    f"📰 <b>{html.escape(title_ru)}</b>\n\n"
+                    f"📰 <b>{html.escape(title_ru)}</b>\n"
+                    f"<i>{published}</i>\n\n"
                     f"{html.escape(summary)}\n\n"
                     f"📊 {html.escape(impact)}\n"
                     f"🪙 {html.escape(coins)}"
