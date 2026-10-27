@@ -476,7 +476,21 @@ async def errors_handler(update: types.Update, exception: Exception):
 MENU_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]])
 
 
-def get_coins_keyboard(page=0):
+def get_coins_keyboard():
+    # Теперь главное меню содержит только функциональные кнопки без списка монет
+    buttons = [
+        [InlineKeyboardButton(text="📰  Новости", callback_data="news_menu")],
+        [InlineKeyboardButton(text="🧐  Интересные графики", callback_data="interesting_menu")],
+        [InlineKeyboardButton(text="🔥  Последние сигналы", callback_data="last_signals")],
+        [InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu")],
+        [InlineKeyboardButton(text="📊  Статистика 24ч", callback_data="show_stats")],
+        [InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_search_coins_keyboard(page=0):
+    # Отдельное меню для поиска со списком всех монет
     per = 8
     coins = POPULAR_COINS[page * per:(page + 1) * per]
     buttons = []
@@ -488,18 +502,12 @@ def get_coins_keyboard(page=0):
     total = (len(POPULAR_COINS) + per - 1) // per
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅ Назад", callback_data=f"p:{page - 1}"))
+        nav.append(InlineKeyboardButton(text="⬅ Назад", callback_data=f"search_page:{page - 1}"))
     nav.append(InlineKeyboardButton(text=f"{page + 1} / {total}", callback_data="ignore"))
     if page < total - 1:
-        nav.append(InlineKeyboardButton(text="Вперёд ➡", callback_data=f"p:{page + 1}"))
+        nav.append(InlineKeyboardButton(text="Вперёд ➡", callback_data=f"search_page:{page + 1}"))
     buttons.append(nav)
-    buttons.append([InlineKeyboardButton(text="────────────", callback_data="ignore")])
-    buttons.append([InlineKeyboardButton(text="📰  Новости", callback_data="news_menu")])
-    buttons.append([InlineKeyboardButton(text="🧐  Интересные графики", callback_data="interesting_menu")])
-    buttons.append([InlineKeyboardButton(text="🔥  Последние сигналы", callback_data="last_signals")])
-    buttons.append([InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu")])
-    buttons.append([InlineKeyboardButton(text="📊  Статистика 24ч", callback_data="show_stats")])
-    buttons.append([InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -1428,7 +1436,6 @@ async def scan_once(send=True):
         candidates = [c for c in candidates
                       if now - signal_sent_at.get(f"{c['coin']}:{'L' if c['tech']['is_long'] else 'S'}", 0) >= SIGNAL_COOLDOWN]
     
-    # Собираем сигналы и распределяем по категориям
     signals = []
     hist = _load_signal_history()
     new_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
@@ -1793,7 +1800,7 @@ async def cmd_start(m: types.Message):
         "📰 <b>Новости и фон</b> — перевожу мировые новости и объясняю простым языком, как они повлияют на рынок.\n"
         "⭐ <b>Твоё избранное</b> — сохраняй интересные идеи, чтобы ничего не упустить.\n\n"
         "⚠️ <i>Помни: криптовалюта — это рискованно. Я даю аналитику, но решения всегда принимаешь ты!</i>\n\n"
-        "👇 Выбери монету из меню ниже или воспользуйся кнопками, чтобы начать:"
+        "👇 Выбери нужный раздел в меню ниже, чтобы начать:"
     )
     
     msg = await m.answer(
@@ -1814,7 +1821,7 @@ async def cb_menu(cb: types.CallbackQuery):
     await cleanup_prev_menu(cb.from_user.id)
     await safe_delete(cb.message)
     msg = await cb.message.answer(
-        f"👋 <b>IXCLY v{VERSION}</b>\n\nВыбери монету:",
+        f"👋 <b>IXCLY v{VERSION}</b>\n\nГлавное меню:",
         reply_markup=get_coins_keyboard(),
         parse_mode="HTML"
     )
@@ -1822,11 +1829,11 @@ async def cb_menu(cb: types.CallbackQuery):
     await safe_answer(cb)
 
 
-@dp.callback_query(F.data.startswith("p:"))
-async def cb_page(cb: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("search_page:"))
+async def cb_search_page(cb: types.CallbackQuery):
     page = int(cb.data.split(":")[1])
     try:
-        await cb.message.edit_reply_markup(reply_markup=get_coins_keyboard(page))
+        await cb.message.edit_reply_markup(reply_markup=get_search_coins_keyboard(page))
     except Exception:
         pass
     await safe_answer(cb)
@@ -1972,8 +1979,15 @@ async def cb_interesting(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "search")
 async def cb_search(cb: types.CallbackQuery):
+    await cleanup_prev_menu(cb.from_user.id)
     await safe_delete(cb.message)
-    await cb.message.answer("🔍 Напиши тикер (BTC, SOL, PEPE…):")
+    msg = await cb.message.answer(
+        "🔍 <b>Выбери монету из списка ниже</b>\n"
+        "<i>Или просто напиши тикер сообщением (BTC, SOL, PEPE…)</i>:", 
+        reply_markup=get_search_coins_keyboard(0), 
+        parse_mode="HTML"
+    )
+    last_user_msg[cb.from_user.id] = msg
     await safe_answer(cb)
 
 
@@ -2293,3 +2307,172 @@ if admin_dp:
                 raise ValueError("ожидался JSON-объект {id: данные}")
             current = _load_users()
             added = 0
+            for k, v in data.items():
+                if k not in current and isinstance(v, dict):
+                    current[k] = v
+                    added += 1
+            _save_users(current)
+            load_active_chats()
+            await m.answer(f"✅ Восстановлено: добавлено {added}, всего {len(current)}, получателей {len(active_chats)}")
+        except Exception as e:
+            await m.answer(f"Ошибка: {html.escape(str(e))}", parse_mode="HTML")
+
+
+# ====================== MAIN ======================
+async def run_polling(dispatcher, tg_bot, name, stop_event):
+    attempt = 0
+    while not stop_event.is_set():
+        try:
+            attempt += 1
+            log.info(f"{name}: запуск поллинга (попытка {attempt})")
+            try:
+                await tg_bot.delete_webhook(drop_pending_updates=True)
+            except Exception as e:
+                log.debug(f"{name}: не удалось удалить вебхук: {e}")
+            
+            await dispatcher.start_polling(
+                tg_bot,
+                handle_signals=False,
+                close_bot_session=False,
+                polling_timeout=30,
+            )
+            
+            if not stop_event.is_set():
+                log.warning(f"{name}: start_polling завершился неожиданно. Перезапуск через 5 сек...")
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
+        except TelegramNetworkError as e:
+            log.warning(f"{name}: сетевая ошибка Telegram (попытка {attempt}): {e}")
+            try:
+                await tg_bot.session.close()
+            except Exception:
+                pass
+            delay = min(2 ** attempt, 30)
+            log.info(f"{name}: ожидание {delay} с перед перезапуском")
+            await asyncio.sleep(delay)
+        except TelegramConflictError as e:
+            log.warning(f"{name}: конфликт getUpdates (попытка {attempt}): {e}")
+            try:
+                await tg_bot.session.close()
+            except Exception:
+                pass
+            delay = min(2 ** attempt, 60)
+            log.info(f"{name}: ожидание {delay} с перед повторной попыткой")
+            await asyncio.sleep(delay)
+        except Exception as e:
+            log.error(f"{name}: поллинг упал: {e}. Перезапуск через 5 сек")
+            await asyncio.sleep(5)
+
+
+async def main():
+    global http, news_lock
+    keep_alive()
+    news_lock = asyncio.Lock()
+    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/2.10"})
+    init_mongo()
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
+
+    background = []
+    pollers = []
+    try:
+        try:
+            me = await bot.get_me()
+            runtime["main_bot"] = f"@{me.username}"
+            log.info(f"Основной бот: @{me.username}")
+        except Exception as e:
+            runtime["main_bot"] = f"ошибка: {e}"
+            log.error(f"get_me основного бота: {e} (проверьте BOT_TOKEN)")
+        if admin_bot:
+            try:
+                me = await admin_bot.get_me()
+                runtime["admin_bot"] = f"@{me.username}"
+                log.info(f"Админ-бот: @{me.username}")
+            except Exception as e:
+                runtime["admin_bot"] = f"ошибка: {e}"
+                log.error(f"get_me админ-бота: {e} (проверьте INPUT_BOT_TOKEN)")
+
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            if admin_bot:
+                await admin_bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            log.warning(f"Не удалось удалить вебхук при старте: {e}")
+
+        try:
+            await bot.set_my_commands([
+                types.BotCommand(command="menu", description="🚀 Меню"),
+                types.BotCommand(command="news", description="📰 Последняя новость"),
+            ])
+        except Exception:
+            pass
+
+        if POLL_START_DELAY > 0:
+            log.info(f"Жду {POLL_START_DELAY} с, пока остановится предыдущий экземпляр (деплой Render)…")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
+            except asyncio.TimeoutError:
+                pass
+        if stop.is_set():
+            return
+
+        restored = await telegram_restore()
+        if restored:
+            log.info(f"✅ База синхронизирована из бэкапа в Telegram: {restored} пользователей")
+        else:
+            log.warning("База пуста или бэкап не найден (нажмите /start в админ-боте, затем «💾 Бэкап»)")
+        
+        load_active_chats()
+
+        background += [
+            asyncio.create_task(scanner_loop()),
+            asyncio.create_task(position_monitor_loop()),
+            asyncio.create_task(news_watcher_loop()),
+            asyncio.create_task(backup_loop()),
+            asyncio.create_task(update_market_bias()),
+        ]
+
+        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
+        if admin_bot and admin_dp:
+            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
+
+        log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)}")
+        waiter = asyncio.create_task(stop.wait())
+        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
+        log.warning("Получен сигнал остановки, завершаюсь…")
+        waiter.cancel()
+    finally:
+        for t in pollers:
+            t.cancel()
+        await asyncio.gather(*pollers, return_exceptions=True)
+        try:
+            await asyncio.wait_for(telegram_backup("перед остановкой"), timeout=12)
+        except Exception as e:
+            log.info(f"Бэкап перед остановкой не отправлен: {e}")
+        for t in background:
+            t.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        if admin_bot:
+            try:
+                await admin_bot.session.close()
+            except Exception:
+                pass
+        await http.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Остановлен")
