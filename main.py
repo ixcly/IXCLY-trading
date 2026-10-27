@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.20
-- BOT_TOKEN        = основной бот (для пользователей)
-- INPUT_BOT_TOKEN  = админ-бот (только для администратора)
+IXCLY Trading bot v2.10.21
+- Полный список монет
+- Новости на русском с влиянием на конкретные монеты
+- Более просторное меню
 """
 
 import asyncio
@@ -80,8 +81,8 @@ def keep_alive():
 def clean_key(k):
     return k.strip().strip('"').strip("'") if k else None
 
-BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))                 # Основной бот
-INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))     # Админ-бот
+BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
+INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
@@ -97,39 +98,46 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.20"
+VERSION = "2.10.21"
 
-# Основной бот
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Админ-бот (если указан)
 admin_bot = None
 admin_dp = None
 if INPUT_BOT_TOKEN:
     admin_bot = Bot(token=INPUT_BOT_TOKEN)
     admin_dp = Dispatcher()
     log.info("Админ-бот активирован")
-else:
-    log.warning("INPUT_BOT_TOKEN не задан — админ-панель будет на основном боте")
 
 http = None
 
 TFS = ["15m", "1h", "4h", "1d"]
 MIN_CANDLES = 30
 
+# ====================== ПОЛНЫЙ СПИСОК МОНЕТ ======================
 POPULAR_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
     "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
-    "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "PEPE", "WIF", "BONK", "JUP",
-    "TIA", "SEI", "TRX", "XLM", "AAVE", "ALGO", "FET", "WLD", "ONDO", "FLOKI", "KAS", "TAO",
-    "STRK", "PENDLE", "ENA", "W", "ETHFI", "MOVE", "S", "NOT", "DOGS", "BOME", "ORDI"
+    "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
+    "GALA", "PEPE", "WIF", "BONK", "ORDI", "JUP", "TIA", "SEI", "TRX", "XLM", "ETC", "XMR",
+    "AAVE", "ALGO", "EOS", "NEO", "IOTA", "ZEC", "DASH", "COMP", "SNX", "CRV", "LDO", "ENS",
+    "1INCH", "CAKE", "RUNE", "KSM", "FLOW", "AXS", "CHZ", "BAT", "ENJ", "ZIL", "FTM", "KAVA",
+    "EGLD", "ROSE", "AR", "FET", "WLD", "APE", "GMT", "CFX", "PYTH", "JTO", "ONDO", "FLOKI",
+    "KAS", "CRO", "MNT", "TAO", "STRK", "DYDX", "GMX", "PENDLE", "SUSHI", "YFI", "BAL", "ZRX",
+    "KNC", "UMA", "BAND", "API3", "SSV", "LPT", "RAY", "ORCA", "ILV", "MAGIC", "PRIME", "BEAM",
+    "YGG", "ALICE", "TLM", "DUSK", "HIGH", "CHR", "C98", "AI", "NMR", "ARKM", "IO", "ATH",
+    "BOME", "MEME", "SATS", "RATS", "DCR", "DGB", "XVG", "SC", "RVN", "WAVES", "ZEN", "BLAST",
+    "AEVO", "ETHFI", "ENA", "W", "EIGEN", "MOVE", "PNUT", "GOAT", "ACT", "MOODENG", "TURBO",
+    "MOG", "NEIRO", "DOGS", "NOT", "PIXEL", "PORTAL", "DYM", "ALT", "MANTA", "ZETA", "TNSR",
+    "DRIFT", "KMNO", "WEN", "MYRO", "POPCAT", "GIGA", "MEW", "SLERF", "LUNC", "LUNA", "USTC",
+    "CTSI", "COTI", "CELO", "CKB", "ONE", "QTUM", "IOST", "ONT", "ICX", "WAN", "ARK", "STRAX"
 ]
 
 SYMBOL_ALIASES = {
     "RNDR": ["RENDER", "RNDR"], "MATIC": ["POL", "MATIC"],
     "PEPE": ["1000PEPE", "PEPE"], "BONK": ["1000BONK", "BONK"],
-    "FLOKI": ["1000FLOKI", "FLOKI"],
+    "FLOKI": ["1000FLOKI", "FLOKI"], "SATS": ["1000SATS", "SATS"],
 }
 
 USERS_FILE = "users.json"
@@ -316,38 +324,47 @@ dp.update.middleware(UserTrackerMiddleware())
 if admin_dp:
     admin_dp.update.middleware(UserTrackerMiddleware())
 
-# ====================== КЛАВИАТУРЫ ======================
+# ====================== КЛАВИАТУРЫ (более просторные) ======================
 def get_coins_keyboard(page=0):
-    per = 12
+    per = 8  # Меньше монет на странице → меньше тесноты
     coins = POPULAR_COINS[page*per:(page+1)*per]
     buttons = []
+    
+    # По 2 монеты в ряд
     for i in range(0, len(coins), 2):
-        row = [InlineKeyboardButton(text=f"🪙 {coins[i]}", callback_data=f"c:{coins[i]}")]
+        row = [InlineKeyboardButton(text=f"• {coins[i]}", callback_data=f"c:{coins[i]}")]
         if i+1 < len(coins):
-            row.append(InlineKeyboardButton(text=f"🪙 {coins[i+1]}", callback_data=f"c:{coins[i+1]}"))
+            row.append(InlineKeyboardButton(text=f"• {coins[i+1]}", callback_data=f"c:{coins[i+1]}"))
         buttons.append(row)
+    
     total = (len(POPULAR_COINS) + per - 1) // per
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"p:{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"📄 {page+1}/{total}", callback_data="ignore"))
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"p:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1} / {total}", callback_data="ignore"))
     if page < total-1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"p:{page+1}"))
+        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"p:{page+1}"))
     buttons.append(nav)
-    buttons.append([InlineKeyboardButton(text="📰 Новости", callback_data="news_menu")])
-    buttons.append([InlineKeyboardButton(text="🧐 Интересные", callback_data="interesting_menu")])
-    buttons.append([InlineKeyboardButton(text="🔥 Последние сигналы", callback_data="last_signals")])
-    buttons.append([InlineKeyboardButton(text="⭐ Избранное", callback_data="sig:menu")])
-    buttons.append([InlineKeyboardButton(text="📊 Статистика 24ч", callback_data="show_stats")])
-    buttons.append([InlineKeyboardButton(text="🔍 Поиск", callback_data="search")])
+    
+    # Разделитель + основные кнопки с большими отступами
+    buttons.append([InlineKeyboardButton(text="────────────", callback_data="ignore")])
+    buttons.append([InlineKeyboardButton(text="📰  Новости", callback_data="news_menu")])
+    buttons.append([InlineKeyboardButton(text="🧐  Интересные графики", callback_data="interesting_menu")])
+    buttons.append([InlineKeyboardButton(text="🔥  Последние сигналы", callback_data="last_signals")])
+    buttons.append([InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="📊  Статистика 24ч", callback_data="show_stats")])
+    buttons.append([InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")])
+    
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def result_keyboard(coin):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
-        InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}"),
-        InlineKeyboardButton(text="🏠 Меню", callback_data="menu"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
+            InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}"),
+        ],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
+    ])
 
 def get_saved_signals_menu(user_id):
     saved = get_user_saved_signals(user_id)
@@ -360,10 +377,10 @@ def get_saved_signals_menu(user_id):
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="➕ Добавить", callback_data="sig:save_new")])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить новый", callback_data="sig:save_new")])
     if saved:
         buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data="sig:del_menu")])
-    buttons.append([InlineKeyboardButton(text="🏠 Меню", callback_data="menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_delete_signals_menu(user_id):
@@ -381,7 +398,7 @@ def get_delete_signals_menu(user_id):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_save_coins_keyboard(page=0):
-    per = 12
+    per = 8
     coins = POPULAR_COINS[page*per:(page+1)*per]
     buttons = []
     for i in range(0, len(coins), 2):
@@ -402,13 +419,13 @@ def get_save_coins_keyboard(page=0):
 
 def get_saved_signal_view_keyboard(user_id, coin):
     pos = get_open_position(user_id, coin)
-    buttons = [[InlineKeyboardButton(text="🔄 Обновить", callback_data=f"c:{coin}")]]
+    buttons = [[InlineKeyboardButton(text="🔄 Обновить анализ", callback_data=f"c:{coin}")]]
     if pos:
         buttons.append([InlineKeyboardButton(text="📈 Статус позиции", callback_data=f"pos:status:{coin}")])
         buttons.append([InlineKeyboardButton(text="❌ Закрыл сделку", callback_data=f"pos:close:{coin}")])
     else:
         buttons.append([InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад в избранное", callback_data="sig:menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
@@ -645,7 +662,7 @@ def calc_levels(info, is_long):
         sl2 = sl1 + 0.7 * atr
     return entry, [tp1, tp2, tp3], [sl1, sl2]
 
-# ====================== НОВОСТИ ======================
+# ====================== НОВОСТИ (на русском + влияние) ======================
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml"]
 
@@ -706,18 +723,22 @@ async def update_market_bias():
     try:
         crypto = [e.title for e in await get_news_entries()]
         world = await get_world_titles(5)
-        prompt = f"""Дай ОДНУ короткую оценку влияния новостей на крипту (1-2 предложения).
+        prompt = f"""Ты крипто-аналитик. Напиши короткую оценку влияния новостей на русском.
 
+Новости:
 Мировые: {'; '.join(world) or 'нет'}
 Крипто: {'; '.join(crypto) or 'нет'}
 
-Формат:
-BIAS: BULLISH/BEARISH/NEUTRAL
-REASON: коротко на русском
+Ответь строго в формате:
+
+BIAS: BULLISH / BEARISH / NEUTRAL
+REASON: 1-2 предложения на русском, как это влияет на рынок
+COINS: какие монеты больше всего затронет (BTC, ETH, SOL и т.д.)
 """
-        text, _ = await ask_ai_named(prompt, timeout=15)
+        text, _ = await ask_ai_named(prompt, timeout=16)
         bias = 0
         reason = "Нейтральный фон"
+        coins = "BTC, ETH, SOL"
         if text:
             if "BULLISH" in text.upper():
                 bias = 1
@@ -725,8 +746,11 @@ REASON: коротко на русском
                 bias = -1
             m = re.search(r"REASON:\s*(.+)", text, re.I | re.S)
             if m:
-                reason = m.group(1).strip()[:180]
-        market_bias = {"bias": bias, "text": reason, "ts": time.time()}
+                reason = m.group(1).strip().split("\n")[0][:200]
+            m2 = re.search(r"COINS:\s*(.+)", text, re.I)
+            if m2:
+                coins = m2.group(1).strip()[:80]
+        market_bias = {"bias": bias, "text": reason, "coins": coins, "ts": time.time()}
     except Exception as e:
         log.warning(f"bias: {e}")
 
@@ -746,7 +770,7 @@ async def _ask_gemini(prompt):
 
 async def _ask_openai_compat(base, key, model, prompt):
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 800}
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 900}
     try:
         async with http.post(f"{base}/chat/completions", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=18)) as r:
             j = await r.json(content_type=None)
@@ -1094,12 +1118,20 @@ async def check_position(user_id, coin, pos):
 async def cmd_start(m: types.Message):
     save_user_data(m.from_user.id, m.from_user.username, m.from_user.first_name)
     active_chats.add(m.chat.id)
-    await m.answer(f"👋 <b>IXCLY v{VERSION}</b>\nВыбери монету:", reply_markup=get_coins_keyboard(), parse_mode="HTML")
+    await m.answer(
+        f"👋 <b>IXCLY v{VERSION}</b>\n\nВыбери монету:",
+        reply_markup=get_coins_keyboard(),
+        parse_mode="HTML"
+    )
 
 @dp.callback_query(F.data == "menu")
 async def cb_menu(cb: types.CallbackQuery):
     await safe_delete(cb.message)
-    await cb.message.answer(f"👋 <b>IXCLY v{VERSION}</b>\nВыбери монету:", reply_markup=get_coins_keyboard(), parse_mode="HTML")
+    await cb.message.answer(
+        f"👋 <b>IXCLY v{VERSION}</b>\n\nВыбери монету:",
+        reply_markup=get_coins_keyboard(),
+        parse_mode="HTML"
+    )
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("p:"))
@@ -1145,14 +1177,26 @@ async def cb_news_menu(cb: types.CallbackQuery):
         if not entries:
             await cb.message.answer("📭 Свежих новостей пока нет", reply_markup=get_coins_keyboard())
             return
+        
         entry = entries[0]
         title = html.escape(entry.title)
         img_url = extract_image(entry)
+        
+        # Формируем нормальный текст на русском
+        bias_text = market_bias.get("text", "Нейтральный фон")
+        coins_text = market_bias.get("coins", "BTC, ETH, SOL")
+        
         short = (
             f"📰 <b>Последняя новость</b>\n\n"
-            f"{title}\n\n"
-            f"🌍 {html.escape(market_bias.get('text', 'Нейтральный фон'))}"
+            f"<b>{title}</b>\n\n"
+            f"📊 <b>Влияние на рынок:</b>\n{html.escape(bias_text)}\n\n"
+            f"🪙 <b>Какие монеты затронет:</b>\n{html.escape(coins_text)}"
         )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+        ])
+        
         if img_url:
             try:
                 async with http.get(img_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -1162,16 +1206,13 @@ async def cb_news_menu(cb: types.CallbackQuery):
                             BufferedInputFile(img_data, "news.jpg"),
                             caption=short,
                             parse_mode="HTML",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")]
-                            ])
+                            reply_markup=kb
                         )
                         return
             except Exception:
                 pass
-        await cb.message.answer(short, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")]
-        ]))
+        
+        await cb.message.answer(short, parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         await cb.message.answer(f"Ошибка загрузки новостей: {e}", reply_markup=get_coins_keyboard())
 
@@ -1438,7 +1479,12 @@ if admin_dp:
                     return
                 entry = entries[0]
                 title = html.escape(entry.title)
-                short = f"📰 <b>Новость</b>\n\n{title}\n\n🌍 {html.escape(market_bias.get('text', ''))}"
+                short = (
+                    f"📰 <b>Новость</b>\n\n"
+                    f"{title}\n\n"
+                    f"📊 {html.escape(market_bias.get('text', ''))}\n"
+                    f"🪙 {html.escape(market_bias.get('coins', ''))}"
+                )
                 await broadcast({"kind": "text", "text": short})
                 stats["news_sent"] += 1
                 await cb.message.answer("Новость отправлена")
@@ -1513,13 +1559,8 @@ async def main():
     asyncio.create_task(position_monitor_loop())
     asyncio.create_task(update_market_bias())
 
-    log.info(f"🚀 IXCLY v{VERSION} запущен")
-    log.info(f"Основной бот: {BOT_TOKEN[:10]}...")
-    if admin_bot:
-        log.info(f"Админ-бот: {INPUT_BOT_TOKEN[:10]}...")
-    log.info(f"ADMIN_IDS: {ADMIN_IDS}")
-
-    # Запускаем оба бота параллельно
+    log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)}")
+    
     tasks = [dp.start_polling(bot)]
     if admin_bot and admin_dp:
         tasks.append(admin_dp.start_polling(admin_bot))
