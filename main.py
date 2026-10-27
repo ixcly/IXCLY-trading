@@ -693,10 +693,6 @@ async def safe_answer(cb, text=None, alert=False):
     try: await cb.answer(text, show_alert=alert)
     except Exception: pass
 
-async def cleanup_prev_menu(user_id):
-    old = last_user_msg.pop(user_id, None)
-    if old: await safe_delete(old)
-
 async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_mode="HTML", user_id=None):
     try:
         if message.photo or message.video or message.document or message.animation:
@@ -1846,12 +1842,20 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
             log.info(f"{name}: запуск поллинга (попытка {attempt})")
             try: await tg_bot.delete_webhook(drop_pending_updates=True)
             except Exception: pass
-            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=30)
+            
+            await dispatcher.start_polling(
+                tg_bot,
+                handle_signals=False,
+                close_bot_session=False,
+                polling_timeout=30,
+            )
+            
             if not stop_event.is_set():
-                log.warning(f"{name}: start_polling завершился. Перезапуск...")
+                log.warning(f"{name}: start_polling завершился. Перезапуск через 5 сек...")
                 await asyncio.sleep(5)
-        except asyncio.CancelledError: raise
-        except TelegramNetworkError as e:
+        except asyncio.CancelledError: 
+            raise
+        except (TelegramNetworkError, aiohttp.ClientError) as e:
             log.warning(f"{name}: сетевая ошибка: {e}")
             try: await tg_bot.session.close()
             except Exception: pass
@@ -1912,7 +1916,7 @@ async def main():
             asyncio.create_task(news_watcher_loop()),
             asyncio.create_task(backup_loop()),
             asyncio.create_task(update_market_bias()),
-            asyncio.create_task(cleanup_loop()), # <- ЗАПУСК ОЧИСТКИ СООБЩЕНИЙ
+            asyncio.create_task(cleanup_loop()),
         ]
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
