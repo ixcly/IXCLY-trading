@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 IXCLY Trading bot v2.10.29
-
-Что исправлено относительно v2.10.28:
-- Полное сохранение сделок (open_positions) и уведомлений при деплое.
-- Глубокое слияние базы при восстановлении из Telegram (данные не затираются).
-- Восстановление базы происходит ВСЕГДА при старте, а не только если файл пуст.
-- Мгновенный бэкап при открытии/закрытии сделки и сохранении сигналов.
-- Авто-бэкап теперь проверяет изменения каждые 60 секунд.
 """
 
 import asyncio
@@ -41,9 +34,6 @@ log = logging.getLogger("ixcly")
 
 
 class _ConflictFilter(logging.Filter):
-    """Конфликт getUpdates при деплое Render выглядит страшно, но безвреден.
-    Вместо десятков ERROR-строк пишем одно спокойное предупреждение раз в минуту."""
-
     def __init__(self):
         super().__init__()
         self.last = 0.0
@@ -54,8 +44,7 @@ class _ConflictFilter(logging.Filter):
             now = time.time()
             if now - self.last > 60:
                 self.last = now
-                log.warning("ℹ getUpdates-конфликт: рядом работает другой экземпляр бота. При деплое Render это "
-                            "нормально и длится секунды. Если не пропадает дольше минуты, этот же токен запущен ещё где-то.")
+                log.warning("ℹ getUpdates-конфликт: рядом работает другой экземпляр бота.")
             return False
         if "Sleep for" in msg and "try again" in msg:
             return False
@@ -153,7 +142,7 @@ if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
     admin_dp = Dispatcher()
     log.info("Админ-бот активирован")
 elif INPUT_BOT_TOKEN:
-    log.warning("INPUT_BOT_TOKEN совпадает с BOT_TOKEN: админ-бот выключен (нужен токен второго бота)")
+    log.warning("INPUT_BOT_TOKEN совпадает с BOT_TOKEN: админ-бот выключен")
 
 http = None
 news_lock = None
@@ -371,7 +360,7 @@ async def telegram_backup(reason="auto"):
             last_backup_msg[aid] = msg.message_id
             ok = True
         except Exception as e:
-            log.warning(f"Бэкап админу {aid} не отправлен: {e} (откройте админ-бота и нажмите /start)")
+            log.warning(f"Бэкап админу {aid} не отправлен: {e}")
     return ok
 
 
@@ -390,7 +379,7 @@ async def telegram_restore():
             data = json.loads(buf.read().decode("utf-8"))
             if isinstance(data, dict) and data:
                 current = _load_users()
-                # Глубокое слияние базы, чтобы не потерять текущие действия пользователя
+                # Глубокое слияние базы (защита от затирания новых сделок)
                 for k, v in data.items():
                     if k not in current:
                         current[k] = v
@@ -2128,4 +2117,172 @@ if admin_dp:
             await cb.message.answer("💾 Бэкап отправлен и закреплён выше." if ok else "База пуста, бэкапить нечего.")
 
         elif act == "restore":
-            await cb.message.answer("Пришли файл users.json (последний бэкап). Новые пользователи добавятся, существующие
+            await cb.message.answer("Пришли файл users.json (последний бэкап). Новые пользователи добавятся, существующие не изменятся.")
+
+    @admin_dp.message(F.document)
+    async def admin_on_document(m: types.Message):
+        if m.from_user.id not in ADMIN_IDS:
+            return
+        if not (m.document.file_name or "").endswith(".json"):
+            return
+        try:
+            f = await admin_bot.get_file(m.document.file_id)
+            content = await admin_bot.download_file(f.file_path)
+            data = json.loads(content.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("ожидался JSON-объект {id: данные}")
+            current = _load_users()
+            added = 0
+            for k, v in data.items():
+                if k not in current and isinstance(v, dict):
+                    current[k] = v
+                    added += 1
+            _save_users(current)
+            load_active_chats()
+            await m.answer(f"✅ Восстановлено: добавлено {added}, всего {len(current)}, получателей {len(active_chats)}")
+        except Exception as e:
+            await m.answer(f"Ошибка: {html.escape(str(e))}", parse_mode="HTML")
+
+
+# ====================== MAIN ======================
+async def run_polling(dispatcher, tg_bot, name, stop_event):
+    attempt = 0
+    while not stop_event.is_set():
+        try:
+            attempt += 1
+            log.info(f"{name}: запуск поллинга (попытка {attempt})")
+            try:
+                await tg_bot.delete_webhook(drop_pending_updates=True)
+            except Exception as e:
+                log.debug(f"{name}: не удалось удалить вебхук: {e}")
+            
+            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False)
+            return
+        except asyncio.CancelledError:
+            raise
+        except TelegramConflictError as e:
+            log.warning(f"{name}: конфликт getUpdates (попытка {attempt}): {e}")
+            try:
+                await tg_bot.session.close()
+            except Exception:
+                pass
+            delay = min(2 ** attempt, 60)
+            log.info(f"{name}: ожидание {delay} с перед повторной попыткой")
+            await asyncio.sleep(delay)
+        except Exception as e:
+            log.error(f"{name}: поллинг упал: {e}. Перезапуск через 5 сек")
+            await asyncio.sleep(5)
+
+
+async def main():
+    global http, news_lock
+    keep_alive()
+    news_lock = asyncio.Lock()
+    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/2.10"})
+    init_mongo()
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
+
+    background = []
+    pollers = []
+    try:
+        try:
+            me = await bot.get_me()
+            runtime["main_bot"] = f"@{me.username}"
+            log.info(f"Основной бот: @{me.username}")
+        except Exception as e:
+            runtime["main_bot"] = f"ошибка: {e}"
+            log.error(f"get_me основного бота: {e} (проверьте BOT_TOKEN)")
+        if admin_bot:
+            try:
+                me = await admin_bot.get_me()
+                runtime["admin_bot"] = f"@{me.username}"
+                log.info(f"Админ-бот: @{me.username}")
+            except Exception as e:
+                runtime["admin_bot"] = f"ошибка: {e}"
+                log.error(f"get_me админ-бота: {e} (проверьте INPUT_BOT_TOKEN)")
+
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            if admin_bot:
+                await admin_bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            log.warning(f"Не удалось удалить вебхук при старте: {e}")
+
+        try:
+            await bot.set_my_commands([
+                types.BotCommand(command="menu", description="🚀 Меню"),
+                types.BotCommand(command="news", description="📰 Последняя новость"),
+            ])
+        except Exception:
+            pass
+
+        if POLL_START_DELAY > 0:
+            log.info(f"Жду {POLL_START_DELAY} с, пока остановится предыдущий экземпляр (деплой Render)…")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
+            except asyncio.TimeoutError:
+                pass
+        if stop.is_set():
+            return
+
+        # ВСЕГДА восстанавливаем базу при старте (не только если она пуста)
+        restored = await telegram_restore()
+        if restored:
+            log.info(f"✅ База синхронизирована из бэкапа в Telegram: {restored} пользователей")
+        else:
+            log.warning("База пуста или бэкап не найден (нажмите /start в админ-боте, затем «💾 Бэкап»)")
+        
+        load_active_chats()
+
+        background += [
+            asyncio.create_task(scanner_loop()),
+            asyncio.create_task(position_monitor_loop()),
+            asyncio.create_task(news_watcher_loop()),
+            asyncio.create_task(backup_loop()),
+            asyncio.create_task(update_market_bias()),
+        ]
+
+        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
+        if admin_bot and admin_dp:
+            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
+
+        log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)}")
+        waiter = asyncio.create_task(stop.wait())
+        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
+        log.warning("Получен сигнал остановки, завершаюсь…")
+        waiter.cancel()
+    finally:
+        for t in pollers:
+            t.cancel()
+        await asyncio.gather(*pollers, return_exceptions=True)
+        try:
+            await asyncio.wait_for(telegram_backup("перед остановкой"), timeout=12)
+        except Exception as e:
+            log.info(f"Бэкап перед остановкой не отправлен: {e}")
+        for t in background:
+            t.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        if admin_bot:
+            try:
+                await admin_bot.session.close()
+            except Exception:
+                pass
+        await http.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Остановлен")
