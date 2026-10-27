@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.4
+IXCLY Trading bot v2.10.5
 - MongoDB для пользователей (фоновое подключение, чтобы не падал Render)
 - АВТОСОХРАНЕНИЕ: любой клик или сообщение сохраняет пользователя в базу
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
 - Учёт макро-новостей (ФРС, ставки) в решениях ИИ
 - Админ-панель во втором боте (рассылка, статистика, диагностика, бэкап)
 - Оптимизация памяти и супервизор для 100% аптайма
-- Добавлено 100 новых популярных монет (всего 184)
+- 184 популярные монеты
 """
 import asyncio
 import html
@@ -127,7 +127,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.4"
+VERSION = "2.10.5"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -2468,4 +2468,68 @@ async def main():
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
-                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки
+                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки (покажет ваш ID)")
+            try:
+                me = await input_bot.get_me()
+                runtime["admin_bot"] = f"@{me.username}"
+                log.info("Админ-бот: @%s (id %s)", me.username, me.id)
+                await input_bot.delete_webhook(drop_pending_updates=True)
+                await input_bot.set_my_commands([
+                    types.BotCommand(command="panel", description="🛠 Панель"),
+                    types.BotCommand(command="stats", description="📊 Статистика"),
+                    types.BotCommand(command="backup", description="💾 Бэкап базы"),
+                ])
+                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False,
+                                                               close_bot_session=False))
+                t.add_done_callback(_log_task_result)
+                background.append(t)
+                await asyncio.sleep(2)
+                if t.done():
+                    runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
+                else:
+                    log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
+                if ADMIN_IDS:
+                    await startup_notice()
+            except Exception as e:
+                runtime["admin_bot"] = f"ошибка: {e}"
+                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "unauthorized" in str(e) else ""
+                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
+        else:
+            if not INPUT_BOT_TOKEN:
+                reason = "переменная INPUT_BOT_TOKEN не задана"
+            elif INPUT_BOT_TOKEN == BOT_TOKEN:
+                reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
+            else:
+                reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
+            runtime["admin_bot"] = f"выключен: {reason}"
+            log.warning("Админ-бот выключен: %s", reason)
+
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    finally:
+        for t in background:
+            t.cancel()
+        if input_bot:
+            try:
+                await input_bot.session.close()
+            except Exception:
+                pass
+        await http.close()
+        await bot.session.close()
+
+
+async def run_forever():
+    """Если main() упал из-за ошибки, поднимаем бота заново, не дожидаясь перезапуска контейнера Render."""
+    while True:
+        try:
+            await main()
+            break  # штатная остановка (SIGTERM при деплое)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            log.error("main() упал: %s. Перезапуск через 10 секунд", e, exc_info=True)
+            await asyncio.sleep(10)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_forever())
