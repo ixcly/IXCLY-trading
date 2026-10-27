@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import random  # Добавлено для случайной выборки монет
 import re
 import signal
 import sys
@@ -145,7 +146,7 @@ http = None
 news_lock = None
 
 TFS = ["15m", "1h", "4h", "1d"]
-MIN_CANDLES = 50 # Увеличено для расчета Z-score и волатильности
+MIN_CANDLES = 50
 
 POPULAR_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
@@ -1611,11 +1612,37 @@ async def cb_interesting(cb: types.CallbackQuery):
     try:
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=9)
         movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
-        movers.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
-        text = "🧐 <b>Интересные за 24ч</b>\n\n🟢 Топ роста:\n" + "\n".join([f"<code>{x['symbol'][:-4]}</code> +{float(x['priceChangePercent']):.1f}%" for x in movers[:4]])
-        text += "\n\n🔴 Топ падения:\n" + "\n".join([f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%" for x in movers[-4:]])
+        
+        # Разделяем на чистых лидеров роста и падения
+        gainers = [x for x in movers if float(x["priceChangePercent"]) > 0]
+        losers = [x for x in movers if float(x["priceChangePercent"]) < 0]
+        
+        gainers.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        losers.sort(key=lambda x: float(x["priceChangePercent"])) # Самые сильные падения в начале
+        
+        # Берем топ-15 в качестве пула для случайной выборки
+        top_gainers_pool = gainers[:15]
+        top_losers_pool = losers[:15]
+        
+        # Выбираем 5 случайных монет из пула (при каждом запросе они будут разными)
+        random_gainers = random.sample(top_gainers_pool, min(5, len(top_gainers_pool)))
+        random_losers = random.sample(top_losers_pool, min(5, len(top_losers_pool)))
+        
+        # Сортируем выбранные 5, чтобы они шли по убыванию/возрастанию
+        random_gainers.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        random_losers.sort(key=lambda x: float(x["priceChangePercent"]))
+
+        text = "🧐 <b>Интересные за 24ч</b>\n\n🟢 <b>Топ роста:</b>\n"
+        for x in random_gainers:
+            text += f"<code>{x['symbol'][:-4]}</code> +{float(x['priceChangePercent']):.1f}%\n"
+            
+        text += "\n🔴 <b>Топ падения:</b>\n"
+        for x in random_losers:
+            text += f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%\n"
+            
         await safe_edit(cb.message, text, reply_markup=MENU_KB, user_id=cb.from_user.id)
-    except Exception:
+    except Exception as e:
+        log.error(f"interesting error: {e}")
         await safe_edit(cb.message, "Не удалось получить данные", reply_markup=MENU_KB, user_id=cb.from_user.id)
 
 @dp.callback_query(F.data == "search")
