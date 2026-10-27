@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.21
+IXCLY Trading bot v2.10.22
+- Новости полностью на русском + суть + влияние
+- Время по Москве
 - Полный список монет
-- Новости на русском с влиянием на конкретные монеты
-- Более просторное меню
+- Просторное меню
 """
 
 import asyncio
@@ -98,7 +99,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.21"
+VERSION = "2.10.22"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -115,7 +116,6 @@ http = None
 TFS = ["15m", "1h", "4h", "1d"]
 MIN_CANDLES = 30
 
-# ====================== ПОЛНЫЙ СПИСОК МОНЕТ ======================
 POPULAR_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
     "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
@@ -149,7 +149,14 @@ result_cache = {}
 last_signals_data = {"text": "", "kb": None, "ts": 0}
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
-market_bias = {"bias": 0, "text": "Нейтральный фон", "ts": 0}
+market_bias = {
+    "bias": 0,
+    "title_ru": "Нет данных",
+    "summary": "Нет данных",
+    "impact": "Нейтральный фон",
+    "coins": "BTC, ETH, SOL",
+    "ts": 0
+}
 
 users_col = None
 
@@ -324,19 +331,16 @@ dp.update.middleware(UserTrackerMiddleware())
 if admin_dp:
     admin_dp.update.middleware(UserTrackerMiddleware())
 
-# ====================== КЛАВИАТУРЫ (более просторные) ======================
+# ====================== КЛАВИАТУРЫ ======================
 def get_coins_keyboard(page=0):
-    per = 8  # Меньше монет на странице → меньше тесноты
+    per = 8
     coins = POPULAR_COINS[page*per:(page+1)*per]
     buttons = []
-    
-    # По 2 монеты в ряд
     for i in range(0, len(coins), 2):
         row = [InlineKeyboardButton(text=f"• {coins[i]}", callback_data=f"c:{coins[i]}")]
         if i+1 < len(coins):
             row.append(InlineKeyboardButton(text=f"• {coins[i+1]}", callback_data=f"c:{coins[i+1]}"))
         buttons.append(row)
-    
     total = (len(POPULAR_COINS) + per - 1) // per
     nav = []
     if page > 0:
@@ -345,8 +349,6 @@ def get_coins_keyboard(page=0):
     if page < total-1:
         nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"p:{page+1}"))
     buttons.append(nav)
-    
-    # Разделитель + основные кнопки с большими отступами
     buttons.append([InlineKeyboardButton(text="────────────", callback_data="ignore")])
     buttons.append([InlineKeyboardButton(text="📰  Новости", callback_data="news_menu")])
     buttons.append([InlineKeyboardButton(text="🧐  Интересные графики", callback_data="interesting_menu")])
@@ -354,7 +356,6 @@ def get_coins_keyboard(page=0):
     buttons.append([InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu")])
     buttons.append([InlineKeyboardButton(text="📊  Статистика 24ч", callback_data="show_stats")])
     buttons.append([InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")])
-    
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def result_keyboard(coin):
@@ -492,7 +493,7 @@ async def safe_delete(message):
     except Exception:
         pass
 
-# ====================== ИНДИКАТОРЫ + ДАННЫЕ ======================
+# ====================== ИНДИКАТОРЫ ======================
 def add_indicators(df):
     c = df["close"]
     df["ema20"] = c.ewm(span=20, adjust=False).mean()
@@ -662,7 +663,7 @@ def calc_levels(info, is_long):
         sl2 = sl1 + 0.7 * atr
     return entry, [tp1, tp2, tp3], [sl1, sl2]
 
-# ====================== НОВОСТИ (на русском + влияние) ======================
+# ====================== НОВОСТИ ======================
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
 WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml"]
 
@@ -721,38 +722,73 @@ def extract_image(entry):
 async def update_market_bias():
     global market_bias
     try:
-        crypto = [e.title for e in await get_news_entries()]
+        entries = await get_news_entries()
+        crypto = [e.title for e in entries]
         world = await get_world_titles(5)
-        prompt = f"""Ты крипто-аналитик. Напиши короткую оценку влияния новостей на русском.
+
+        prompt = f"""Ты профессиональный крипто-аналитик. 
+Переведи и разбери новость на русском языке.
 
 Новости:
-Мировые: {'; '.join(world) or 'нет'}
-Крипто: {'; '.join(crypto) or 'нет'}
+{chr(10).join('- ' + t for t in crypto[:3])}
 
-Ответь строго в формате:
+Мировые:
+{chr(10).join('- ' + t for t in world)}
+
+Ответь СТРОГО в формате:
 
 BIAS: BULLISH / BEARISH / NEUTRAL
-REASON: 1-2 предложения на русском, как это влияет на рынок
-COINS: какие монеты больше всего затронет (BTC, ETH, SOL и т.д.)
+
+TITLE_RU: перевод заголовка на русский
+
+SUMMARY: 2-4 предложения — в чём суть новости и почему это важно
+
+IMPACT: как это влияет на крипторынок (1-2 предложения)
+
+COINS: какие монеты больше всего затронет (BTC, ETH, SOL, ZEC и т.д.)
 """
-        text, _ = await ask_ai_named(prompt, timeout=16)
+        text, _ = await ask_ai_named(prompt, timeout=18)
+        
         bias = 0
-        reason = "Нейтральный фон"
+        title_ru = "Новость"
+        summary = "Нет данных"
+        impact = "Нейтральный фон"
         coins = "BTC, ETH, SOL"
+
         if text:
-            if "BULLISH" in text.upper():
+            upper = text.upper()
+            if "BULLISH" in upper:
                 bias = 1
-            elif "BEARISH" in text.upper():
+            elif "BEARISH" in upper:
                 bias = -1
-            m = re.search(r"REASON:\s*(.+)", text, re.I | re.S)
+
+            m = re.search(r"TITLE_RU:\s*(.+)", text, re.I)
             if m:
-                reason = m.group(1).strip().split("\n")[0][:200]
-            m2 = re.search(r"COINS:\s*(.+)", text, re.I)
-            if m2:
-                coins = m2.group(1).strip()[:80]
-        market_bias = {"bias": bias, "text": reason, "coins": coins, "ts": time.time()}
+                title_ru = m.group(1).strip().split("\n")[0][:130]
+
+            m = re.search(r"SUMMARY:\s*(.+?)(?=IMPACT:|$)", text, re.I | re.S)
+            if m:
+                summary = m.group(1).strip()[:380]
+
+            m = re.search(r"IMPACT:\s*(.+?)(?=COINS:|$)", text, re.I | re.S)
+            if m:
+                impact = m.group(1).strip()[:220]
+
+            m = re.search(r"COINS:\s*(.+)", text, re.I)
+            if m:
+                coins = m.group(1).strip()[:90]
+
+        market_bias = {
+            "bias": bias,
+            "title_ru": title_ru,
+            "summary": summary,
+            "impact": impact,
+            "coins": coins,
+            "ts": time.time()
+        }
+        log.info(f"Bias обновлён: {bias} | {title_ru}")
     except Exception as e:
-        log.warning(f"bias: {e}")
+        log.warning(f"bias error: {e}")
 
 # ====================== ИИ ======================
 async def _ask_gemini(prompt):
@@ -770,7 +806,7 @@ async def _ask_gemini(prompt):
 
 async def _ask_openai_compat(base, key, model, prompt):
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 900}
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 1100}
     try:
         async with http.post(f"{base}/chat/completions", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=18)) as r:
             j = await r.json(content_type=None)
@@ -780,7 +816,7 @@ async def _ask_openai_compat(base, key, model, prompt):
         pass
     return None
 
-async def ask_ai_named(prompt, timeout=14):
+async def ask_ai_named(prompt, timeout=15):
     tasks = []
     if GEMINI_API_KEYS:
         tasks.append(("Gemini", lambda: _ask_gemini(prompt)))
@@ -809,7 +845,7 @@ async def scan_once(send=True):
     if time.time() - market_bias["ts"] > 900:
         await update_market_bias()
     bias = market_bias["bias"]
-    bias_text = market_bias["text"]
+    bias_text = market_bias.get("impact", "Нейтральный фон")
     sem = asyncio.Semaphore(3)
     candidates = []
 
@@ -879,7 +915,7 @@ async def scan_once(send=True):
     _save_signal_history(hist)
 
     if signals and send:
-        lines = [f"🔥 <b>Сигналы</b> · {datetime.now().strftime('%H:%M')}\n"]
+        lines = [f"🔥 <b>Сигналы</b> · {datetime.now().strftime('%H:%M')} МСК\n"]
         kb = []
         for s in signals:
             emoji = "🟢" if s["is_long"] else "🔴"
@@ -1013,7 +1049,7 @@ async def analyze_coin(coin, user_id=None):
         f"🛡 <b>Стопы</b>\n"
         f"   SL1  <code>{fmt(sls[0])}</code>\n"
         f"   SL2  <code>{fmt(sls[1])}</code>\n\n"
-        f"🌍 Фон: {html.escape(market_bias.get('text', 'Нейтральный'))}"
+        f"🌍 Фон: {html.escape(market_bias.get('impact', 'Нейтральный'))}"
     )
     try:
         img = await asyncio.to_thread(draw_chart, coin, tf_data, "4h", is_long, entry, tps, sls)
@@ -1086,10 +1122,10 @@ async def check_position(user_id, coin, pos):
     elif time.time() - market_bias["ts"] < 1800:
         bias = market_bias["bias"]
         if side == "LONG" and bias == -1:
-            reason = f"⚠️ Новостной фон стал медвежьим\n{market_bias['text']}\nЛучше зафиксировать ({pnl:+.1f}%)."
+            reason = f"⚠️ Новостной фон стал медвежьим\n{market_bias.get('impact')}\nЛучше зафиксировать ({pnl:+.1f}%)."
             urgency = "warning"
         elif side == "SHORT" and bias == 1:
-            reason = f"⚠️ Новостной фон стал бычьим\n{market_bias['text']}\nЛучше закрыть шорт ({pnl:+.1f}%)."
+            reason = f"⚠️ Новостной фон стал бычьим\n{market_bias.get('impact')}\nЛучше закрыть шорт ({pnl:+.1f}%)."
             urgency = "warning"
     if not reason:
         return
@@ -1113,7 +1149,7 @@ async def check_position(user_id, coin, pos):
     except Exception:
         pass
 
-# ====================== ХЕНДЛЕРЫ ОСНОВНОГО БОТА ======================
+# ====================== ХЕНДЛЕРЫ ======================
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message):
     save_user_data(m.from_user.id, m.from_user.username, m.from_user.first_name)
@@ -1171,32 +1207,38 @@ async def cb_refresh(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "news_menu")
 async def cb_news_menu(cb: types.CallbackQuery):
     await safe_delete(cb.message)
-    await cb.answer("📰 Загружаю новости…")
+    await cb.answer("📰 Загружаю и перевожу новость…")
     try:
+        if time.time() - market_bias.get("ts", 0) > 600:
+            await update_market_bias()
+
         entries = await get_news_entries()
         if not entries:
             await cb.message.answer("📭 Свежих новостей пока нет", reply_markup=get_coins_keyboard())
             return
-        
+
         entry = entries[0]
-        title = html.escape(entry.title)
         img_url = extract_image(entry)
-        
-        # Формируем нормальный текст на русском
-        bias_text = market_bias.get("text", "Нейтральный фон")
-        coins_text = market_bias.get("coins", "BTC, ETH, SOL")
-        
-        short = (
-            f"📰 <b>Последняя новость</b>\n\n"
-            f"<b>{title}</b>\n\n"
-            f"📊 <b>Влияние на рынок:</b>\n{html.escape(bias_text)}\n\n"
-            f"🪙 <b>Какие монеты затронет:</b>\n{html.escape(coins_text)}"
+
+        title_ru = market_bias.get("title_ru", entry.title)
+        summary = market_bias.get("summary", "Нет подробностей")
+        impact = market_bias.get("impact", "Нейтральный фон")
+        coins = market_bias.get("coins", "BTC, ETH, SOL")
+        moscow_time = datetime.now().strftime("%H:%M") + " МСК"
+
+        text = (
+            f"📰 <b>Последняя новость</b>\n"
+            f"<i>{moscow_time}</i>\n\n"
+            f"<b>{html.escape(title_ru)}</b>\n\n"
+            f"📌 <b>Суть:</b>\n{html.escape(summary)}\n\n"
+            f"📊 <b>Влияние на рынок:</b>\n{html.escape(impact)}\n\n"
+            f"🪙 <b>Какие монеты затронет:</b>\n{html.escape(coins)}"
         )
-        
+
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
         ])
-        
+
         if img_url:
             try:
                 async with http.get(img_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -1204,17 +1246,17 @@ async def cb_news_menu(cb: types.CallbackQuery):
                         img_data = await r.read()
                         await cb.message.answer_photo(
                             BufferedInputFile(img_data, "news.jpg"),
-                            caption=short,
+                            caption=text,
                             parse_mode="HTML",
                             reply_markup=kb
                         )
                         return
             except Exception:
                 pass
-        
-        await cb.message.answer(short, parse_mode="HTML", reply_markup=kb)
+
+        await cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
     except Exception as e:
-        await cb.message.answer(f"Ошибка загрузки новостей: {e}", reply_markup=get_coins_keyboard())
+        await cb.message.answer(f"Ошибка загрузки новости: {e}", reply_markup=get_coins_keyboard())
 
 @dp.callback_query(F.data == "last_signals")
 async def cb_last(cb: types.CallbackQuery):
@@ -1448,7 +1490,7 @@ if admin_dp:
                 f"Юзеров: {total} (активных {active})\n"
                 f"Сигналов: {stats['signals']}\n"
                 f"Аптайм: {up//3600}ч {up%3600//60}м\n"
-                f"Bias: {market_bias['bias']} | {market_bias['text'][:80]}"
+                f"Bias: {market_bias['bias']} | {market_bias.get('title_ru', '')[:60]}"
             )
             await cb.message.answer(text, parse_mode="HTML")
 
@@ -1473,17 +1515,17 @@ if admin_dp:
         elif act == "news_now":
             await cb.answer("Отправляю…")
             try:
-                entries = await get_news_entries()
-                if not entries:
-                    await cb.message.answer("Нет новостей")
-                    return
-                entry = entries[0]
-                title = html.escape(entry.title)
+                if time.time() - market_bias.get("ts", 0) > 300:
+                    await update_market_bias()
+                title_ru = market_bias.get("title_ru", "Новость")
+                summary = market_bias.get("summary", "")
+                impact = market_bias.get("impact", "")
+                coins = market_bias.get("coins", "")
                 short = (
-                    f"📰 <b>Новость</b>\n\n"
-                    f"{title}\n\n"
-                    f"📊 {html.escape(market_bias.get('text', ''))}\n"
-                    f"🪙 {html.escape(market_bias.get('coins', ''))}"
+                    f"📰 <b>{html.escape(title_ru)}</b>\n\n"
+                    f"{html.escape(summary)}\n\n"
+                    f"📊 {html.escape(impact)}\n"
+                    f"🪙 {html.escape(coins)}"
                 )
                 await broadcast({"kind": "text", "text": short})
                 stats["news_sent"] += 1
@@ -1510,7 +1552,7 @@ if admin_dp:
                 f"Чатов: {len(active_chats)}\n"
                 f"Gemini: {len(GEMINI_API_KEYS)}\n"
                 f"ADMIN_IDS: {ADMIN_IDS}\n"
-                f"Bias: {market_bias}"
+                f"Bias: {market_bias.get('title_ru')}"
             )
             await cb.message.answer(text)
 
