@@ -87,7 +87,9 @@ def status_page():
 def _run_web():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     try:
-        port = int(os.environ.get("PORT", 8080))
+        # Render по умолчанию ожидает порт 10000, если переменная PORT не задана
+        port = int(os.environ.get("PORT", 10000)) 
+        log.info(f"🌐 Flask keep-alive запущен на порту {port}")
         app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
     except Exception as e:
         log.error(f"Flask: {e}")
