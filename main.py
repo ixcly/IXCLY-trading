@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.31
-+ Автоматическое удаление предыдущих меню, чтобы не засорять чат.
+IXCLY Trading bot v2.10.33
++ Красивое приветственное сообщение с описанием возможностей.
++ Автоматическое удаление предыдущих меню (включая подменю).
++ Кнопка "Главное меню" добавлена во все меню.
 """
 
 import asyncio
@@ -128,7 +130,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.31"
+VERSION = "2.10.33"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -389,7 +391,6 @@ async def telegram_restore():
             data = json.loads(buf.read().decode("utf-8"))
             if isinstance(data, dict) and data:
                 current = _load_users()
-                # Глубокое слияние базы (защита от затирания новых сделок)
                 for k, v in data.items():
                     if k not in current:
                         current[k] = v
@@ -520,6 +521,7 @@ def get_delete_signals_menu(user_id):
     if row:
         buttons.append(row)
     buttons.append([InlineKeyboardButton(text="⬅ Назад", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -541,6 +543,7 @@ def get_save_coins_keyboard(page=0):
         nav.append(InlineKeyboardButton(text="➡", callback_data=f"sig:save_page:{page + 1}"))
     buttons.append(nav)
     buttons.append([InlineKeyboardButton(text="⬅ Назад", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -553,6 +556,7 @@ def get_saved_signal_view_keyboard(user_id, coin):
     else:
         buttons.append([InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
     buttons.append([InlineKeyboardButton(text="⬅ Назад в избранное", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -1735,8 +1739,22 @@ async def cmd_start(m: types.Message):
     await asyncio.to_thread(save_user_data, m.from_user.id, m.from_user.username, m.from_user.first_name)
     active_chats.add(m.chat.id)
     await cleanup_prev_menu(m.from_user.id)
+    
+    welcome_text = (
+        "👋 <b>Привет! Добро пожаловать в IXCLY Trading Bot!</b>\n\n"
+        "Я твой персональный крипто-помощник, который делает торговлю проще и понятнее 🚀\n\n"
+        "<b>Чем я могу тебе помочь:</b>\n"
+        "📊 <b>Умный анализ</b> — покажу, куда движется цена, рассчитаю точные входы, тейк-профиты и стопы.\n"
+        "📈 <b>Слежение за сделками</b> — просто нажми «Вошёл в сделку», и я буду следить за рынком. Если цена дойдет до цели или развернется — я сразу пришлю уведомление.\n"
+        "🔥 <b>Готовые сигналы</b> — автоматически ищу перспективные монеты и присылаю их тебе.\n"
+        "📰 <b>Новости и фон</b> — перевожу мировые новости и объясняю простым языком, как они повлияют на рынок.\n"
+        "⭐ <b>Твоё избранное</b> — сохраняй интересные идеи, чтобы ничего не упустить.\n\n"
+        "⚠️ <i>Помни: криптовалюта — это рискованно. Я даю аналитику, но решения всегда принимаешь ты!</i>\n\n"
+        "👇 Выбери монету из меню ниже или воспользуйся кнопками, чтобы начать:"
+    )
+    
     msg = await m.answer(
-        f"👋 <b>IXCLY v{VERSION}</b>\n\nВыбери монету:",
+        welcome_text,
         reply_markup=get_coins_keyboard(),
         parse_mode="HTML"
     )
@@ -2304,7 +2322,6 @@ async def main():
         if stop.is_set():
             return
 
-        # ВСЕГДА восстанавливаем базу при старте (не только если она пуста)
         restored = await telegram_restore()
         if restored:
             log.info(f"✅ База синхронизирована из бэкапа в Telegram: {restored} пользователей")
