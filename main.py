@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.3
+IXCLY Trading bot v2.10.4
 - MongoDB для пользователей (фоновое подключение, чтобы не падал Render)
+- АВТОСОХРАНЕНИЕ: любой клик или сообщение сохраняет пользователя в базу
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
 - Учёт макро-новостей (ФРС, ставки) в решениях ИИ
 - Админ-панель во втором боте (рассылка, статистика, диагностика, бэкап)
@@ -27,7 +28,7 @@ import feedparser
 import numpy as np
 import pandas as pd
 import pymongo
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
@@ -126,7 +127,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.3"
+VERSION = "2.10.4"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -268,21 +269,39 @@ def _save_users(users):
 
 
 def save_user_data(user_id, username, first_name):
-    users = _load_users()
+    """Быстрое сохранение при любом действии. Использует upsert в Mongo."""
     key = str(user_id)
-    if key in users:
-        if users[key].get("active") is False:
-            users[key]["active"] = True
-            _save_users({key: users[key]} if users_col is not None else users)
-        return False
-    users[key] = {
-        "username": username,
-        "first_name": first_name,
-        "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "active": True,
-    }
-    _save_users({key: users[key]} if users_col is not None else users)
-    return True
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if users_col is not None:
+        try:
+            # Проверяем, есть ли пользователь, и обновляем/создаем его
+            users_col.update_one(
+                {"_id": key},
+                {
+                    "$set": {"username": username, "first_name": first_name, "active": True},
+                    "$setOnInsert": {"joined_at": now_str}
+                },
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            log.error(f"Mongo save_user error: {e}")
+            return False
+    else:
+        users = _load_users()
+        if key in users:
+            if users[key].get("active") is False:
+                users[key]["active"] = True
+                _save_users(users)
+            return False
+        users[key] = {
+            "username": username,
+            "first_name": first_name,
+            "joined_at": now_str,
+            "active": True,
+        }
+        _save_users(users)
+        return True
 
 
 def set_users_active(ids, active):
@@ -345,6 +364,35 @@ def _save_news_history():
             json.dump(news_history, f, ensure_ascii=False, indent=4)
     except Exception as e:
         log.warning("news_history.json не сохранён: %s", e)
+
+
+# ----------------------------------------------------------------------------
+# МИДЛВАРЬ ДЛЯ АВТОСОХРАНЕНИЯ ПОЛЬЗОВАТЕЛЕЙ
+# ----------------------------------------------------------------------------
+class UserTrackerMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: types.Update, data: dict):
+        user = None
+        chat_id = None
+        
+        # Проверяем сообщения
+        if event.message:
+            user = event.message.from_user
+            chat_id = event.message.chat.id
+        # Проверяем нажатия на кнопки
+        elif event.callback_query:
+            user = event.callback_query.from_user
+            if event.callback_query.message:
+                chat_id = event.callback_query.message.chat.id
+                
+        # Если это юзер и его еще нет в активных, сохраняем
+        if user and chat_id and chat_id not in active_chats:
+            active_chats.add(chat_id)
+            # Сохраняем в базу в фоне, чтобы не тормозить ответ
+            asyncio.create_task(asyncio.to_thread(save_user_data, user.id, user.username, user.first_name))
+            
+        return await handler(event, data)
+
+dp.update.middleware(UserTrackerMiddleware())
 
 
 # ----------------------------------------------------------------------------
@@ -1813,13 +1861,11 @@ async def process_signal(chat_id, user_id, coin, force=False):
 # ----------------------------------------------------------------------------
 @dp.message(Command("start", "menu"))
 async def start_handler(message: types.Message):
-    active_chats.add(message.chat.id)
+    # Сохранение уже работает через middleware, но оставим для приветствия
     user_name = message.from_user.first_name or "User"
     username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
     
-    # Обернуто в to_thread, чтобы база не блокировала бота
-    is_new = await asyncio.to_thread(save_user_data, message.from_user.id, message.from_user.username, user_name)
-
+    is_new = str(message.from_user.id) not in _load_users()
     if is_new and message.from_user.id not in notified_users:
         notified_users.add(message.from_user.id)
         total = len(await asyncio.to_thread(_load_users))
@@ -1835,7 +1881,6 @@ async def start_handler(message: types.Message):
 
 @dp.message(Command("news"))
 async def news_handler(message: types.Message):
-    active_chats.add(message.chat.id)
     loading = await message.answer("⏳ Запрашиваю новость и проверяю прошлые прогнозы...")
     try:
         check_text = await check_past_news()
@@ -1858,7 +1903,6 @@ async def text_handler(message: types.Message):
     if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
         await message.answer("⚠️ Неверный формат. Введите тикер, например: <code>BTC</code>", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
         return
-    active_chats.add(message.chat.id)
     await process_signal(message.chat.id, message.from_user.id, coin)
 
 
@@ -2424,68 +2468,4 @@ async def main():
 
         if input_bot and input_dp:
             if not ADMIN_IDS:
-                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки (покажет ваш ID)")
-            try:
-                me = await input_bot.get_me()
-                runtime["admin_bot"] = f"@{me.username}"
-                log.info("Админ-бот: @%s (id %s)", me.username, me.id)
-                await input_bot.delete_webhook(drop_pending_updates=True)
-                await input_bot.set_my_commands([
-                    types.BotCommand(command="panel", description="🛠 Панель"),
-                    types.BotCommand(command="stats", description="📊 Статистика"),
-                    types.BotCommand(command="backup", description="💾 Бэкап базы"),
-                ])
-                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False,
-                                                               close_bot_session=False))
-                t.add_done_callback(_log_task_result)
-                background.append(t)
-                await asyncio.sleep(2)
-                if t.done():
-                    runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
-                else:
-                    log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
-                if ADMIN_IDS:
-                    await startup_notice()
-            except Exception as e:
-                runtime["admin_bot"] = f"ошибка: {e}"
-                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "unauthorized" in str(e) else ""
-                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
-        else:
-            if not INPUT_BOT_TOKEN:
-                reason = "переменная INPUT_BOT_TOKEN не задана"
-            elif INPUT_BOT_TOKEN == BOT_TOKEN:
-                reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
-            else:
-                reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
-            runtime["admin_bot"] = f"выключен: {reason}"
-            log.warning("Админ-бот выключен: %s", reason)
-
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    finally:
-        for t in background:
-            t.cancel()
-        if input_bot:
-            try:
-                await input_bot.session.close()
-            except Exception:
-                pass
-        await http.close()
-        await bot.session.close()
-
-
-async def run_forever():
-    """Если main() упал из-за ошибки, поднимаем бота заново, не дожидаясь перезапуска контейнера Render."""
-    while True:
-        try:
-            await main()
-            break  # штатная остановка (SIGTERM при деплое)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            log.error("main() упал: %s. Перезапуск через 10 секунд", e, exc_info=True)
-            await asyncio.sleep(10)
-
-
-if __name__ == "__main__":
-    asyncio.run(run_forever())
+                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки
