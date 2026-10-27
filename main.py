@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.29
+IXCLY Trading bot v2.10.30
++ Исправлен бесконечный перезапуск поллинга при сетевых ошибках (ServerDisconnectedError).
++ Добавлены таймеры в админ-панель.
 """
 
 import asyncio
@@ -127,7 +129,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.29"
+VERSION = "2.10.30"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -2187,7 +2189,12 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
                 log.debug(f"{name}: не удалось удалить вебхук: {e}")
             
             await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False)
-            return
+            
+            # Если start_polling завершился (например, из-за сетевой ошибки), 
+            # проверяем, не была ли это остановка
+            if not stop_event.is_set():
+                log.warning(f"{name}: start_polling завершился неожиданно. Перезапуск через 5 сек...")
+                await asyncio.sleep(5)
         except asyncio.CancelledError:
             raise
         except TelegramConflictError as e:
