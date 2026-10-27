@@ -1805,7 +1805,8 @@ async def main():
         try:
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot: await admin_bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню"), types.BotCommand(command="news", description="📰 Новость")])
+            # Удаляем стандартные команды, чтобы убрать кнопку меню
+            await bot.delete_my_commands()
         except Exception: pass
 
         if POLL_START_DELAY > 0:
