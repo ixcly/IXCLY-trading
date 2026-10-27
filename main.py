@@ -198,6 +198,14 @@ last_news_link = None
 users_dirty = False
 last_backup_msg = {}
 
+# Таймеры следующих запросов
+next_timers = {
+    "scanner": 0,
+    "positions": 0,
+    "news_watcher": 0,
+    "backup": 0,
+}
+
 users_col = None
 
 
@@ -415,6 +423,7 @@ async def backup_loop():
                 users_dirty = False
         except Exception as e:
             log.warning(f"backup_loop: {e}")
+        next_timers["backup"] = time.time() + 60
         await asyncio.sleep(60)
 
 
@@ -558,7 +567,8 @@ def get_admin_keyboard():
         [InlineKeyboardButton(text="⚡ Рассылка сигналов", callback_data="admin:broadcast_now")],
         [InlineKeyboardButton(text="🔧 Диагностика", callback_data="admin:diag"),
          InlineKeyboardButton(text="💾 Бэкап", callback_data="admin:backup")],
-        [InlineKeyboardButton(text="📥 Восстановить", callback_data="admin:restore")],
+        [InlineKeyboardButton(text="📥 Восстановить", callback_data="admin:restore"),
+         InlineKeyboardButton(text="⏳ Таймеры", callback_data="admin:timers")],
     ])
 
 
@@ -1324,6 +1334,7 @@ async def news_watcher_loop():
                             log.info(f"Новость разослана: {sent} доставлено, {failed} ошибок")
         except Exception as e:
             log.warning(f"news_watcher: {e}")
+        next_timers["news_watcher"] = time.time() + 600
         await asyncio.sleep(600)
 
 
@@ -1442,6 +1453,7 @@ async def scanner_loop():
                 await scan_once(send=True)
         except Exception as e:
             log.error(f"scanner: {e}")
+        next_timers["scanner"] = time.time() + SCAN_INTERVAL
         await asyncio.sleep(SCAN_INTERVAL)
 
 
@@ -1607,6 +1619,7 @@ async def position_monitor_loop():
                     await asyncio.sleep(0.3)
         except Exception as e:
             log.error(f"pos monitor: {e}")
+        next_timers["positions"] = time.time() + 320
         await asyncio.sleep(320)
 
 
@@ -2118,6 +2131,23 @@ if admin_dp:
 
         elif act == "restore":
             await cb.message.answer("Пришли файл users.json (последний бэкап). Новые пользователи добавятся, существующие не изменятся.")
+
+        elif act == "timers":
+            now = time.time()
+            lines = ["⏳ <b>Таймеры следующих запросов:</b>\n"]
+            
+            def fmt_time(sec):
+                if sec <= 0:
+                    return "выполняется сейчас"
+                m, s = divmod(int(sec), 60)
+                return f"через {m} мин {s} сек" if m else f"через {s} сек"
+
+            lines.append(f"🤖 <b>Сканер (ИИ/биржа):</b> {fmt_time(next_timers['scanner'] - now)}")
+            lines.append(f"📈 <b>Мониторинг сделок:</b> {fmt_time(next_timers['positions'] - now)}")
+            lines.append(f"📰 <b>Проверка новостей (ИИ):</b> {fmt_time(next_timers['news_watcher'] - now)}")
+            lines.append(f"💾 <b>Авто-бэкап базы:</b> {fmt_time(next_timers['backup'] - now)}")
+            
+            await cb.message.answer("\n".join(lines), parse_mode="HTML")
 
     @admin_dp.message(F.document)
     async def admin_on_document(m: types.Message):
