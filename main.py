@@ -150,9 +150,9 @@ POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER")
 CONF_STAGE1 = float(os.getenv("CONF_STAGE1", "60"))      # быстрый отбор по 4h + 1d
 CONF_FINAL = float(os.getenv("CONF_FINAL", "66"))        # итоговая уверенность после всех поправок
 BT_CONF = float(os.getenv("BT_CONF", "60"))              # порог сигнала внутри бэктеста (на одном ТФ)
-BT_MIN_TRADES = int(os.getenv("BT_MIN_TRADES", "8"))
-BT_MIN_AVG_R = float(os.getenv("BT_MIN_AVG_R", "0.10"))  # минимальное мат. ожидание в R
-BT_MIN_WINRATE = float(os.getenv("BT_MIN_WINRATE", "38"))
+BT_MIN_TRADES = int(os.getenv("BT_MIN_TRADES", "5"))     # ИЗМЕНЕНО: теперь достаточно 5 сделок
+BT_MIN_AVG_R = float(os.getenv("BT_MIN_AVG_R", "0.10"))  # минимальное мат. ожидание в R (оставили 0.10)
+BT_MIN_WINRATE = float(os.getenv("BT_MIN_WINRATE", "30")) # ИЗМЕНЕНО: минимальный винрейт снижен до 30%
 MIN_QV24 = float(os.getenv("MIN_QV24", "1000000"))       # минимальный оборот за ~24ч в USDT (по свечам 4h)
 DEPOSIT = float(os.getenv("DEPOSIT", "1000"))            # условный депозит для Risk Gate
 RISK_PCT = 0.01
@@ -1516,9 +1516,11 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False):
 # =====================================================================
 #                 УРОВНИ, РИСК, БЭКТЕСТ (СЛОЙ 5)
 # =====================================================================
+
 def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=None, resistance=None):
-    """Единая логика уровней для живого сигнала и бэктеста. Возвращает entry, sl1, risk."""
+    """Строго лимитный вход. Бот ждет отката цены к EMA или поддержке/сопротивлению, не покупая по рынку."""
     if is_long:
+        # Вход строго на откате: либо к EMA20/50, либо чуть ниже текущей цены
         entry = min(price, max(ema20, ema50))
         if entry > price - 0.2 * atr:
             entry = price - 0.35 * atr
@@ -1528,6 +1530,8 @@ def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=No
         sl1 = min(rec_low - 0.5 * atr, entry - 0.8 * atr)
         sl1 = max(sl1, entry - 2.5 * atr)
         return entry, sl1, entry - sl1
+    
+    # Для шорта: ждем отката вверх к EMA или сопротивлению
     entry = max(price, min(ema20, ema50))
     if entry < price + 0.2 * atr:
         entry = price + 0.35 * atr
@@ -2153,13 +2157,14 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         lines.append("🎯 Сжатие волатильности: возможен резкий импульс")
     lines += [
         "",
-        f"💰 Цена: <code>{fmt(info['price'])}</code>",
-        f"📥 Вход (лимит): <code>{fmt(entry)}</code>",
+        f"💰 Текущая цена: <code>{fmt(info['price'])}</code>",
+        f"📥 <b>ВХОД (ТОЛЬКО ЛИМИТНЫЙ ОРДЕР!):</b> <code>{fmt(entry)}</code>",
+        "⚠️ <i>Не входите по рынку (Market). Ждите, пока цена откатится до указанного уровня!</i>",
         "",
-        "🎯 <b>Тейки</b>",
+        "🎯 <b>Тейки (TP)</b>",
     ] + [f"   TP{i + 1}  <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(tps)] + [
         "",
-        "🛡 <b>Стопы</b>",
+        "🛡 <b>Стопы (SL)</b>",
     ] + [f"   SL{i + 1}  <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls)] + [
         "",
         f"⚖ <b>Risk Gate:</b> позиция <b>${pos_usdt:.2f}</b>, риск <b>${risk_usdt:.2f}</b> ({RISK_PCT * 100:.0f}% от ${DEPOSIT:.0f})",
@@ -2337,10 +2342,33 @@ async def scan_once(send=True):
     if to_broadcast and send:
         now = time.time()
         hist = _load_signal_history()
+        
+        # 1. Рассылаем сами сигналы всем пользователям с графиком и кнопками
         for r in to_broadcast:
             signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
             hist.append({"ts": now, "coin": r["coin"], "side": r["side"], "type": r["type"], "strength": r["strength"], "text": r["text"]})
+            
+            # Получаем кнопки (Обновить, Сохранить, Вошёл в сделку)
+            kb = result_keyboard(r["coin"])
+            
+            # Формируем сообщение (если есть картинка - шлем фото, если нет - текст)
+            payload = {
+                "kind": "photo" if r["img"] else "text",
+                "text": r["text"],
+                "data": r["img"],
+                "markup": kb
+            }
+            
+            # Отправляем всем активным пользователям
+            await broadcast(payload)
+            
+            # Пауза 1.5 секунды между сигналами, чтобы Telegram не забанил бота за спам
+            await asyncio.sleep(1.5) 
+            
         _save_signal_history(hist)
+        stats["signals"] += len(to_broadcast)
+
+        # 2. Обновляем данные для кнопки "Последние сигналы" в меню
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
         text = f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
         kb = [
@@ -2351,9 +2379,6 @@ async def scan_once(send=True):
         ]
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
-        await broadcast({"kind": "text", "text": text, "markup": markup})
-        stats["signals"] += len(to_broadcast)
-    return final if not send else to_broadcast
 
 
 async def scanner_loop():
