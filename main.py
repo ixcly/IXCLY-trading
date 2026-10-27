@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.22
-- Новости полностью на русском + суть + влияние
-- Время по Москве
+IXCLY Trading bot v2.10.23
+- Исправлено подключение к MongoDB (SSL handshake)
+- Новости на русском + суть + влияние + время МСК
 - Полный список монет
 - Просторное меню
 """
@@ -99,7 +99,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.22"
+VERSION = "2.10.23"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -160,25 +160,58 @@ market_bias = {
 
 users_col = None
 
+# ====================== ИСПРАВЛЕННОЕ ПОДКЛЮЧЕНИЕ К MONGO ======================
 def init_mongo():
     global users_col
     if not MONGO_URI:
-        return
-    try:
-        client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=4000)
-        users_col = client["ixcly_db"]["users"]
-        client.server_info()
-        log.info("✅ MongoDB подключена")
-    except Exception as e:
-        log.error(f"Mongo: {e}")
+        log.warning("MONGO_URI не задан — используем файл users.json")
         users_col = None
+        return
+
+    # Варианты подключения (от самого строгого к самому мягкому)
+    variants = [
+        # 1. Стандартный + tls
+        MONGO_URI + ("&" if "?" in MONGO_URI else "?") + "tls=true&retryWrites=true&w=majority",
+        
+        # 2. С разрешением невалидных сертификатов (самый рабочий на Render)
+        MONGO_URI + ("&" if "?" in MONGO_URI else "?") + "tls=true&tlsAllowInvalidCertificates=true&retryWrites=true&w=majority",
+        
+        # 3. Старый вариант ssl
+        MONGO_URI + ("&" if "?" in MONGO_URI else "?") + "ssl=true&ssl_cert_reqs=CERT_NONE&retryWrites=true&w=majority",
+        
+        # 4. Оригинальная строка
+        MONGO_URI,
+    ]
+
+    for i, uri in enumerate(variants, 1):
+        try:
+            log.info(f"Пробую подключение к MongoDB (вариант {i})...")
+            client = pymongo.MongoClient(
+                uri,
+                serverSelectionTimeoutMS=8000,
+                connectTimeoutMS=8000,
+                socketTimeoutMS=10000,
+            )
+            # Проверяем реальное подключение
+            client.admin.command("ping")
+            users_col = client["ixcly_db"]["users"]
+            log.info(f"✅ MongoDB успешно подключена (вариант {i})")
+            return
+        except Exception as e:
+            log.warning(f"Вариант {i} не сработал: {str(e)[:120]}")
+            continue
+
+    # Если все варианты провалились
+    users_col = None
+    log.error("❌ Не удалось подключиться к MongoDB. Работаем через файл users.json")
 
 # ====================== ПОЛЬЗОВАТЕЛИ ======================
 def _load_users():
     if users_col is not None:
         try:
             return {str(u["_id"]): {k: v for k, v in u.items() if k != "_id"} for u in users_col.find()}
-        except Exception:
+        except Exception as e:
+            log.error(f"Ошибка чтения Mongo: {e}")
             return {}
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -191,15 +224,17 @@ def _save_users(users):
         try:
             for uid, data in users.items():
                 users_col.update_one({"_id": str(uid)}, {"$set": data}, upsert=True)
-        except Exception:
-            pass
-        return
+            return
+        except Exception as e:
+            log.error(f"Ошибка записи в Mongo: {e}")
+    
+    # Фоллбэк на файл
     try:
         with open(USERS_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(users, f, ensure_ascii=False, indent=2)
         os.replace(USERS_FILE + ".tmp", USERS_FILE)
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"Ошибка записи в файл: {e}")
 
 def save_user_data(user_id, username, first_name):
     key = str(user_id)
@@ -212,9 +247,9 @@ def save_user_data(user_id, username, first_name):
                  "$setOnInsert": {"joined_at": now}},
                 upsert=True
             )
+            return
         except Exception:
             pass
-        return
     users = _load_users()
     if key not in users:
         users[key] = {"username": username, "first_name": first_name, "joined_at": now, "active": True}
@@ -229,9 +264,9 @@ def add_user_saved_signal(user_id, coin, text):
         try:
             users_col.update_one({"_id": key}, {"$pull": {"saved_signals": {"coin": coin}}})
             users_col.update_one({"_id": key}, {"$push": {"saved_signals": {"coin": coin, "text": text}}}, upsert=True)
+            return
         except Exception:
             pass
-        return
     users = _load_users()
     if key not in users:
         return
@@ -245,9 +280,9 @@ def del_user_saved_signal(user_id, coin):
     if users_col is not None:
         try:
             users_col.update_one({"_id": key}, {"$pull": {"saved_signals": {"coin": coin}}})
+            return
         except Exception:
             pass
-        return
     users = _load_users()
     if key in users:
         users[key]["saved_signals"] = [s for s in users[key].get("saved_signals", []) if s.get("coin") != coin]
@@ -264,9 +299,9 @@ def set_user_open_position(user_id, coin, data):
                 users_col.update_one({"_id": key}, {"$unset": {f"open_positions.{coin}": ""}})
             else:
                 users_col.update_one({"_id": key}, {"$set": {f"open_positions.{coin}": data}}, upsert=True)
+            return
         except Exception:
             pass
-        return
     users = _load_users()
     if key not in users:
         users[key] = {}
@@ -1548,7 +1583,7 @@ if admin_dp:
         elif act == "diag":
             text = (
                 f"🔧 Диагностика\n\n"
-                f"Mongo: {'✅' if users_col else '❌'}\n"
+                f"Mongo: {'✅' if users_col else '❌ файл'}\n"
                 f"Чатов: {len(active_chats)}\n"
                 f"Gemini: {len(GEMINI_API_KEYS)}\n"
                 f"ADMIN_IDS: {ADMIN_IDS}\n"
