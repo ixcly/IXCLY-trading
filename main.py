@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.19
-Исправлены: админ-панель, новости в главном меню, обработка callback'ов
+IXCLY Trading bot v2.10.20
+- BOT_TOKEN        = основной бот (для пользователей)
+- INPUT_BOT_TOKEN  = админ-бот (только для администратора)
 """
 
 import asyncio
@@ -13,7 +14,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Thread
 
 import aiohttp
@@ -79,7 +80,8 @@ def keep_alive():
 def clean_key(k):
     return k.strip().strip('"').strip("'") if k else None
 
-BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
+BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))                 # Основной бот
+INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))     # Админ-бот
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
@@ -95,9 +97,22 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.19"
+VERSION = "2.10.20"
+
+# Основной бот
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Админ-бот (если указан)
+admin_bot = None
+admin_dp = None
+if INPUT_BOT_TOKEN:
+    admin_bot = Bot(token=INPUT_BOT_TOKEN)
+    admin_dp = Dispatcher()
+    log.info("Админ-бот активирован")
+else:
+    log.warning("INPUT_BOT_TOKEN не задан — админ-панель будет на основном боте")
+
 http = None
 
 TFS = ["15m", "1h", "4h", "1d"]
@@ -298,6 +313,8 @@ class UserTrackerMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 dp.update.middleware(UserTrackerMiddleware())
+if admin_dp:
+    admin_dp.update.middleware(UserTrackerMiddleware())
 
 # ====================== КЛАВИАТУРЫ ======================
 def get_coins_keyboard(page=0):
@@ -317,8 +334,6 @@ def get_coins_keyboard(page=0):
     if page < total-1:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"p:{page+1}"))
     buttons.append(nav)
-    
-    # Новости добавлены в главное меню
     buttons.append([InlineKeyboardButton(text="📰 Новости", callback_data="news_menu")])
     buttons.append([InlineKeyboardButton(text="🧐 Интересные", callback_data="interesting_menu")])
     buttons.append([InlineKeyboardButton(text="🔥 Последние сигналы", callback_data="last_signals")])
@@ -460,7 +475,7 @@ async def safe_delete(message):
     except Exception:
         pass
 
-# ====================== ИНДИКАТОРЫ ======================
+# ====================== ИНДИКАТОРЫ + ДАННЫЕ ======================
 def add_indicators(df):
     c = df["close"]
     df["ema20"] = c.ewm(span=20, adjust=False).mean()
@@ -522,7 +537,6 @@ def build_tf_data(rows_by_tf):
         }
     return out
 
-# ====================== ДАННЫЕ ======================
 def _p_binance(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
 
@@ -576,7 +590,6 @@ async def get_simple_price(coin):
         except Exception:
             return None
 
-# ====================== ТЕХ. АНАЛИЗ ======================
 def tech_check(tf_data):
     if "4h" not in tf_data or "1d" not in tf_data:
         return None
@@ -1076,23 +1089,12 @@ async def check_position(user_id, coin, pos):
     except Exception:
         pass
 
-# ====================== ХЕНДЛЕРЫ ======================
+# ====================== ХЕНДЛЕРЫ ОСНОВНОГО БОТА ======================
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message):
     save_user_data(m.from_user.id, m.from_user.username, m.from_user.first_name)
     active_chats.add(m.chat.id)
     await m.answer(f"👋 <b>IXCLY v{VERSION}</b>\nВыбери монету:", reply_markup=get_coins_keyboard(), parse_mode="HTML")
-
-@dp.message(Command("panel"))
-async def cmd_panel(m: types.Message):
-    if m.from_user.id not in ADMIN_IDS:
-        await m.answer("⛔ Доступ только для администратора")
-        return
-    total, active, _, _ = user_counts()
-    text = f"✅ <b>Админ-панель v{VERSION}</b>\n👥 Пользователей: {total} (активных {active})"
-    if total == 0:
-        text += "\n\n⚠️ База пуста"
-    await m.answer(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "menu")
 async def cb_menu(cb: types.CallbackQuery):
@@ -1134,7 +1136,6 @@ async def cb_coin(cb: types.CallbackQuery):
 async def cb_refresh(cb: types.CallbackQuery):
     await cb_coin(cb)
 
-# ===== НОВОСТИ В ГЛАВНОМ МЕНЮ =====
 @dp.callback_query(F.data == "news_menu")
 async def cb_news_menu(cb: types.CallbackQuery):
     await safe_delete(cb.message)
@@ -1372,108 +1373,132 @@ async def cb_pos_status(cb: types.CallbackQuery):
     await cb.message.answer(text, parse_mode="HTML")
     await cb.answer()
 
-# Админ
-@dp.callback_query(F.data.startswith("admin:"))
-async def cb_admin(cb: types.CallbackQuery):
-    if cb.from_user.id not in ADMIN_IDS:
-        await cb.answer("Нет доступа", show_alert=True)
-        return
-    act = cb.data.split(":")[1]
-    if act == "stats":
-        total, active, _, _ = user_counts()
-        up = int(time.time() - stats["started"])
-        text = (
-            f"📊 <b>Статистика</b>\n\n"
-            f"Версия: {VERSION}\n"
-            f"Юзеров: {total} (активных {active})\n"
-            f"Сигналов: {stats['signals']}\n"
-            f"Аптайм: {up//3600}ч {up%3600//60}м\n"
-            f"Bias: {market_bias['bias']} | {market_bias['text'][:80]}"
-        )
-        await cb.message.answer(text, parse_mode="HTML")
-    elif act == "users":
-        users = _load_users()
-        lines = [f"👥 Пользователи ({len(users)})\n"]
-        for uid, u in list(users.items())[:30]:
-            name = u.get("first_name") or u.get("username") or "—"
-            lines.append(f"{'✅' if u.get('active', True) else '❌'} <code>{uid}</code> {html.escape(str(name)[:18])}")
-        await cb.message.answer("\n".join(lines), parse_mode="HTML")
-    elif act == "toggle_news":
-        bot_flags["news_enabled"] = not bot_flags["news_enabled"]
-        await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
-        await cb.answer(f"Новости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}")
-    elif act == "toggle_scan":
-        bot_flags["alerts_enabled"] = not bot_flags["alerts_enabled"]
-        await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
-        await cb.answer(f"Сканер: {'ВКЛ' if bot_flags['alerts_enabled'] else 'ВЫКЛ'}")
-    elif act == "news_now":
-        await cb.answer("Отправляю…")
-        try:
-            entries = await get_news_entries()
-            if not entries:
-                await cb.message.answer("Нет новостей")
-                return
-            entry = entries[0]
-            title = html.escape(entry.title)
-            short = f"📰 <b>Новость</b>\n\n{title}\n\n🌍 {html.escape(market_bias.get('text', ''))}"
-            await broadcast({"kind": "text", "text": short})
-            stats["news_sent"] += 1
-            await cb.message.answer("Новость отправлена")
-        except Exception as e:
-            await cb.message.answer(f"Ошибка: {e}")
-    elif act == "scan_test":
-        await cb.answer("Сканирую…")
-        sigs = await scan_once(send=True)
-        await cb.message.answer(f"Готово. Сигналов: {len(sigs)}")
-    elif act == "broadcast_now":
-        if last_signals_data.get("text"):
-            sent, _, _, _ = await broadcast({"kind": "text", "text": last_signals_data["text"], "markup": last_signals_data.get("kb")})
-            await cb.message.answer(f"Рассылка: {sent}")
-        else:
-            await cb.message.answer("Нет сигналов")
-    elif act == "diag":
-        text = (
-            f"🔧 Диагностика\n\n"
-            f"Mongo: {'✅' if users_col else '❌'}\n"
-            f"Чатов: {len(active_chats)}\n"
-            f"Gemini: {len(GEMINI_API_KEYS)}\n"
-            f"ADMIN_IDS: {ADMIN_IDS}\n"
-            f"Bias: {market_bias}"
-        )
-        await cb.message.answer(text)
-    elif act == "backup":
-        users = _load_users()
-        data = json.dumps(users, ensure_ascii=False, indent=2).encode()
-        await cb.message.answer_document(BufferedInputFile(data, "users.json"), caption=f"Бэкап · {len(users)} юзеров")
-    elif act == "restore":
-        await cb.message.answer("Пришли файл users.json")
-    await cb.answer()
-
-@dp.message(F.document)
-async def on_document(m: types.Message):
-    if m.from_user.id not in ADMIN_IDS:
-        return
-    if not m.document.file_name.endswith(".json"):
-        return
-    try:
-        f = await bot.get_file(m.document.file_id)
-        content = await bot.download_file(f.file_path)
-        data = json.loads(content.read().decode())
-        if users_col is not None:
-            users_col.delete_many({})
-            for uid, ud in data.items():
-                users_col.update_one({"_id": str(uid)}, {"$set": ud}, upsert=True)
-        else:
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        load_active_chats()
-        await m.answer(f"✅ Восстановлено: {len(data)} пользователей")
-    except Exception as e:
-        await m.answer(f"Ошибка: {e}")
-
 @dp.callback_query(F.data == "ignore")
 async def cb_ignore(cb: types.CallbackQuery):
     await cb.answer()
+
+# ====================== АДМИН-БОТ ======================
+if admin_dp:
+
+    @admin_dp.message(Command("panel", "start", "admin"))
+    async def admin_cmd_panel(m: types.Message):
+        if m.from_user.id not in ADMIN_IDS:
+            await m.answer("⛔ Доступ только для администратора")
+            return
+        total, active, _, _ = user_counts()
+        text = f"✅ <b>Админ-панель IXCLY v{VERSION}</b>\n👥 Пользователей: {total} (активных {active})"
+        if total == 0:
+            text += "\n\n⚠️ База пуста"
+        await m.answer(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
+
+    @admin_dp.callback_query(F.data.startswith("admin:"))
+    async def admin_cb(cb: types.CallbackQuery):
+        if cb.from_user.id not in ADMIN_IDS:
+            await cb.answer("Нет доступа", show_alert=True)
+            return
+        act = cb.data.split(":")[1]
+
+        if act == "stats":
+            total, active, _, _ = user_counts()
+            up = int(time.time() - stats["started"])
+            text = (
+                f"📊 <b>Статистика</b>\n\n"
+                f"Версия: {VERSION}\n"
+                f"Юзеров: {total} (активных {active})\n"
+                f"Сигналов: {stats['signals']}\n"
+                f"Аптайм: {up//3600}ч {up%3600//60}м\n"
+                f"Bias: {market_bias['bias']} | {market_bias['text'][:80]}"
+            )
+            await cb.message.answer(text, parse_mode="HTML")
+
+        elif act == "users":
+            users = _load_users()
+            lines = [f"👥 Пользователи ({len(users)})\n"]
+            for uid, u in list(users.items())[:30]:
+                name = u.get("first_name") or u.get("username") or "—"
+                lines.append(f"{'✅' if u.get('active', True) else '❌'} <code>{uid}</code> {html.escape(str(name)[:18])}")
+            await cb.message.answer("\n".join(lines), parse_mode="HTML")
+
+        elif act == "toggle_news":
+            bot_flags["news_enabled"] = not bot_flags["news_enabled"]
+            await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+            await cb.answer(f"Новости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}")
+
+        elif act == "toggle_scan":
+            bot_flags["alerts_enabled"] = not bot_flags["alerts_enabled"]
+            await cb.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+            await cb.answer(f"Сканер: {'ВКЛ' if bot_flags['alerts_enabled'] else 'ВЫКЛ'}")
+
+        elif act == "news_now":
+            await cb.answer("Отправляю…")
+            try:
+                entries = await get_news_entries()
+                if not entries:
+                    await cb.message.answer("Нет новостей")
+                    return
+                entry = entries[0]
+                title = html.escape(entry.title)
+                short = f"📰 <b>Новость</b>\n\n{title}\n\n🌍 {html.escape(market_bias.get('text', ''))}"
+                await broadcast({"kind": "text", "text": short})
+                stats["news_sent"] += 1
+                await cb.message.answer("Новость отправлена")
+            except Exception as e:
+                await cb.message.answer(f"Ошибка: {e}")
+
+        elif act == "scan_test":
+            await cb.answer("Сканирую…")
+            sigs = await scan_once(send=True)
+            await cb.message.answer(f"Готово. Сигналов: {len(sigs)}")
+
+        elif act == "broadcast_now":
+            if last_signals_data.get("text"):
+                sent, _, _, _ = await broadcast({"kind": "text", "text": last_signals_data["text"], "markup": last_signals_data.get("kb")})
+                await cb.message.answer(f"Рассылка: {sent}")
+            else:
+                await cb.message.answer("Нет сигналов")
+
+        elif act == "diag":
+            text = (
+                f"🔧 Диагностика\n\n"
+                f"Mongo: {'✅' if users_col else '❌'}\n"
+                f"Чатов: {len(active_chats)}\n"
+                f"Gemini: {len(GEMINI_API_KEYS)}\n"
+                f"ADMIN_IDS: {ADMIN_IDS}\n"
+                f"Bias: {market_bias}"
+            )
+            await cb.message.answer(text)
+
+        elif act == "backup":
+            users = _load_users()
+            data = json.dumps(users, ensure_ascii=False, indent=2).encode()
+            await cb.message.answer_document(BufferedInputFile(data, "users.json"), caption=f"Бэкап · {len(users)} юзеров")
+
+        elif act == "restore":
+            await cb.message.answer("Пришли файл users.json")
+
+        await cb.answer()
+
+    @admin_dp.message(F.document)
+    async def admin_on_document(m: types.Message):
+        if m.from_user.id not in ADMIN_IDS:
+            return
+        if not m.document.file_name.endswith(".json"):
+            return
+        try:
+            f = await admin_bot.get_file(m.document.file_id)
+            content = await admin_bot.download_file(f.file_path)
+            data = json.loads(content.read().decode())
+            if users_col is not None:
+                users_col.delete_many({})
+                for uid, ud in data.items():
+                    users_col.update_one({"_id": str(uid)}, {"$set": ud}, upsert=True)
+            else:
+                with open(USERS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            load_active_chats()
+            await m.answer(f"✅ Восстановлено: {len(data)} пользователей")
+        except Exception as e:
+            await m.answer(f"Ошибка: {e}")
 
 # ====================== MAIN ======================
 async def main():
@@ -1481,16 +1506,31 @@ async def main():
     keep_alive()
     init_mongo()
     load_active_chats()
+
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/2.10"})
+
     asyncio.create_task(scanner_loop())
     asyncio.create_task(position_monitor_loop())
     asyncio.create_task(update_market_bias())
-    log.info(f"🚀 IXCLY v{VERSION} запущен | чатов: {len(active_chats)} | ADMIN_IDS: {ADMIN_IDS}")
+
+    log.info(f"🚀 IXCLY v{VERSION} запущен")
+    log.info(f"Основной бот: {BOT_TOKEN[:10]}...")
+    if admin_bot:
+        log.info(f"Админ-бот: {INPUT_BOT_TOKEN[:10]}...")
+    log.info(f"ADMIN_IDS: {ADMIN_IDS}")
+
+    # Запускаем оба бота параллельно
+    tasks = [dp.start_polling(bot)]
+    if admin_bot and admin_dp:
+        tasks.append(admin_dp.start_polling(admin_bot))
+
     try:
-        await dp.start_polling(bot)
+        await asyncio.gather(*tasks)
     finally:
         await http.close()
         await bot.session.close()
+        if admin_bot:
+            await admin_bot.session.close()
 
 if __name__ == "__main__":
     try:
