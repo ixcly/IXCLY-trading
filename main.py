@@ -561,8 +561,9 @@ def get_coins_keyboard():
         [InlineKeyboardButton(text="📰  Новости", callback_data="news_menu")],
         [InlineKeyboardButton(text="🧐  Интересные графики", callback_data="interesting_menu")],
         [InlineKeyboardButton(text="🔥  Последние сигналы", callback_data="last_signals")],
+        [InlineKeyboardButton(text="📊  Статистика сигналов", callback_data="global_stats")], # НОВАЯ КНОПКА
         [InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu")],
-        [InlineKeyboardButton(text="📊  Статистика 24ч", callback_data="show_stats")],
+        [InlineKeyboardButton(text="📈  Топ монет 24ч", callback_data="show_stats")],
         [InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -3019,65 +3020,4 @@ async def main():
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot:
                 await admin_bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню")])
-        except Exception:
-            pass
-
-        if POLL_START_DELAY > 0:
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
-            except asyncio.TimeoutError:
-                pass
-        if stop.is_set():
-            return
-
-        restored = await telegram_restore()
-        if restored:
-            log.info(f"✅ База восстановлена: {restored}")
-        load_active_chats()
-
-        background += [
-            asyncio.create_task(scanner_loop()),
-            asyncio.create_task(position_monitor_loop()),
-            asyncio.create_task(news_watcher_loop()),
-            asyncio.create_task(backup_loop()),
-            asyncio.create_task(update_market_bias()),
-            asyncio.create_task(cleanup_loop()),
-        ]
-
-        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
-        if admin_bot and admin_dp:
-            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
-
-        log.info(f"🚀 IXCLY v{VERSION} запущен.")
-        waiter = asyncio.create_task(stop.wait())
-        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
-        waiter.cancel()
-    finally:
-        for t in pollers:
-            t.cancel()
-        await asyncio.gather(*pollers, return_exceptions=True)
-        try:
-            await asyncio.wait_for(telegram_backup("перед остановкой"), timeout=12)
-        except Exception:
-            pass
-        for t in background:
-            t.cancel()
-        await asyncio.gather(*background, return_exceptions=True)
-        try:
-            await bot.session.close()
-        except Exception:
-            pass
-        if admin_bot:
-            try:
-                await admin_bot.session.close()
-            except Exception:
-                pass
-        await http.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Остановлен")
+            await bot.set_my_commands([typ
