@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.11.0 - многослойный движок сигналов (Полный код)
+IXCLY Trading bot v2.11.1 - многослойный движок сигналов (Полный код)
 """
 
 import asyncio
@@ -131,7 +131,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.11.0"
+VERSION = "2.11.1"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -1490,7 +1490,7 @@ def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=No
     return entry, sl1, sl1 - entry
 
 
-def calc_levels_and_risk(info, is_long):
+def calc_levels_and_risk(info, is_long, sig_type="Среднесрок"):
     price = info["price"]
     atr = info["atr"] if info["atr"] > 0 else price * 0.012
     sr = info.get("sr", {})
@@ -1501,11 +1501,20 @@ def calc_levels_and_risk(info, is_long):
     sl2 = sl1 - sign * 0.7 * atr
     risk_amount = DEPOSIT * RISK_PCT
     pos_usdt = (risk_amount / risk) * entry if risk > 0 else 0.0
+    
+    # Рекомендуемое плечо в зависимости от типа сигнала и волатильности
+    if sig_type == "Быстрый сигнал":
+        leverage = "x15-x25"
+    elif sig_type == "Долгосрок":
+        leverage = "x5-x10"
+    else:
+        leverage = "x10-x20"
+
     near = None
     opp = sr.get("resistance") if is_long else sr.get("support")
     if opp and abs(opp - entry) < 1.2 * risk:
         near = "ближайший уровень слишком близко к входу: цель может не отработать"
-    return entry, tps, [sl1, sl2], pos_usdt, risk_amount, near
+    return entry, tps, [sl1, sl2], pos_usdt, risk_amount, leverage, near
 
 
 def backtest_df(df, conf_min=BT_CONF, rr1=1.5, fill_bars=6, max_hold=30, fee=0.001):
@@ -2055,7 +2064,7 @@ def local_verdict(setup, bt):
 async def build_analysis(coin, tf_data, setup, bt, ctx, source):
     info = tf_data["4h"]
     is_long = setup["is_long"]
-    entry, tps, sls, pos_usdt, risk_usdt, near = calc_levels_and_risk(info, is_long)
+    entry, tps, sls, pos_usdt, risk_usdt, leverage, near = calc_levels_and_risk(info, is_long, setup["type"])
 
     verdict, comment, risk_lvl, engine = "WAIT", "", "средний", ""
     if not setup["valid"]:
@@ -2110,7 +2119,7 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "🛡 <b>Стопы (SL)</b>",
     ] + [f"   SL{i + 1}  <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls)] + [
         "",
-        f"⚖ <b>Risk Gate:</b> позиция <b>${pos_usdt:.2f}</b>, риск <b>${risk_usdt:.2f}</b> ({RISK_PCT * 100:.0f}% от ${DEPOSIT:.0f})",
+        f"⚖ <b>Risk Gate:</b> плечо <b>{leverage}</b>, позиция <b>${pos_usdt:.2f}</b>, риск <b>${risk_usdt:.2f}</b> ({RISK_PCT * 100:.0f}% от ${DEPOSIT:.0f})",
     ]
     if bt:
         lines.append(f"🧪 <b>Бэктест 4h ({bt['days']} дн.):</b> сделок {bt['trades']}, TP1 {bt['winrate']}%, ср. {bt['avg_r']:+.2f}R, PF {bt['pf']}")
@@ -2163,9 +2172,11 @@ async def send_analysis(chat_id, res, uid):
     if res["img"]:
         photo = BufferedInputFile(res["img"], f"{res['coin']}.png")
         if len(text) <= 1024:
+            # Отправка фото с текстом В ОДНОМ СООБЩЕНИИ (caption)
             msg = await bot.send_photo(chat_id, photo, caption=text, parse_mode="HTML", reply_markup=kb)
             track_msg(uid, msg)
         else:
+            # Если текст длиннее 1024 символов, лимит Telegram превышен, отправляем фото без подписи и текст отдельно
             m1 = await bot.send_photo(chat_id, photo)
             track_msg(uid, m1)
             msg = await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
@@ -2385,6 +2396,7 @@ async def broadcast(payload, only_ids=None):
                     photo = BufferedInputFile(payload["data"], filename="image.png")
                     text = payload.get("text", "")
                     if len(text) <= 1024:
+                        # Отправка рассылки: фото + подпись в одном сообщении
                         msg = await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
                         track_msg(cid, msg)
                     else:
