@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.5
+IXCLY Trading bot v2.10.6
 - MongoDB для пользователей (фоновое подключение, чтобы не падал Render)
 - АВТОСОХРАНЕНИЕ: любой клик или сообщение сохраняет пользователя в базу
+- СОХРАНЕНИЕ СИГНАЛОВ: меню "Избранное", сохранение картинок и точек входа в базу
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
 - Учёт макро-новостей (ФРС, ставки) в решениях ИИ
-- Админ-панель во втором боте (рассылка, статистика, диагностика, бэкап)
 - Оптимизация памяти и супервизор для 100% аптайма
 - 184 популярные монеты
 """
@@ -127,7 +127,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.5"
+VERSION = "2.10.6"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -274,7 +274,6 @@ def save_user_data(user_id, username, first_name):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if users_col is not None:
         try:
-            # Проверяем, есть ли пользователь, и обновляем/создаем его
             users_col.update_one(
                 {"_id": key},
                 {
@@ -302,6 +301,49 @@ def save_user_data(user_id, username, first_name):
         }
         _save_users(users)
         return True
+
+
+# --- ФУНКЦИИ ДЛЯ СОХРАНЕННЫХ СИГНАЛОВ ---
+def get_user_saved_signals(user_id):
+    users = _load_users()
+    u = users.get(str(user_id), {})
+    return u.get("saved_signals", [])
+
+def add_user_saved_signal(user_id, coin, text, photo_id):
+    key = str(user_id)
+    if users_col is not None:
+        try:
+            users_col.update_one({"_id": key}, {"$pull": {"saved_signals": {"coin": coin}}})
+            users_col.update_one({"_id": key}, {"$push": {"saved_signals": {"coin": coin, "text": text, "photo_id": photo_id}}})
+            return True
+        except Exception as e:
+            log.error(f"Mongo add signal error: {e}")
+            return False
+    else:
+        users = _load_users()
+        if key not in users: return False
+        if "saved_signals" not in users[key]: users[key]["saved_signals"] = []
+        users[key]["saved_signals"] = [s for s in users[key]["saved_signals"] if s.get("coin") != coin]
+        users[key]["saved_signals"].append({"coin": coin, "text": text, "photo_id": photo_id})
+        _save_users(users)
+        return True
+
+def del_user_saved_signal(user_id, coin):
+    key = str(user_id)
+    if users_col is not None:
+        try:
+            users_col.update_one({"_id": key}, {"$pull": {"saved_signals": {"coin": coin}}})
+            return True
+        except Exception as e:
+            log.error(f"Mongo del signal error: {e}")
+            return False
+    else:
+        users = _load_users()
+        if key in users and "saved_signals" in users[key]:
+            users[key]["saved_signals"] = [s for s in users[key]["saved_signals"] if s.get("coin") != coin]
+            _save_users(users)
+            return True
+        return False
 
 
 def set_users_active(ids, active):
@@ -373,23 +415,16 @@ class UserTrackerMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: types.Update, data: dict):
         user = None
         chat_id = None
-        
-        # Проверяем сообщения
         if event.message:
             user = event.message.from_user
             chat_id = event.message.chat.id
-        # Проверяем нажатия на кнопки
         elif event.callback_query:
             user = event.callback_query.from_user
             if event.callback_query.message:
                 chat_id = event.callback_query.message.chat.id
-                
-        # Если это юзер и его еще нет в активных, сохраняем
         if user and chat_id and chat_id not in active_chats:
             active_chats.add(chat_id)
-            # Сохраняем в базу в фоне, чтобы не тормозить ответ
             asyncio.create_task(asyncio.to_thread(save_user_data, user.id, user.username, user.first_name))
-            
         return await handler(event, data)
 
 dp.update.middleware(UserTrackerMiddleware())
@@ -418,6 +453,7 @@ def get_coins_keyboard(page=0):
     buttons.append(nav)
 
     buttons.append([InlineKeyboardButton(text="🔥 Последние сигналы", callback_data="last_signals")])
+    buttons.append([InlineKeyboardButton(text="⭐ Избранное", callback_data="sig:menu")])
     buttons.append([InlineKeyboardButton(text="📊 Статистика за 24 часа", callback_data="show_stats")])
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -426,8 +462,65 @@ def get_coins_keyboard(page=0):
 def result_keyboard(coin):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
+        InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}"),
         InlineKeyboardButton(text="📋 Меню", callback_data="menu"),
     ]])
+
+
+def get_saved_signals_menu(user_id):
+    saved = get_user_saved_signals(user_id)
+    buttons = []
+    
+    if saved:
+        row = []
+        for s in saved:
+            row.append(InlineKeyboardButton(text=f"🪙 {s['coin']}", callback_data=f"sig:view:{s['coin']}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row: buttons.append(row)
+        
+    buttons.append([InlineKeyboardButton(text="➕ Сохранить новый", callback_data="sig:save_new")])
+    if saved:
+        buttons.append([InlineKeyboardButton(text="🗑 Удалить сигнал", callback_data="sig:del_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_delete_signals_menu(user_id):
+    saved = get_user_saved_signals(user_id)
+    buttons = []
+    row = []
+    for s in saved:
+        row.append(InlineKeyboardButton(text=f"❌ {s['coin']}", callback_data=f"sig:del:{s['coin']}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row: buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sig:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_save_coins_keyboard(page=0):
+    per_page = 12
+    coins_page = POPULAR_COINS[page * per_page:(page + 1) * per_page]
+    buttons = []
+    for i in range(0, len(coins_page), 2):
+        row = [InlineKeyboardButton(text=coins_page[i], callback_data=f"sig:do_save:{coins_page[i]}")]
+        if i + 1 < len(coins_page):
+            row.append(InlineKeyboardButton(text=coins_page[i + 1], callback_data=f"sig:do_save:{coins_page[i + 1]}"))
+        buttons.append(row)
+
+    total_pages = (len(POPULAR_COINS) + per_page - 1) // per_page
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sig:save_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"Стр. {page + 1}/{total_pages}", callback_data="ignore"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"sig:save_page:{page + 1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sig:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ----------------------------------------------------------------------------
@@ -1047,7 +1140,6 @@ def mentioned_coins(text):
 
 
 def coin_news_sentiment(coin, crypto_titles, world_titles):
-    """Новости именно по монете, если есть; иначе общий фон. Возвращает (+1/0/-1, про_монету?)."""
     names = {w for w, t in COIN_WORDS.items() if t == coin}
     if len(coin) >= 3:
         names.add(coin.lower())
@@ -1098,20 +1190,26 @@ async def get_news_entries():
     return _news_cache["entries"]
 
 
-async def get_world_titles(n=4):
-    if _world_cache["titles"] and time.time() - _world_cache["ts"] < 600:
+async def get_world_entries():
+    """Загружает мировые новости (включая экономику и ФРС)."""
+    if _world_cache["titles"] and time.time() - _world_cache["ts"] < 300:
         return _world_cache["titles"]
-    titles = []
+    entries = []
     for url in WORLD_FEEDS:
         try:
-            entries = await _load_feed(url)
-            titles += [e.title for e in entries[:n // 2 + 1]]
+            e = await _load_feed(url)
+            entries += e[:4]
         except Exception as e:
             log.info("RSS %s: %s", url, e)
-    if titles:
+    if entries:
         _world_cache["ts"] = time.time()
-        _world_cache["titles"] = titles[:n]
+        _world_cache["titles"] = entries
     return _world_cache["titles"]
+
+
+async def get_world_titles(n=4):
+    entries = await get_world_entries()
+    return [e.title for e in entries[:n]]
 
 
 def extract_image(entry):
@@ -1210,17 +1308,13 @@ async def check_past_news():
     return ""
 
 
-async def fetch_and_analyze_news():
+async def fetch_and_analyze_news(entry):
     try:
-        entries = await get_news_entries()
-        if not entries:
-            return "❌ Свежих новостей пока нет.", None, False
-        news = entries[0]
-        title = news.title
-        summary = re.sub(r"<[^>]+>", "", getattr(news, "summary", ""))[:800]
-        link = news.link
+        title = entry.title
+        summary = re.sub(r"<[^>]+>", "", getattr(entry, "summary", ""))[:800]
+        link = entry.link
 
-        prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость и напиши краткий пост для Telegram СТРОГО НА РУССКОМ ЯЗЫКЕ.
+        prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость (это может быть крипто-новость ИЛИ макроэкономика, например ФРС, ставки, инфляция).
 Заголовок: {title}
 Описание: {summary}
 
@@ -1252,7 +1346,7 @@ async def fetch_and_analyze_news():
 
         await track_news(title, summary)
 
-        return text, extract_image(news), True
+        return text, extract_image(entry), True
     except Exception as e:
         log.exception("news error")
         return f"⚠️ Ошибка при получении новостей: {html.escape(str(e))}", None, False
@@ -1273,16 +1367,25 @@ async def news_watcher():
     await asyncio.sleep(10)
     while True:
         try:
-            entries = await get_news_entries()
-            if entries:
-                link = entries[0].link
+            # Собираем новости из КРИПТО и МИРОВЫХ источников
+            crypto_entries = await get_news_entries()
+            world_entries = await get_world_entries()
+            all_entries = crypto_entries + world_entries
+            
+            # Сортируем по времени (сначала самые свежие)
+            all_entries.sort(key=lambda x: getattr(x, "published_parsed", None) or time.gmtime(0), reverse=True)
+            
+            if all_entries:
+                latest = all_entries[0]
+                link = latest.link
+                
                 if last_news_link is None:
                     last_news_link = link
                 elif link != last_news_link:
                     last_news_link = link
                     if bot_flags["news_enabled"]:
                         check_text = await check_past_news()
-                        text, image_url, ok = await fetch_and_analyze_news()
+                        text, image_url, ok = await fetch_and_analyze_news(latest)
                         if ok:
                             full_text = check_text + text if check_text else text
                             img = await download_bytes(image_url) if image_url else None
@@ -1396,7 +1499,6 @@ async def scan_once(send=True):
                 if t["ok"]:
                     local_candidates.append({
                         "coin": coin,
-                        # "tf_data": tf_data,  # УБРАНО для экономии памяти (сканирование не строит график)
                         "source": source,
                         "tech": t
                     })
@@ -1861,7 +1963,6 @@ async def process_signal(chat_id, user_id, coin, force=False):
 # ----------------------------------------------------------------------------
 @dp.message(Command("start", "menu"))
 async def start_handler(message: types.Message):
-    # Сохранение уже работает через middleware, но оставим для приветствия
     user_name = message.from_user.first_name or "User"
     username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
     
@@ -1884,10 +1985,18 @@ async def news_handler(message: types.Message):
     loading = await message.answer("⏳ Запрашиваю новость и проверяю прошлые прогнозы...")
     try:
         check_text = await check_past_news()
-        text, image_url, _ = await fetch_and_analyze_news()
-        full_text = check_text + text if check_text else text
-        img = await download_bytes(image_url) if image_url else None
-        await send_with_image(message.chat.id, full_text, img, "news.jpg")
+        crypto_entries = await get_news_entries()
+        world_entries = await get_world_entries()
+        all_entries = crypto_entries + world_entries
+        all_entries.sort(key=lambda x: getattr(x, "published_parsed", None) or time.gmtime(0), reverse=True)
+        
+        if all_entries:
+            text, image_url, _ = await fetch_and_analyze_news(all_entries[0])
+            full_text = check_text + text if check_text else text
+            img = await download_bytes(image_url) if image_url else None
+            await send_with_image(message.chat.id, full_text, img, "news.jpg")
+        else:
+            await bot.send_message(message.chat.id, "❌ Свежих новостей пока нет.")
     finally:
         try:
             await loading.delete()
@@ -1916,6 +2025,7 @@ async def callback_handler(cb: types.CallbackQuery):
         return
     data = cb.data
     chat_id = cb.message.chat.id
+    user_id = cb.from_user.id
 
     if data == "ignore":
         return
@@ -1946,9 +2056,75 @@ async def callback_handler(cb: types.CallbackQuery):
     elif data == "search":
         await bot.send_message(chat_id, "🔍 <b>Поиск</b>\n\nНапиши тикер (например: <code>WIF</code>), и я найду его.", parse_mode="HTML")
     elif data.startswith("c:"):
-        await process_signal(chat_id, cb.from_user.id, data[2:])
+        await process_signal(chat_id, user_id, data[2:])
     elif data.startswith("r:"):
-        await process_signal(chat_id, cb.from_user.id, data[2:], force=True)
+        await process_signal(chat_id, user_id, data[2:], force=True)
+        
+    # --- СОХРАНЕННЫЕ СИГНАЛЫ ---
+    elif data == "sig:menu":
+        saved = get_user_saved_signals(user_id)
+        txt = "⭐ <b>Избранное (Сохраненные сигналы)</b>\n\n"
+        if saved:
+            txt += "Выбери сохраненный сигнал из списка ниже или добавь новый."
+        else:
+            txt += "У вас пока нет сохраненных сигналов. Нажмите «Сохранить новый»."
+        await cb.message.edit_text(txt, parse_mode="HTML", reply_markup=get_saved_signals_menu(user_id))
+        
+    elif data.startswith("sig:save_page:"):
+        page = int(data.split(":")[2])
+        await cb.message.edit_text("➕ <b>Выберите монету для сохранения:</b>", reply_markup=get_save_coins_keyboard(page))
+        
+    elif data == "sig:save_new":
+        await cb.message.edit_text("➕ <b>Выберите монету, чтобы сделать и сохранить сигнал:</b>", reply_markup=get_save_coins_keyboard(0))
+        
+    elif data.startswith("sig:do_save:") or data.startswith("sig:quick_save:"):
+        coin = data.split(":")[-1]
+        await cb.message.edit_text(f"⏳ Анализирую {coin} и сохраняю...")
+        
+        try:
+            # Генерируем сигнал (или берем из кэша)
+            async with analysis_sem:
+                text, png = await asyncio.wait_for(build_signal(coin, status=lambda x: None, force=True), timeout=70)
+            
+            # Отправляем фото, чтобы получить file_id
+            photo_msg = await bot.send_photo(chat_id, BufferedInputFile(png, filename=f"{coin}.png"))
+            photo_id = photo_msg.photo[-1].file_id
+            
+            # Сохраняем в базу
+            await asyncio.to_thread(add_user_saved_signal, user_id, coin, text, photo_id)
+            
+            # Возвращаемся в меню
+            await bot.send_message(chat_id, f"✅ Сигнал <b>{coin}</b> успешно сохранен!\nОн доступен в разделе «⭐ Избранное».", parse_mode="HTML")
+            await cb.message.delete()
+            
+        except Exception as e:
+            log.error(f"Save signal error: {e}")
+            await cb.message.edit_text(f"❌ Ошибка при сохранении: {html.escape(str(e))[:100]}", reply_markup=get_saved_signals_menu(user_id))
+
+    elif data.startswith("sig:view:"):
+        coin = data.split(":")[2]
+        saved = get_user_saved_signals(user_id)
+        sig = next((s for s in saved if s['coin'] == coin), None)
+        if sig:
+            await bot.send_photo(chat_id, sig['photo_id'], caption=sig['text'], parse_mode="HTML")
+        else:
+            await cb.answer("Сигнал не найден", show_alert=True)
+
+    elif data == "sig:del_menu":
+        saved = get_user_saved_signals(user_id)
+        if not saved:
+            await cb.answer("Нет сохраненных сигналов", show_alert=True)
+            return
+        await cb.message.edit_text("🗑 <b>Выберите сигнал для удаления:</b>", reply_markup=get_delete_signals_menu(user_id))
+
+    elif data.startswith("sig:del:"):
+        coin = data.split(":")[2]
+        await asyncio.to_thread(del_user_saved_signal, user_id, coin)
+        saved = get_user_saved_signals(user_id)
+        if saved:
+            await cb.message.edit_text(f"🗑 Сигнал {coin} удален.\n\nВыберите еще или вернитесь назад.", reply_markup=get_delete_signals_menu(user_id))
+        else:
+            await cb.message.edit_text("🗑 Сигнал удален. Список пуст.", reply_markup=get_saved_signals_menu(user_id))
 
 
 # ----------------------------------------------------------------------------
@@ -2019,517 +2195,3 @@ async def broadcast(payload, progress=None):
                 await progress(i + 1, len(chats))
             except Exception:
                 pass
-    if dead:
-        for c in dead:
-            active_chats.discard(c)
-        set_users_active(dead, False)
-    return ok, fail, len(dead)
-
-
-async def send_backup(caption="💾 Бэкап базы пользователей"):
-    users = _load_users()
-    if not users:
-        return False
-    if not input_bot:
-        log.warning("Бэкап не отправлен: админ-бот не запущен")
-        return False
-    data = json.dumps(users, ensure_ascii=False, indent=2).encode("utf-8")
-    for aid in ADMIN_IDS:
-        try:
-            await input_bot.send_document(aid, BufferedInputFile(data, "users.json"), caption=f"{caption}\nПользователей: {len(users)}")
-        except Exception as e:
-            log.warning("Бэкап не отправлен админу %s: %s", aid, e)
-    return True
-
-
-async def backup_loop():
-    await asyncio.sleep(90)
-    while True:
-        try:
-            await send_backup("💾 Ежедневный бэкап")
-        except Exception as e:
-            log.warning("backup_loop: %s", e)
-        await asyncio.sleep(24 * 3600)
-
-
-async def heartbeat_loop():
-    while True:
-        await asyncio.sleep(600)
-        up = int(time.time() - stats["started"])
-        log.info("♥ heartbeat: аптайм %d мин, пик памяти %s МБ, получателей %d, сигналов %d",
-                 up // 60, _rss_mb(), len(active_chats), stats["signals"])
-
-
-async def run_diagnostics():
-    db_line = "✅ MongoDB подключена" if users_col is not None else "❌ Локальный файл (стирается на Render)"
-    lines = ["🧪 <b>Диагностика</b>", "", f"<b>База данных:</b> {db_line}"]
-    lines += ["", "<b>Источники свечей (BTC, 1h):</b>"]
-
-    async def probe(ex):
-        t0 = time.time()
-        try:
-            await _fetch_klines(ex, "BTC", "1h")
-            return f"✅ {ex['name']} · {int((time.time() - t0) * 1000)} мс"
-        except Exception as e:
-            return f"❌ {ex['name']} · {html.escape(str(e))[:40]}"
-
-    lines += await asyncio.gather(*[probe(e) for e in EXCHANGES])
-
-    lines += ["", "<b>Анализ (метка в конце сигнала):</b>"]
-    prompt = "Напиши одно предложение из десяти слов о том, что такое биткоин и зачем он нужен людям."
-
-    async def timed(name, fn):
-        t0 = time.time()
-        try:
-            r = await asyncio.wait_for(fn(), 25)
-        except Exception:
-            r = None
-        return f"{'✅' if r else '❌'} {name} · {int((time.time() - t0) * 1000)} мс"
-
-    tests = []
-    if GEMINI_API_KEYS:
-        tests.append(timed(f"g · Gemini ({GEMINI_MODEL})", lambda: _ask_gemini(prompt, False)))
-    else:
-        lines.append("➖ g · Gemini: ключ не задан")
-    if GROQ_API_KEY:
-        tests.append(timed(f"q · Groq ({GROQ_MODEL})", lambda: _ask_openai_compat("https://api.groq.com/openai/v1", GROQ_API_KEY, GROQ_MODEL, prompt, False)))
-    else:
-        lines.append("➖ q · Groq: ключ не задан")
-    if OPENROUTER_API_KEY:
-        tests.append(timed("o · OpenRouter", lambda: _ask_openai_compat("https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, False, extra_headers={"HTTP-Referer": "https://t.me/bot", "X-Title": "IXCLY"})))
-    else:
-        lines.append("➖ o · OpenRouter: ключ не задан")
-    key_note = "с ключом" if POLLINATIONS_KEY else "без ключа"
-    tests.append(timed(f"f · бесплатный GPT ({key_note})", lambda: _ask_free_gpt(prompt, False)))
-    lines += await asyncio.gather(*tests)
-
-    lines += ["", f"Получателей рассылки: {len(active_chats)}", f"Новости по расписанию: {'вкл' if bot_flags['news_enabled'] else 'выкл'}",
-              f"Срочные сигналы: {'вкл' if bot_flags['alerts_enabled'] else 'выкл'}"]
-    return "\n".join(lines)
-
-
-# ----------------------------------------------------------------------------
-# АДМИН-ПАНЕЛЬ (второй бот, доступ только для ADMIN_ID)
-# ----------------------------------------------------------------------------
-admin_mode = {}        # admin_id -> "restore"
-pending_payload = {}   # admin_id -> payload (если выключена мгновенная рассылка)
-
-
-def panel_text():
-    total, _, _, _ = user_counts()
-    mode = "⚡ сразу" if bot_flags["instant"] else "✋ с подтверждением"
-    news = "включены" if bot_flags["news_enabled"] else "выключены"
-    alerts = "включены" if bot_flags["alerts_enabled"] else "выключены"
-    db_status = "✅ MongoDB" if users_col is not None else "⚠️ Файл (стирается)"
-    return (
-        "🛠 <b>Админ-панель</b>\n\n"
-        f"💾 <b>База:</b> {db_status}\n"
-        f"👥 В базе: <b>{total}</b> · получают рассылку: <b>{len(active_chats)}</b>\n"
-        f"📢 Режим рассылки: {mode}\n"
-        f"📰 Автоновости: {news}\n"
-        f"🚨 Сканер сигналов: {alerts}\n\n"
-        "Просто пришлите мне любое сообщение (текст, фото, видео, файл, голосовое) — "
-        "я перешлю его всем пользователям основного бота."
-    )
-
-
-def panel_kb():
-    B = InlineKeyboardButton
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [B(text="📊 Статистика", callback_data="adm:stats"), B(text="👥 Пользователи", callback_data="adm:users")],
-        [B(text="📰 Новость сейчас", callback_data="adm:news"), B(text=f"🔔 Автоновости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="adm:tglnews")],
-        [B(text=f"🚨 Сканер: {'ВКЛ' if bot_flags['alerts_enabled'] else 'ВЫКЛ'}", callback_data="adm:tglalerts"), B(text="🔎 Скан-тест", callback_data="adm:scan")],
-        [B(text=f"⚡ Рассылка: {'сразу' if bot_flags['instant'] else 'с подтверждением'}", callback_data="adm:tglinst")],
-        [B(text="🧪 Диагностика", callback_data="adm:diag"), B(text="💾 Бэкап базы", callback_data="adm:backup")],
-        [B(text="📤 Восстановить базу", callback_data="adm:restore")],
-    ])
-
-
-def back_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В панель", callback_data="adm:panel")]])
-
-
-def stats_text():
-    total, _, today, week = user_counts()
-    up = int(time.time() - stats["started"])
-    eng = ", ".join(f"{k}:{v}" for k, v in sorted(stats["engines"].items())) or "—"
-    return (
-        "📊 <b>Статистика</b>\n\n"
-        f"👥 В базе: <b>{total}</b>\n"
-        f"✅ Получают рассылку: <b>{len(active_chats)}</b>\n"
-        f"🆕 Новых сегодня: {today} · за 7 дней: {week}\n\n"
-        f"📈 Сигналов с запуска: {stats['signals']}\n"
-        f"🚨 Групповых сигналов отправлено: {stats['alerts_sent']}\n"
-        f"🧩 Движки анализа: {eng}\n"
-        f"📰 Новостей доставлено: {stats['news_sent']}\n"
-        f"📢 Рассылок сделано: {stats['broadcasts']}\n"
-        f"⏱ Аптайм: {up // 3600} ч {up % 3600 // 60} мин"
-    )
-
-
-async def extract_payload(message):
-    """Превращает сообщение админа в payload для рассылки. None, если тип не поддерживается."""
-    text = message.html_text if (message.text or message.caption) else ""
-    if message.text:
-        return {"kind": "text", "text": text}
-
-    spec = None
-    if message.photo:
-        spec = ("photo", message.photo[-1].file_id, "photo.jpg")
-    elif message.video:
-        spec = ("video", message.video.file_id, message.video.file_name or "video.mp4")
-    elif message.animation:
-        spec = ("animation", message.animation.file_id, message.animation.file_name or "anim.mp4")
-    elif message.document:
-        spec = ("document", message.document.file_id, message.document.file_name or "file")
-    elif message.audio:
-        spec = ("audio", message.audio.file_id, message.audio.file_name or "audio.mp3")
-    elif message.voice:
-        spec = ("voice", message.voice.file_id, "voice.ogg")
-    if not spec:
-        return None
-
-    kind, file_id, filename = spec
-    try:
-        f = await input_bot.get_file(file_id)
-        buf = await input_bot.download_file(f.file_path)
-        data = buf.read()
-    except Exception as e:
-        raise ValueError(f"Не удалось скачать файл (лимит Telegram для ботов 20 МБ): {e}")
-    return {"kind": kind, "text": text, "data": data, "filename": filename}
-
-
-async def run_broadcast(admin_chat, payload):
-    n = len(active_chats)
-    if n == 0:
-        await input_bot.send_message(
-            admin_chat,
-            "⚠️ Получателей нет: база пуста. Нажмите «📤 Восстановить базу» и пришлите последний бэкап.")
-        return
-    status = await input_bot.send_message(admin_chat, f"⏳ Рассылка: 0/{n}")
-
-    async def progress(done, total):
-        await status.edit_text(f"⏳ Рассылка: {done}/{total}")
-
-    ok, fail, removed = await broadcast(payload, progress)
-    stats["broadcasts"] += 1
-    try:
-        await status.edit_text(
-            f"✅ Рассылка завершена\n\nДоставлено: {ok} из {n}\nОшибок: {fail}\nУбрано неактивных: {removed}")
-    except Exception:
-        pass
-
-
-async def do_restore(message):
-    if not message.document:
-        await message.answer("Нужен файл users.json. Режим восстановления отменён, нажмите кнопку ещё раз.")
-        return
-    try:
-        f = await input_bot.get_file(message.document.file_id)
-        buf = await input_bot.download_file(f.file_path)
-        data = json.loads(buf.read().decode("utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("ожидался JSON-объект {id: данные}")
-    except Exception as e:
-        await message.answer(f"❌ Не удалось прочитать файл: {html.escape(str(e))}", parse_mode="HTML")
-        return
-    users = _load_users()
-    added_users = {}
-    for k, v in data.items():
-        if str(k).lstrip("-").isdigit() and k not in users and isinstance(v, dict):
-            users[k] = v
-            added_users[k] = v
-    _save_users(added_users if users_col is not None else users)
-    load_active_chats()
-    await message.answer(f"✅ Восстановлено: добавлено {len(added_users)}, всего в базе {len(users)}, "
-                         f"получателей {len(active_chats)}.", reply_markup=panel_kb())
-
-
-if input_dp:
-    admin_filter = F.from_user.id.in_(list(ADMIN_IDS))
-
-    async def _edit(cb, text, kb=None):
-        try:
-            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-        except TelegramBadRequest:
-            pass  # "message is not modified"
-
-    @input_dp.message(Command("start", "panel", "menu"), admin_filter)
-    async def adm_start(message: types.Message):
-        admin_mode.pop(message.from_user.id, None)
-        await message.answer(panel_text(), parse_mode="HTML", reply_markup=panel_kb())
-
-    @input_dp.message(Command("stats"), admin_filter)
-    async def adm_stats(message: types.Message):
-        await message.answer(stats_text(), parse_mode="HTML", reply_markup=back_kb())
-
-    @input_dp.message(Command("backup"), admin_filter)
-    async def adm_backup_cmd(message: types.Message):
-        ok = await send_backup()
-        if not ok:
-            await message.answer("База пуста, бэкапить нечего.")
-
-    @input_dp.message(Command("dm"), admin_filter)
-    async def adm_dm(message: types.Message):
-        parts = (message.text or "").split(maxsplit=2)
-        if len(parts) < 3 or not parts[1].lstrip("-").isdigit():
-            await message.answer("Формат: <code>/dm ID текст</code>", parse_mode="HTML")
-            return
-        try:
-            await bot.send_message(int(parts[1]), parts[2])
-            await message.answer("✅ Отправлено.")
-        except Exception as e:
-            await message.answer(f"❌ Не удалось: {html.escape(str(e))[:200]}", parse_mode="HTML")
-
-    @input_dp.message(admin_filter)
-    async def adm_any(message: types.Message):
-        uid = message.from_user.id
-        if message.text and message.text.startswith("/"):
-            await message.answer("Неизвестная команда. /panel — открыть панель.")
-            return
-        if admin_mode.pop(uid, None) == "restore":
-            await do_restore(message)
-            return
-        try:
-            payload = await extract_payload(message)
-        except ValueError as e:
-            await message.answer(f"❌ {html.escape(str(e))}", parse_mode="HTML")
-            return
-        if payload is None:
-            await message.answer("⚠️ Этот тип сообщения не поддерживается (стикеры, опросы и т.п.).")
-            return
-        if bot_flags["instant"]:
-            await run_broadcast(message.chat.id, payload)
-        else:
-            pending_payload[uid] = payload
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=f"✅ Разослать ({len(active_chats)})", callback_data="adm:send"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="adm:drop"),
-            ]])
-            await input_bot.copy_message(message.chat.id, message.chat.id, message.message_id, reply_markup=kb)
-
-    @input_dp.callback_query(admin_filter)
-    async def adm_callback(cb: types.CallbackQuery):
-        try:
-            await cb.answer()
-        except Exception:
-            pass
-        uid = cb.from_user.id
-        action = (cb.data or "").split(":", 1)[-1]
-
-        if action == "panel":
-            admin_mode.pop(uid, None)
-            await _edit(cb, panel_text(), panel_kb())
-        elif action == "stats":
-            await _edit(cb, stats_text(), back_kb())
-        elif action == "users":
-            users = _load_users()
-            last = sorted(users.items(), key=lambda kv: str(kv[1].get("joined_at", "")))[-10:]
-            rows = []
-            for k, u in reversed(last):
-                name = html.escape(str(u.get("first_name") or "—"))
-                uname = f"@{html.escape(u['username'])}" if u.get("username") else ""
-                rows.append(f"• {name} {uname} · {str(u.get('joined_at', ''))[:10]} · <code>{k}</code>")
-            await _edit(cb, f"👥 <b>Последние пользователи</b> (всего {len(users)})\n\n" + ("\n".join(rows) or "пусто"),
-                        back_kb())
-        elif action == "tglnews":
-            bot_flags["news_enabled"] = not bot_flags["news_enabled"]
-            await _edit(cb, panel_text(), panel_kb())
-        elif action == "tglalerts":
-            bot_flags["alerts_enabled"] = not bot_flags["alerts_enabled"]
-            await _edit(cb, panel_text(), panel_kb())
-        elif action == "tglinst":
-            bot_flags["instant"] = not bot_flags["instant"]
-            await _edit(cb, panel_text(), panel_kb())
-        elif action == "scan":
-            await _edit(cb, "⏳ Сканирую все монеты (около минуты)...", None)
-            try:
-                res = await scan_once(send=False)
-                await _edit(cb, scan_report(res), back_kb())
-            except Exception as e:
-                await _edit(cb, f"❌ Ошибка скана: {html.escape(str(e))}", back_kb())
-        elif action == "news":
-            await _edit(cb, "⏳ Готовлю последнюю новость...", None)
-            check_text = await check_past_news()
-            text, image_url, ok = await fetch_and_analyze_news()
-            if not ok:
-                await _edit(cb, f"{text}", back_kb())
-                return
-            full_text = check_text + text if check_text else text
-            img = await download_bytes(image_url) if image_url else None
-            payload = {"kind": "photo" if img else "text", "text": full_text, "data": img, "filename": "news.jpg"}
-            await run_broadcast(cb.message.chat.id, payload)
-        elif action == "diag":
-            await _edit(cb, "⏳ Проверяю источники и анализ (до 30 секунд)...", None)
-            try:
-                result = await run_diagnostics()
-            except Exception as e:
-                result = f"❌ Ошибка диагностики: {html.escape(str(e))}"
-            await _edit(cb, result, back_kb())
-        elif action == "backup":
-            ok = await send_backup()
-            await cb.message.answer("💾 Бэкап отправлен выше." if ok else "База пуста, бэкапить нечего.")
-        elif action == "restore":
-            admin_mode[uid] = "restore"
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm:panel")]])
-            await _edit(cb, "📤 Пришлите файл <b>users.json</b> (последний бэкап). "
-                            "Новые пользователи добавятся, существующие не изменятся.", kb)
-        elif action == "send":
-            payload = pending_payload.pop(uid, None)
-            if payload is None:
-                await cb.message.answer("Нечего отправлять: сообщение уже разослано или отменено.")
-                return
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await run_broadcast(cb.message.chat.id, payload)
-        elif action == "drop":
-            pending_payload.pop(uid, None)
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await cb.message.answer("Отменено.")
-
-    @input_dp.message()
-    async def adm_deny(message: types.Message):
-        uid = message.from_user.id if message.from_user else 0
-        log.warning("Админ-бот: обращение от не-админа, id=%s", uid)
-        text = f"⛔ Нет доступа.\n\nВаш Telegram ID: <code>{uid}</code>"
-        if ADMIN_IDS:
-            text += ("\n\nЕсли вы владелец, в переменных Render задайте "
-                     f"<code>ADMIN_ID={uid}</code> (сейчас там другой ID) и перезапустите сервис.")
-        else:
-            text += f"\n\nЕсли вы владелец, добавьте в переменные Render: <code>ADMIN_ID={uid}</code>"
-        await message.answer(text, parse_mode="HTML")
-
-    @input_dp.callback_query()
-    async def adm_deny_cb(cb: types.CallbackQuery):
-        await cb.answer("Нет доступа", show_alert=True)
-
-
-# ----------------------------------------------------------------------------
-# ЗАПУСК
-# ----------------------------------------------------------------------------
-def _log_task_result(t):
-    try:
-        t.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        log.error("Фоновая задача завершилась ошибкой: %s", e, exc_info=True)
-
-
-async def startup_notice():
-    total, _, _, _ = user_counts()
-    text = f"✅ Бот запущен (v{VERSION}).\nПользователей в базе: {total}"
-    if total == 0:
-        text += ("\n\n⚠️ База пуста. Если MongoDB не подключена, файл стирается при деплое: "
-                 "нажмите «📤 Восстановить базу» и пришлите последний users.json из бэкапа.")
-    for aid in ADMIN_IDS:
-        try:
-            await input_bot.send_message(aid, text, reply_markup=panel_kb())
-        except Exception as e:
-            log.warning("Не удалось написать админу %s в админ-бот (нажмите /start в админ-боте): %s", aid, e)
-
-
-async def main():
-    global http, analysis_sem
-    keep_alive()  # порт открываем первым, чтобы Render видел живой сервис
-    http = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (compatible; IXCLYBot/2.10)"})
-    analysis_sem = asyncio.Semaphore(4)
-    
-    # Инициализация БД в фоне, чтобы не блокировать запуск веб-сервера и polling
-    asyncio.create_task(asyncio.to_thread(init_mongo))
-    
-    await asyncio.to_thread(load_active_chats)
-    _load_news_history()
-    log.info("Бот запущен...")
-    background = []
-    try:
-        await bot.set_my_commands([
-            types.BotCommand(command="menu", description="🚀 Меню"),
-            types.BotCommand(command="news", description="📰 Новости"),
-        ])
-        try:
-            me = await bot.get_me()
-            runtime["main_bot"] = f"@{me.username}"
-            log.info("Основной бот: @%s", me.username)
-        except Exception as e:
-            runtime["main_bot"] = f"ошибка: {e}"
-            log.error("Основной бот: get_me не удался: %s (проверьте BOT_TOKEN)", e)
-
-        background.append(asyncio.create_task(news_watcher()))
-        background.append(asyncio.create_task(backup_loop()))
-        background.append(asyncio.create_task(alert_loop()))
-        background.append(asyncio.create_task(daily_stats_loop()))
-        background.append(asyncio.create_task(heartbeat_loop()))
-
-        if input_bot and input_dp:
-            if not ADMIN_IDS:
-                log.warning("ADMIN_ID не задан: админ-бот работает в режиме подсказки (покажет ваш ID)")
-            try:
-                me = await input_bot.get_me()
-                runtime["admin_bot"] = f"@{me.username}"
-                log.info("Админ-бот: @%s (id %s)", me.username, me.id)
-                await input_bot.delete_webhook(drop_pending_updates=True)
-                await input_bot.set_my_commands([
-                    types.BotCommand(command="panel", description="🛠 Панель"),
-                    types.BotCommand(command="stats", description="📊 Статистика"),
-                    types.BotCommand(command="backup", description="💾 Бэкап базы"),
-                ])
-                t = asyncio.create_task(input_dp.start_polling(input_bot, handle_signals=False,
-                                                               close_bot_session=False))
-                t.add_done_callback(_log_task_result)
-                background.append(t)
-                await asyncio.sleep(2)
-                if t.done():
-                    runtime["admin_bot"] += " (polling упал, см. ошибку выше)"
-                else:
-                    log.info("Админ-бот запущен и слушает сообщения (админов: %d)", len(ADMIN_IDS))
-                if ADMIN_IDS:
-                    await startup_notice()
-            except Exception as e:
-                runtime["admin_bot"] = f"ошибка: {e}"
-                hint = " Токен неверный или отозван: возьмите новый у @BotFather." if "unauthorized" in str(e) else ""
-                log.error("ОШИБКА ЗАПУСКА АДМИН-БОТА: %s.%s Основной бот продолжит работу.", e, hint, exc_info=True)
-        else:
-            if not INPUT_BOT_TOKEN:
-                reason = "переменная INPUT_BOT_TOKEN не задана"
-            elif INPUT_BOT_TOKEN == BOT_TOKEN:
-                reason = "INPUT_BOT_TOKEN совпадает с BOT_TOKEN (нужен токен ВТОРОГО бота)"
-            else:
-                reason = "не удалось создать админ-бота (см. ошибку «Ошибка инициализации админ-бота» выше)"
-            runtime["admin_bot"] = f"выключен: {reason}"
-            log.warning("Админ-бот выключен: %s", reason)
-
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    finally:
-        for t in background:
-            t.cancel()
-        if input_bot:
-            try:
-                await input_bot.session.close()
-            except Exception:
-                pass
-        await http.close()
-        await bot.session.close()
-
-
-async def run_forever():
-    """Если main() упал из-за ошибки, поднимаем бота заново, не дожидаясь перезапуска контейнера Render."""
-    while True:
-        try:
-            await main()
-            break  # штатная остановка (SIGTERM при деплое)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            log.error("main() упал: %s. Перезапуск через 10 секунд", e, exc_info=True)
-            await asyncio.sleep(10)
-
-
-if __name__ == "__main__":
-    asyncio.run(run_forever())
