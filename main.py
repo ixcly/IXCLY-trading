@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.33
+IXCLY Trading bot v2.10.34 - Ensemble ML & Risk Gate Edition
 """
 
 import asyncio
@@ -57,16 +57,13 @@ logging.getLogger("aiogram.dispatcher").addFilter(_ConflictFilter())
 # ====================== ВЕБ ======================
 app = Flask(__name__)
 
-
 @app.route("/")
 def home():
     return "Bot is alive!"
 
-
 @app.route("/health")
 def health():
     return "ok"
-
 
 @app.route("/status")
 def status_page():
@@ -80,7 +77,6 @@ def status_page():
         "news_title": market_bias.get("title_ru", "")[:80],
     })
 
-
 def _run_web():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     try:
@@ -90,9 +86,7 @@ def _run_web():
     except Exception as e:
         log.error(f"Flask: {e}")
 
-
 _web_started = False
-
 
 def keep_alive():
     global _web_started
@@ -104,7 +98,6 @@ def keep_alive():
 # ====================== НАСТРОЙКИ ======================
 def clean_key(k):
     return k.strip().strip('"').strip("'") if k else None
-
 
 BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
 INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
@@ -129,7 +122,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.33"
+VERSION = "2.10.34"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -152,7 +145,7 @@ http = None
 news_lock = None
 
 TFS = ["15m", "1h", "4h", "1d"]
-MIN_CANDLES = 30
+MIN_CANDLES = 50 # Увеличено для расчета Z-score и волатильности
 
 POPULAR_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
@@ -222,7 +215,6 @@ def _load_users():
     except Exception:
         return {}
 
-
 def _save_users(users):
     global users_dirty
     try:
@@ -232,7 +224,6 @@ def _save_users(users):
         users_dirty = True
     except Exception as e:
         log.error(f"Ошибка записи users.json: {e}")
-
 
 def save_user_data(user_id, username, first_name):
     key = str(user_id)
@@ -246,7 +237,6 @@ def save_user_data(user_id, username, first_name):
         users[key]["active"] = True
     _save_users(users)
 
-
 def mark_users_inactive(ids):
     users = _load_users()
     changed = False
@@ -258,10 +248,8 @@ def mark_users_inactive(ids):
     if changed:
         _save_users(users)
 
-
 def get_user_saved_signals(user_id):
     return _load_users().get(str(user_id), {}).get("saved_signals", [])
-
 
 def add_user_saved_signal(user_id, coin, text):
     key = str(user_id)
@@ -273,7 +261,6 @@ def add_user_saved_signal(user_id, coin, text):
     users[key]["saved_signals"].append({"coin": coin, "text": text})
     _save_users(users)
 
-
 def del_user_saved_signal(user_id, coin):
     key = str(user_id)
     users = _load_users()
@@ -281,10 +268,8 @@ def del_user_saved_signal(user_id, coin):
         users[key]["saved_signals"] = [s for s in users[key]["saved_signals"] if s.get("coin") != coin]
         _save_users(users)
 
-
 def get_user_open_positions(user_id):
     return _load_users().get(str(user_id), {}).get("open_positions", {})
-
 
 def set_user_open_position(user_id, coin, data):
     key = str(user_id)
@@ -298,10 +283,8 @@ def set_user_open_position(user_id, coin, data):
         users[key]["open_positions"][coin] = data
     _save_users(users)
 
-
 def get_open_position(user_id, coin):
     return get_user_open_positions(user_id).get(coin)
-
 
 def load_active_chats():
     active_chats.clear()
@@ -313,13 +296,11 @@ def load_active_chats():
                 pass
     log.info("Получателей рассылки: %d", len(active_chats))
 
-
 def user_counts():
     users = _load_users()
     total = len(users)
     active = sum(1 for u in users.values() if isinstance(u, dict) and u.get("active", True))
     return total, active, 0, 0
-
 
 def _load_signal_history():
     try:
@@ -328,7 +309,6 @@ def _load_signal_history():
         return [x for x in data if time.time() - x.get("ts", 0) < 86400]
     except Exception:
         return []
-
 
 def _save_signal_history(data):
     try:
@@ -370,7 +350,6 @@ async def telegram_backup(reason="auto"):
             log.warning(f"Бэкап админу {aid} не отправлен: {e}")
     return ok
 
-
 async def telegram_restore():
     if not admin_bot or not ADMIN_IDS:
         return 0
@@ -411,7 +390,6 @@ async def telegram_restore():
             log.warning(f"Восстановление не удалось: {e}")
     return 0
 
-
 async def backup_loop():
     global users_dirty
     await asyncio.sleep(60)
@@ -442,8 +420,8 @@ class UserTrackerMiddleware(BaseMiddleware):
             asyncio.create_task(asyncio.to_thread(save_user_data, user.id, user.username, user.first_name))
         return await handler(event, data)
 
-
 dp.update.middleware(UserTrackerMiddleware())
+
 
 # ====================== ОБРАБОТЧИК ОШИБОК ======================
 @dp.errors()
@@ -459,6 +437,7 @@ async def errors_handler(update: types.Update, exception: Exception):
             pass
         return True
     return False
+
 
 # ====================== КЛАВИАТУРЫ ======================
 MENU_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]])
@@ -591,12 +570,9 @@ def get_admin_keyboard():
 def fmt(p):
     p = float(p)
     a = abs(p)
-    if a >= 1000:
-        return f"{p:,.2f}".replace(",", " ")
-    if a >= 1:
-        return f"{p:.4f}"
-    if a >= 0.01:
-        return f"{p:.5f}"
+    if a >= 1000: return f"{p:,.2f}".replace(",", " ")
+    if a >= 1: return f"{p:.4f}"
+    if a >= 0.01: return f"{p:.5f}"
     return f"{p:.8f}"
 
 def has_cyr(text, n=1):
@@ -604,12 +580,10 @@ def has_cyr(text, n=1):
 
 def shorten(text, n):
     text = " ".join(str(text).split())
-    if len(text) <= n:
-        return text
+    if len(text) <= n: return text
     cut = text[:n]
     m = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
-    if m >= n * 0.5:
-        return cut[:m + 1]
+    if m >= n * 0.5: return cut[:m + 1]
     return cut.rsplit(" ", 1)[0].rstrip(",;:-— ") + "…"
 
 def make_strength_bar(strength: float, length: int = 10) -> str:
@@ -654,98 +628,79 @@ async def first_success(coros, timeout=11):
         end = time.monotonic() + timeout
         while pending:
             remaining = end - time.monotonic()
-            if remaining <= 0:
-                break
+            if remaining <= 0: break
             done, pending = await asyncio.wait(pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
-            if not done:
-                break
+            if not done: break
             for d in done:
-                try:
-                    res = d.result()
-                except Exception:
-                    continue
-                if res is not None:
-                    return res
+                try: res = d.result()
+                except Exception: continue
+                if res is not None: return res
         return None
     finally:
-        for t in tasks:
-            t.cancel()
+        for t in tasks: t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
 async def http_json(url, params=None, timeout=8):
     async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
-        if r.status != 200:
-            raise RuntimeError(f"HTTP {r.status}")
+        if r.status != 200: raise RuntimeError(f"HTTP {r.status}")
         return await r.json(content_type=None)
 
 async def download_bytes(url):
     try:
         async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                return await r.read()
-    except Exception:
-        pass
+            if r.status == 200: return await r.read()
+    except Exception: pass
     return None
 
 def normalize_ticker(text):
     t = text.upper().strip()
     t = re.sub(r"[\s$/\-_]", "", t)
-    if t.endswith("USDT") and len(t) > 4:
-        t = t[:-4]
+    if t.endswith("USDT") and len(t) > 4: t = t[:-4]
     return t
 
 async def safe_delete(message):
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    try: await message.delete()
+    except Exception: pass
 
 async def safe_answer(cb, text=None, alert=False):
-    try:
-        await cb.answer(text, show_alert=alert)
-    except Exception:
-        pass
+    try: await cb.answer(text, show_alert=alert)
+    except Exception: pass
 
 async def cleanup_prev_menu(user_id):
     old = last_user_msg.pop(user_id, None)
-    if old:
-        await safe_delete(old)
+    if old: await safe_delete(old)
 
 async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_mode="HTML", user_id=None):
     try:
         if message.photo or message.video or message.document or message.animation:
             await message.delete()
             new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-            if user_id:
-                last_user_msg[user_id] = new_msg
+            if user_id: last_user_msg[user_id] = new_msg
             return new_msg
         else:
             await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
             return message
     except TelegramBadRequest as e:
         err = str(e).lower()
-        if "message is not modified" in err:
-            return message
+        if "message is not modified" in err: return message
         if "no text in the message" in err or "there is no text" in err:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            try: await message.delete()
+            except Exception: pass
             new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-            if user_id:
-                last_user_msg[user_id] = new_msg
+            if user_id: last_user_msg[user_id] = new_msg
             return new_msg
         return message
-    except Exception:
-        return message
+    except Exception: return message
 
 
-# ====================== ИНДИКАТОРЫ ======================
+# ====================== АЛГОРИТМ ИНДИКАТОРОВ И АНСАМБЛЯ ======================
 def add_indicators(df):
     c = df["close"]
     df["ema20"] = c.ewm(span=20, adjust=False).mean()
     df["ema50"] = c.ewm(span=50, adjust=False).mean()
     df["ema200"] = c.ewm(span=200, adjust=False).mean()
+    
+    # 1. Традиционные индикаторы (Слой 1)
     delta = c.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -753,84 +708,135 @@ def add_indicators(df):
     avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi"] = (100 - 100 / (1 + rs)).fillna(50)
+    
     prev = c.shift()
     tr = pd.concat([df["high"] - df["low"], (df["high"] - prev).abs(), (df["low"] - prev).abs()], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1 / 14, adjust=False).mean().fillna(tr.mean())
+    
     macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     df["macd_hist"] = macd - macd.ewm(span=9, adjust=False).mean()
+
+    # 2. Генерация продвинутых признаков (Слой 2: Feature Engineering)
+    # Z-score (отклонение от среднего)
+    std50 = c.rolling(50).std().fillna(1.0)
+    df["z_score"] = (c - df["ema50"]) / std50
+    
+    # Моментум (скорость изменения цены)
+    df["momentum"] = c.pct_change(10).fillna(0)
+    
+    # Дельта объема (аппроксимация: если свеча бычья, объем идет в покупки, если медвежья - в продажи)
+    df["vol_delta"] = (df["close"] - df["open"]) / (df["high"] - df["low"]).replace(0, 0.001) * df["volume"]
+    
+    # Скорость изменения волатильности (Volatility ROC)
+    df["vol_roc"] = df["atr"].pct_change(5).fillna(0)
+    
     return df
 
-def calc_probability(df):
-    ema20 = float(df["ema20"].iloc[-1])
-    ema50 = float(df["ema50"].iloc[-1]) or 1e-9
-    rsi = float(df["rsi"].iloc[-1])
-    macd_h = float(df["macd_hist"].iloc[-1])
-    score = 0.0
+
+def calc_ensemble_confidence(df):
+    """
+    Мета-модель (Stacking). Объединяет старый алгоритм и новые признаки.
+    Возвращает: (confidence_score, long_prob)
+    confidence_score - от 0 до 100 (уверенность в направлении).
+    long_prob - вероятность роста (от 0 до 100).
+    """
+    last = df.iloc[-1]
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"]) or 1e-9
+    rsi = float(last["rsi"])
+    macd_h = float(last["macd_hist"])
+    
+    # --- СТАРЫЙ АЛГОРИТМ (Базовая модель 1) ---
+    old_score = 0.0
     diff = abs(ema20 - ema50) / ema50 * 100
-    if ema20 > ema50:
-        score += 25 + min(18, diff * 10)
-    else:
-        score -= 25 + min(18, diff * 10)
-    if rsi > 55:
-        score += min(22, (rsi - 55) * 1.2)
-    elif rsi < 45:
-        score -= min(22, (45 - rsi) * 1.2)
-    score += 22 if macd_h > 0 else -22
-    long_p = max(8.0, min(92.0, 50 + score / 2))
-    return round(long_p, 1), round(100 - long_p, 1)
+    if ema20 > ema50: old_score += 25 + min(18, diff * 10)
+    else: old_score -= 25 + min(18, diff * 10)
+    if rsi > 55: old_score += min(22, (rsi - 55) * 1.2)
+    elif rsi < 45: old_score -= min(22, (45 - rsi) * 1.2)
+    old_score += 22 if macd_h > 0 else -22
+    long_p_old = max(8.0, min(92.0, 50 + old_score / 2))
+    
+    # --- НОВЫЙ АЛГОРИТМ (Базовая модель 2: Микроструктура и Z-Score) ---
+    z_s = float(last["z_score"])
+    mom = float(last["momentum"])
+    v_delta = float(last["vol_delta"])
+    v_roc = float(last["vol_roc"])
+    
+    new_score = 0.0
+    # Z-score: если цена сильно ниже EMA (z < -2), ждем отскок (лонг). Если выше 2 - шорт.
+    if z_s < -2.0: new_score += 40 # Сильный лонг
+    elif z_s > 2.0: new_score -= 40 # Сильный шорт
+    
+    # Моментум
+    if mom > 0.01: new_score += 20
+    elif mom < -0.01: new_score -= 20
+    
+    # Дельта объема
+    if v_delta > 0: new_score += 15
+    elif v_delta < 0: new_score -= 15
+    
+    # Волатильность (если резко растет, направление текущей свечи усиливается)
+    if v_roc > 0.5:
+        if last["close"] > last["open"]: new_score += 15
+        else: new_score -= 15
+
+    long_p_new = max(8.0, min(92.0, 50 + new_score / 2))
+
+    # --- МЕТА-МОДЕЛЬ (Stacking) ---
+    # Взвешиваем: 40% старый алгоритм, 60% новый алгоритм (микроструктура)
+    final_long_p = (long_p_old * 0.4) + (long_p_new * 0.6)
+    
+    # Confidence Score (насколько модель уверена в текущем тренде)
+    # Если вероятность > 50, уверенность в лонге. Если < 50, уверенность в шорте.
+    confidence = max(final_long_p, 100 - final_long_p)
+    
+    return round(confidence, 1), round(final_long_p, 1)
+
 
 def rows_to_df(rows):
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
     df = df.drop_duplicates("ts").sort_values("ts")
     df = df[df["close"] > 0].reset_index(drop=True)
-    if len(df) < MIN_CANDLES:
-        raise ValueError("мало свечей")
+    if len(df) < MIN_CANDLES: raise ValueError("мало свечей")
     return add_indicators(df)
+
 
 def build_tf_data(rows_by_tf):
     out = {}
     for tf, rows in rows_by_tf.items():
         df = rows_to_df(rows)
         last = df.iloc[-1]
-        long_p, _ = calc_probability(df)
+        confidence, long_p = calc_ensemble_confidence(df)
         out[tf] = {
             "df": df, "price": float(last["close"]),
             "ema20": float(last["ema20"]), "ema50": float(last["ema50"]), "ema200": float(last["ema200"]),
             "rsi": float(last["rsi"]), "atr": float(last["atr"]), "macd_hist": float(last["macd_hist"]),
             "recent_low": float(df["low"].tail(28).min()), "recent_high": float(df["high"].tail(28).max()),
-            "long_prob": long_p,
+            "long_prob": long_p, "confidence": confidence,
+            "z_score": float(last["z_score"]), "vol_delta": float(last["vol_delta"])
         }
     return out
 
-def _p_binance(j):
-    return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
 
-def _p_okx(j):
-    return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["data"])]
-
-def _p_bybit(j):
-    return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["result"]["list"])]
+def _p_binance(j): return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
+def _p_okx(j): return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["data"])]
+def _p_bybit(j): return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["result"]["list"])]
 
 EXCHANGES = [
-    {"name": "BINANCE", "url": "https://data-api.binance.vision/api/v3/klines",
-     "params": lambda c, tf: {"symbol": f"{c}USDT", "interval": tf, "limit": 180}, "parse": _p_binance},
-    {"name": "OKX", "url": "https://www.okx.com/api/v5/market/candles",
-     "params": lambda c, tf: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": "180"}, "parse": _p_okx},
-    {"name": "BYBIT", "url": "https://api.bybit.com/v5/market/kline",
-     "params": lambda c, tf: {"category": "spot", "symbol": f"{c}USDT", "interval": {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}[tf], "limit": 180}, "parse": _p_bybit},
+    {"name": "BINANCE", "url": "https://data-api.binance.vision/api/v3/klines", "params": lambda c, tf: {"symbol": f"{c}USDT", "interval": tf, "limit": 180}, "parse": _p_binance},
+    {"name": "OKX", "url": "https://www.okx.com/api/v5/market/candles", "params": lambda c, tf: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": "180"}, "parse": _p_okx},
+    {"name": "BYBIT", "url": "https://api.bybit.com/v5/market/kline", "params": lambda c, tf: {"category": "spot", "symbol": f"{c}USDT", "interval": {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}[tf], "limit": 180}, "parse": _p_bybit},
 ]
 
 async def _fetch_klines(ex, coin, tf):
     j = await http_json(ex["url"], params=ex["params"](coin, tf), timeout=9)
     rows = ex["parse"](j)
-    if len(rows) < MIN_CANDLES:
-        raise ValueError("мало")
+    if len(rows) < MIN_CANDLES: raise ValueError("мало")
     return rows
 
 async def fetch_from_exchange(ex, coin):
     results = await asyncio.gather(*[_fetch_klines(ex, coin, tf) for tf in TFS], return_exceptions=True)
-    if any(isinstance(r, Exception) for r in results):
-        return None
+    if any(isinstance(r, Exception) for r in results): return None
     return await asyncio.to_thread(build_tf_data, dict(zip(TFS, results))), ex["name"]
 
 async def get_market_data(coin):
@@ -838,10 +844,8 @@ async def get_market_data(coin):
         for ex in EXCHANGES:
             try:
                 res = await asyncio.wait_for(fetch_from_exchange(ex, cand), timeout=11)
-                if res:
-                    return res
-            except Exception:
-                continue
+                if res: return res
+            except Exception: continue
     raise LookupError(coin)
 
 async def get_simple_price(coin):
@@ -852,70 +856,90 @@ async def get_simple_price(coin):
         try:
             j = await http_json("https://api.bybit.com/v5/market/tickers", params={"category": "spot", "symbol": f"{coin}USDT"}, timeout=5)
             return float(j["result"]["list"][0]["lastPrice"])
-        except Exception:
-            return None
+        except Exception: return None
+
 
 def tech_check(tf_data):
-    if "4h" not in tf_data or "1d" not in tf_data:
-        return None
+    """Фильтр сигналов. Использует Confidence Score."""
+    if "4h" not in tf_data or "1d" not in tf_data: return None
+    
     d4 = tf_data["4h"]
     d1 = tf_data["1d"]
+    
+    # Берем средний Confidence Score между 4h и 1d
+    avg_conf = (d4["confidence"] + d1["confidence"]) / 2
     p4, p1 = d4["long_prob"], d1["long_prob"]
-    if p4 >= 58 and p1 >= 55:
-        is_long = True
-        strength = (p4 + p1) / 2
-    elif p4 <= 42 and p1 <= 45:
-        is_long = False
-        strength = ((100 - p4) + (100 - p1)) / 2
-    else:
-        return None
     
-    if strength < 63:
-        return None
+    # Направление определяем по вероятности
+    is_long = p4 >= 50
     
+    # Порог уверенности (Confidence Threshold) - 70%
+    if avg_conf < 70:
+        return None
+        
+    # Проверка на согласованность таймфреймов (оба смотрят в одну сторону)
+    if (is_long and p1 < 50) or (not is_long and p1 >= 50):
+        return None
+
     p15 = tf_data.get("15m", {}).get("long_prob", 50)
     p1h = tf_data.get("1h", {}).get("long_prob", 50)
     
+    # Быстрый сигнал, если младшие ТФ подтверждают
     fast = (is_long and p15 >= 60 and p1h >= 57) or (not is_long and p15 <= 40 and p1h <= 43)
     long_term = (is_long and p1 >= 70) or (not is_long and p1 <= 30)
     
-    if long_term and not fast:
-        sig_type = "Долгосрок"
-    elif fast:
-        sig_type = "Быстрый сигнал"
-    else:
-        sig_type = "Среднесрок"
+    if long_term and not fast: sig_type = "Долгосрок"
+    elif fast: sig_type = "Быстрый сигнал"
+    else: sig_type = "Среднесрок"
         
-    return {"ok": True, "is_long": is_long, "strength": round(strength, 1), "type": sig_type}
+    return {
+        "ok": True,
+        "is_long": is_long,
+        "strength": round(avg_conf, 1), # Используем уверенность как "силу"
+        "type": sig_type,
+    }
 
-def calc_levels(info, is_long):
+
+def calc_levels_and_risk(info, is_long):
+    """
+    Risk Gate: расчет уровней и размера позиции.
+    Условный депозит: 1000 USDT. Риск на сделку: 1% (10 USDT).
+    """
     price = info["price"]
     atr = info["atr"] if info["atr"] > 0 else price * 0.012
-    ema20 = info["ema20"]
-    ema50 = info["ema50"]
-    recent_low = info["recent_low"]
-    recent_high = info["recent_high"]
+    
+    # 1. Уровни (от ATR, как требует ТЗ)
     if is_long:
-        entry = min(price, max(ema20, ema50))
-        if entry > price - 0.2 * atr:
-            entry = price - 0.35 * atr
-        sl1 = recent_low - 0.4 * atr
-        risk = max(entry - sl1, 0.6 * atr)
-        tp1 = entry + risk * 1.4
-        tp2 = entry + risk * 2.3
-        tp3 = entry + risk * 3.5
+        entry = min(price, max(info["ema20"], info["ema50"]))
+        if entry > price - 0.2 * atr: entry = price - 0.35 * atr
+        sl1 = info["recent_low"] - 0.5 * atr # Более безопасный стоп
+        risk_dist = max(entry - sl1, 0.6 * atr)
+        tp1 = entry + risk_dist * 1.5 # RR 1:1.5
+        tp2 = entry + risk_dist * 2.5
+        tp3 = entry + risk_dist * 4.0
         sl2 = sl1 - 0.7 * atr
     else:
-        entry = max(price, min(ema20, ema50))
-        if entry < price + 0.2 * atr:
-            entry = price + 0.35 * atr
-        sl1 = recent_high + 0.4 * atr
-        risk = max(sl1 - entry, 0.6 * atr)
-        tp1 = entry - risk * 1.4
-        tp2 = entry - risk * 2.3
-        tp3 = entry - risk * 3.5
+        entry = max(price, min(info["ema20"], info["ema50"]))
+        if entry < price + 0.2 * atr: entry = price + 0.35 * atr
+        sl1 = info["recent_high"] + 0.5 * atr
+        risk_dist = max(sl1 - entry, 0.6 * atr)
+        tp1 = entry - risk_dist * 1.5
+        tp2 = entry - risk_dist * 2.5
+        tp3 = entry - risk_dist * 4.0
         sl2 = sl1 + 0.7 * atr
-    return entry, [tp1, tp2, tp3], [sl1, sl2]
+
+    # 2. Position Sizing (Размер позиции)
+    # Формула: (Депозит * Риск%) / Дистанция до стопа
+    # Для удобства показываем размер в USDT для депозита $1000
+    account_balance = 1000.0
+    risk_percent = 0.01 # 1%
+    risk_amount = account_balance * risk_percent # $10
+    
+    # Сколько монет купить, чтобы при стопе потерять ровно $10
+    position_size_coins = risk_amount / risk_dist 
+    position_size_usdt = position_size_coins * entry
+    
+    return entry, [tp1, tp2, tp3], [sl1, sl2], position_size_usdt, risk_amount
 
 
 # ====================== ИИ ======================
@@ -934,10 +958,8 @@ async def _ask_gemini(prompt):
         try:
             async with http.post(url, json=payload, headers={"x-goog-api-key": key}, timeout=aiohttp.ClientTimeout(total=18)) as r:
                 j = await r.json(content_type=None)
-                if r.status == 200:
-                    return j["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception:
-            pass
+                if r.status == 200: return j["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception: pass
     return None
 
 async def _ask_openai_compat(name, base, key, model, prompt, extra_headers=None):
@@ -947,10 +969,8 @@ async def _ask_openai_compat(name, base, key, model, prompt, extra_headers=None)
     try:
         async with http.post(f"{base}/chat/completions", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r:
             j = await r.json(content_type=None)
-            if r.status == 200:
-                return j["choices"][0]["message"]["content"]
-    except Exception:
-        pass
+            if r.status == 200: return j["choices"][0]["message"]["content"]
+    except Exception: pass
     return None
 
 async def _ask_free_gpt(prompt):
@@ -960,10 +980,8 @@ async def _ask_free_gpt(prompt):
         async with http.get(f"https://text.pollinations.ai/{short}", params={"model": POLLINATIONS_MODEL, "system": system}, timeout=aiohttp.ClientTimeout(total=14)) as r:
             if r.status == 200:
                 text = await r.text()
-                if not _looks_like_junk(text):
-                    return text
-    except Exception:
-        pass
+                if not _looks_like_junk(text): return text
+    except Exception: pass
     return None
 
 async def ask_ai_named(prompt, timeout=20, validate=None, free_timeout=30):
@@ -973,12 +991,9 @@ async def ask_ai_named(prompt, timeout=20, validate=None, free_timeout=30):
     if OPENROUTER_API_KEY: providers.append(("OpenRouter", lambda: _ask_openai_compat("OpenRouter", "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt)))
 
     async def wrap(name, fn):
-        try:
-            t = await fn()
-        except Exception:
-            return None
-        if t and len(t) > 20 and (validate is None or validate(t)):
-            return t, name
+        try: t = await fn()
+        except Exception: return None
+        if t and len(t) > 20 and (validate is None or validate(t)): return t, name
         return None
 
     if providers:
@@ -1121,7 +1136,6 @@ async def update_market_bias(force=False):
             summary = clean_summary(getattr(entry, "summary", ""))
             published = get_moscow_time_from_entry(entry)
             
-            # Расширенный промпт для более подробного анализа
             prompt = f"""Новость: {title}
 Текст: {summary}
 Переведи на русский и разбери в формате:
@@ -1139,14 +1153,14 @@ COINS: тикеры"""
                 bias = 1 if "BULL" in up else -1 if "BEAR" in up else 0
                 title_ru = parsed["TITLE_RU"][:170]
                 summ = shorten(parsed["SUMMARY"], 380)
-                impact = shorten(parsed["IMPACT"], 500) # Увеличен лимит до 500 символов
+                impact = shorten(parsed["IMPACT"], 500)
                 coins = parsed.get("COINS", "BTC, ETH")
                 eng = engine
             else:
                 title_ru = await translate_text(title)
                 summ = shorten(title_ru, 380)
                 bias = news_sentiment(f"{title}. {summary}")
-                impact = IMPACT_TEMPLATES[bias] # Используем подробный шаблон
+                impact = IMPACT_TEMPLATES[bias]
                 coins = ", ".join(mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"])
                 eng = "fallback"
 
@@ -1217,24 +1231,42 @@ async def scan_once(send=True):
             except Exception: pass
 
     await asyncio.gather(*[check(c) for c in POPULAR_COINS])
+    # Сортируем по уверенности
     candidates.sort(key=lambda x: x["tech"]["strength"], reverse=True)
     
-    log.info(f"Сканер: найдено {len(candidates)} подходящих сигналов (bias={bias})")
+    log.info(f"Сканер: найдено {len(candidates)} сигналов с уверенностью >70% (bias={bias})")
 
-    # 1. Сохраняем ВСЕ текущие сигналы в БД (без учета кулдауна)
     new_signals_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
+    
     for cand in candidates:
         coin, tech, tf_data = cand["coin"], cand["tech"], cand["tf_data"]
         info = tf_data["4h"]
         is_long = tech["is_long"]
-        entry, tps, sls = calc_levels(info, is_long)
+        
+        # Risk Gate: расчет уровней и размера позиции
+        entry, tps, sls, pos_size_usdt, risk_usdt = calc_levels_and_risk(info, is_long)
+        
         side_emoji = "🟢" if is_long else "🔴"
         side = "LONG" if is_long else "SHORT"
         bar = make_strength_bar(tech["strength"])
         lev, risk = get_leverage_recommendation(tech["strength"], tech["type"])
-        text = (f"{side_emoji} <b>{side}  ·  {coin}</b>\n━━━━━━━━━━━━━━━━━━━━\n📌 Тип: <b>{tech['type']}</b>\n💪 Сила: <b>{tech['strength']}%</b>\n{bar}\n\n"
-                f"💰 Цена: <code>{fmt(info['price'])}</code>\n📥 Вход: <code>{fmt(entry)}</code>\n\n🎯 <b>Тейки</b>\n   TP1  <code>{fmt(tps[0])}</code>\n   TP2  <code>{fmt(tps[1])}</code>\n   TP3  <code>{fmt(tps[2])}</code>\n\n"
-                f"🛡 <b>Стопы</b>\n   SL1  <code>{fmt(sls[0])}</code>\n   SL2  <code>{fmt(sls[1])}</code>\n\n⚖ <b>Плечо:</b> {lev}\n💵 <b>Риск:</b> {risk} от депозита\n\n🌍 Фон: {html.escape(bias_text)}")
+        
+        text = (f"{side_emoji} <b>{side}  ·  {coin}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 Тип: <b>{tech['type']}</b>\n"
+                f"💪 Уверенность (Conf): <b>{tech['strength']}%</b>\n"
+                f"{bar}\n\n"
+                f"📊 <b>Метрики:</b>\n"
+                f"Z-Score: {info['z_score']:.2f}\n"
+                f"Vol Delta: {info['vol_delta']:.0f}\n\n"
+                f"💰 Цена: <code>{fmt(info['price'])}</code>\n"
+                f"📥 Вход: <code>{fmt(entry)}</code>\n\n"
+                f"🎯 <b>Тейки</b>\n   TP1  <code>{fmt(tps[0])}</code>\n   TP2  <code>{fmt(tps[1])}</code>\n   TP3  <code>{fmt(tps[2])}</code>\n\n"
+                f"🛡 <b>Стопы</b>\n   SL1  <code>{fmt(sls[0])}</code>\n   SL2  <code>{fmt(sls[1])}</code>\n\n"
+                f"⚖ <b>Risk Gate:</b>\n"
+                f"Размер позиции: <b>${pos_size_usdt:.2f}</b>\n"
+                f"Риск на сделку: <b>${risk_usdt:.2f}</b> (1% от $1000)\n\n"
+                f"🌍 Фон: {html.escape(bias_text)}")
+                
         sig_dict = {"coin": coin, "text": text, "is_long": is_long, "entry": entry, "tps": tps, "sls": sls, "type": tech["type"], "strength": tech["strength"], "side": side}
         new_signals_db[tech["type"]].append(sig_dict)
 
@@ -1242,7 +1274,7 @@ async def scan_once(send=True):
     for k in new_signals_db: new_signals_db[k] = new_signals_db[k][:10]
     current_signals_db = new_signals_db
 
-    # 2. Фильтруем для рассылки (кулдаун 3 часа)
+    # Фильтруем для рассылки (кулдаун 3 часа)
     to_broadcast = []
     if send:
         now = time.time()
@@ -1251,7 +1283,7 @@ async def scan_once(send=True):
             if now - signal_sent_at.get(key, 0) >= SIGNAL_COOLDOWN:
                 to_broadcast.append(cand)
                 
-    to_broadcast = to_broadcast[:4] # Максимум 4 штуки в одном сообщении
+    to_broadcast = to_broadcast[:4]
 
     if to_broadcast and send:
         now = time.time()
@@ -1259,8 +1291,6 @@ async def scan_once(send=True):
         for cand in to_broadcast:
             key = f"{cand['coin']}:{'L' if cand['tech']['is_long'] else 'S'}"
             signal_sent_at[key] = now
-            
-            # Ищем полный текст для сохранения в историю
             for s in new_signals_db[cand['tech']['type']]:
                 if s['coin'] == cand['coin']:
                     hist.append({"ts": now, "coin": s["coin"], "side": s["side"], "type": s["type"], "strength": s["strength"], "text": s["text"]})
@@ -1268,8 +1298,6 @@ async def scan_once(send=True):
         _save_signal_history(hist)
 
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
-        
-        # Здесь используется подробный bias_text
         text = f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
         kb = [
             [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
@@ -1375,22 +1403,41 @@ async def analyze_coin(coin, user_id=None):
         tf_data, source = await get_market_data(coin)
     except Exception:
         return None, f"⚠ Не удалось получить данные по <b>{html.escape(coin)}</b>"
+    
     tech = tech_check(tf_data)
-    if tech: is_long, strength, sig_type = tech["is_long"], tech["strength"], tech["type"]
+    if tech: 
+        is_long, strength, sig_type = tech["is_long"], tech["strength"], tech["type"]
     else:
+        # Если не прошли фильтр по уверенности, берем данные 4h для отображения
         d4 = tf_data["4h"]
         is_long = d4["long_prob"] >= 50
-        strength = max(d4["long_prob"], 100 - d4["long_prob"])
-        sig_type = "Среднесрок"
+        strength = d4["confidence"]
+        sig_type = "Нет четкого сигнала (Conf < 70)"
+        
     info = tf_data["4h"]
-    entry, tps, sls = calc_levels(info, is_long)
+    # Risk Gate
+    entry, tps, sls, pos_size_usdt, risk_usdt = calc_levels_and_risk(info, is_long)
+    
     side_emoji = "🟢" if is_long else "🔴"
     side = "LONG" if is_long else "SHORT"
     bar = make_strength_bar(strength)
-    lev, risk = get_leverage_recommendation(strength, sig_type)
-    text = (f"{side_emoji} <b>{side}  ·  {coin}</b>\n━━━━━━━━━━━━━━━━━━━━\n📌 Тип: <b>{sig_type}</b>\n💪 Сила: <b>{strength}%</b>\n{bar}\n\n"
-            f"💰 Цена: <code>{fmt(info['price'])}</code>\n📥 Вход: <code>{fmt(entry)}</code>\n\n🎯 <b>Тейки</b>\n   TP1  <code>{fmt(tps[0])}</code>\n   TP2  <code>{fmt(tps[1])}</code>\n   TP3  <code>{fmt(tps[2])}</code>\n\n"
-            f"🛡 <b>Стопы</b>\n   SL1  <code>{fmt(sls[0])}</code>\n   SL2  <code>{fmt(sls[1])}</code>\n\n⚖ <b>Плечо:</b> {lev}\n💵 <b>Риск:</b> {risk} от депозита\n\n🌍 Фон: {html.escape(market_bias.get('impact', 'Нейтральный'))}")
+    
+    text = (f"{side_emoji} <b>{side}  ·  {coin}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 Статус: <b>{sig_type}</b>\n"
+            f"💪 Уверенность (Conf): <b>{strength}%</b>\n"
+            f"{bar}\n\n"
+            f"📊 <b>Метрики (4h):</b>\n"
+            f"Z-Score: {info['z_score']:.2f}\n"
+            f"Vol Delta: {info['vol_delta']:.0f}\n\n"
+            f"💰 Цена: <code>{fmt(info['price'])}</code>\n"
+            f"📥 Вход: <code>{fmt(entry)}</code>\n\n"
+            f"🎯 <b>Тейки</b>\n   TP1  <code>{fmt(tps[0])}</code>\n   TP2  <code>{fmt(tps[1])}</code>\n   TP3  <code>{fmt(tps[2])}</code>\n\n"
+            f"🛡 <b>Стопы</b>\n   SL1  <code>{fmt(sls[0])}</code>\n   SL2  <code>{fmt(sls[1])}</code>\n\n"
+            f"⚖ <b>Risk Gate:</b>\n"
+            f"Размер позиции: <b>${pos_size_usdt:.2f}</b>\n"
+            f"Риск на сделку: <b>${risk_usdt:.2f}</b> (1% от $1000)\n\n"
+            f"🌍 Фон: {html.escape(market_bias.get('impact', 'Нейтральный'))}")
+            
     try: img = await asyncio.to_thread(draw_chart, coin, tf_data, "4h", is_long, entry, tps, sls)
     except Exception: img = None
     return {"text": text, "img": img, "coin": coin, "entry": entry, "tps": tps, "sls": sls, "is_long": is_long, "side": side, "price": info["price"], "type": sig_type, "strength": strength}, None
@@ -1533,7 +1580,7 @@ async def cb_sig_list(cb: types.CallbackQuery):
     kb = []
     for s in sigs:
         emoji = "🟢" if s["is_long"] else "🔴"
-        text += f"{emoji} <b>{s['coin']}</b> · Сила: {s['strength']}%\n"
+        text += f"{emoji} <b>{s['coin']}</b> · Conf: {s['strength']}%\n"
         kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
     kb.append([InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")])
     await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
@@ -1736,10 +1783,10 @@ if admin_dp:
         elif act == "scan_test":
             sigs = await scan_once(send=False)
             if sigs:
-                lines = [f"{'🟢' if s['is_long'] else '🔴'} {s['coin']} · {s['type']} · {s['strength']}%" for s in sigs]
+                lines = [f"{'🟢' if s['is_long'] else '🔴'} {s['coin']} · {s['type']} · Conf: {s['strength']}%" for s in sigs]
                 await cb.message.answer("🔍 Тест сканера (без рассылки)\n\n" + "\n".join(lines))
             else:
-                await cb.message.answer("🔍 Тест сканера: сильных сигналов сейчас нет (или фон новостей их блокирует)")
+                await cb.message.answer("🔍 Тест сканера: сильных сигналов сейчас нет (Conf < 70% или фон блокирует)")
         elif act == "broadcast_now":
             if last_signals_data.get("text"):
                 sent, _, _, _ = await broadcast({"kind": "text", "text": last_signals_data["text"], "markup": last_signals_data.get("kb")})
