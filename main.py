@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.8
-- MongoDB для пользователей (фоновое подключение)
+IXCLY Trading bot v2.10.10
+- MongoDB для пользователей
 - АВТОСОХРАНЕНИЕ: любой клик или сообщение сохраняет пользователя в базу
-- СОХРАНЕНИЕ СИГНАЛОВ: исправлена ошибка await None при сохранении
+- СОХРАНЕНИЕ СИГНАЛОВ: меню "Избранное", сохранение картинок и точек входа в базу
 - Сканер сигналов каждые 17 минут: ОДНО сообщение с кнопками + «Последние сигналы»
-- Учёт макро-новостей (ФРС, ставки) в решениях ИИ
+- ИСТОРИЯ СИГНАЛОВ: если нет свежих, можно посмотреть историю за 24 часа
+- ИНТЕРЕСНЫЕ ГРАФИКИ: топ-4 роста и падения за 24 часа с ожидаемым сценарием
 - 184 популярные монеты
 """
 import asyncio
@@ -128,7 +129,7 @@ POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 if not BOT_TOKEN:
     raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 
-VERSION = "2.10.8"
+VERSION = "2.10.10"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 
@@ -188,6 +189,7 @@ SYMBOL_ALIASES = {
 
 USERS_FILE = "users.json"
 NEWS_HISTORY_FILE = "news_history.json"
+SIGNAL_HISTORY_FILE = "signal_history.json"
 active_chats = set()
 busy_users = set()
 user_last_request = {}
@@ -381,6 +383,23 @@ def _save_news_history():
     except Exception as e:
         log.warning("news_history.json не сохранён: %s", e)
 
+# --- ИСТОРИЯ СИГНАЛОВ ---
+def _load_signal_history():
+    try:
+        with open(SIGNAL_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = []
+    now = time.time()
+    return [x for x in data if now - x["ts"] < 24 * 3600]
+
+def _save_signal_history(data):
+    try:
+        with open(SIGNAL_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        log.warning("signal_history.json не сохранён: %s", e)
+
 
 # ----------------------------------------------------------------------------
 # МИДЛВАРЬ
@@ -424,6 +443,7 @@ def get_coins_keyboard(page=0):
     if page < total_pages - 1: nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"p:{page + 1}"))
     buttons.append(nav)
 
+    buttons.append([InlineKeyboardButton(text="🧐 Интересные графики", callback_data="interesting_menu")])
     buttons.append([InlineKeyboardButton(text="🔥 Последние сигналы", callback_data="last_signals")])
     buttons.append([InlineKeyboardButton(text="⭐ Избранное", callback_data="sig:menu")])
     buttons.append([InlineKeyboardButton(text="📊 Статистика за 24 часа", callback_data="show_stats")])
@@ -766,7 +786,7 @@ async def get_simple_price(coin):
 
 
 # ----------------------------------------------------------------------------
-# СТАТИСТИКА
+# СТАТИСТИКА И ИНТЕРЕСНЫЕ ГРАФИКИ
 # ----------------------------------------------------------------------------
 async def build_daily_stats():
     try:
@@ -796,23 +816,16 @@ async def build_daily_stats():
     return text
 
 
-async def daily_stats_loop():
-    await asyncio.sleep(10)
-    while True:
-        now_utc = datetime.utcnow()
-        now_msk = now_utc + timedelta(hours=3)
-        next_run_msk = now_msk.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        sleep_seconds = (next_run_msk - now_msk).total_seconds()
-        log.info(f"Следующая рассылка статистики через {sleep_seconds:.0f} секунд (в 00:00 МСК)")
-        await asyncio.sleep(sleep_seconds)
-        try:
-            if active_chats:
-                text = await build_daily_stats()
-                payload = {"kind": "text", "text": text}
-                sent, failed, removed = await broadcast(payload)
-                log.info(f"Ежедневная статистика разослана: {sent} доставлено, {failed} ошибок")
-        except Exception as e: log.error(f"Ошибка при отправке ежедневной статистики: {e}")
-        await asyncio.sleep(60)
+async def get_interesting_coins():
+    try:
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
+        movers = [x for x in j if x['symbol'] in [f"{c}USDT" for c in POPULAR_COINS]]
+        movers.sort(key=lambda x: float(x['priceChangePercent']), reverse=True)
+        top_gainers = movers[:4]
+        top_losers = movers[-4:]
+        return top_gainers, top_losers
+    except Exception:
+        return [], []
 
 
 # ----------------------------------------------------------------------------
@@ -1129,7 +1142,7 @@ async def news_watcher():
                             full_text = check_text + text if check_text else text
                             img = await download_bytes(image_url) if image_url else None
                             payload = {"kind": "photo" if img else "text", "text": full_text, "data": img, "filename": "news.jpg"}
-                            sent, failed, removed = await broadcast(payload)
+                            sent, failed, removed, _ = await broadcast(payload)
                             stats["news_sent"] += sent
         except Exception as e: log.warning("news_watcher: %s", e)
         await asyncio.sleep(600)
@@ -1287,7 +1300,7 @@ async def scan_once(send=True):
             alert_history[key] = time.time()
             _save_alert_history()
             stats["alerts_sent"] += 1
-            sent.append(coin)
+            sent.append({"coin": coin, "is_long": is_long})
         if sent:
             if row: buttons.append(row)
             kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1295,7 +1308,19 @@ async def scan_once(send=True):
             last_signals_data["text"] = text
             last_signals_data["kb"] = kb
             payload = {"kind": "text", "text": text, "markup": kb}
-            ok, fail, removed = await broadcast(payload)
+            ok, fail, removed, photo_id = await broadcast(payload)
+            
+            if photo_id:
+                hist = _load_signal_history()
+                hist.append({
+                    "ts": time.time(),
+                    "time_str": datetime.now().strftime("%H:%M"),
+                    "coins": sent,
+                    "text": text,
+                    "photo_id": photo_id
+                })
+                _save_signal_history(hist)
+                
             log.info("Групповой сигнал разослан: %d доставлено, %d ошибок", ok, fail)
     return {"scanned": len(POPULAR_COINS), "failed": sorted(failed), "cands": local_candidates, "sent": sent, "secs": int(time.time() - t0)}
 
@@ -1425,7 +1450,6 @@ def local_verdict(tf_data, news_text):
     else: entry_reason = "Новостной фон против сигнала."
     return {"dominant_tf": tf, "reason": local_reason(tf, d), "entry_status": "ENTER" if enter else "WAIT", "entry_reason": entry_reason, "news": ns}
 
-# --- ИСПРАВЛЕНИЕ ОШИБКИ AWAIT NONE ---
 async def _noop_status(_t):
     return
 
@@ -1527,7 +1551,7 @@ async def build_signal(coin, status, force=False):
         f"🎯 <b>Цели</b>{lv}\n{tp_lines}\n\n"
         f"🛑 <b>Стопы</b>\n{sl_lines}\n\n"
         f"🌍 Новости: {n_emoji} {n_label}\n\n"
-        f"💬 {html.escape(reason)}\n\n"
+        f"🔮 <b>Ожидаемый сценарий:</b>\n{html.escape(reason)}\n\n"
         f"⚠️ <i>Не является финансовой рекомендацией</i> {tag}"
     )
     png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls, tf, long_prob, source, entry_status)
@@ -1614,9 +1638,53 @@ async def callback_handler(cb: types.CallbackQuery):
     if data == "ignore": return
     if data == "menu":
         await bot.send_message(chat_id, "👋 Главное меню:", reply_markup=get_coins_keyboard(0))
+    elif data == "interesting_menu":
+        loading = await bot.send_message(chat_id, "⏳ Ищу самые интересные движения за 24ч...")
+        try:
+            top_g, top_l = await get_interesting_coins()
+            buttons = []
+            if top_g:
+                buttons.append([InlineKeyboardButton(text="🟢 ТОП РОСТА (24ч):", callback_data="ignore")])
+                for x in top_g:
+                    buttons.append([InlineKeyboardButton(text=f"🚀 {x['symbol'][:-4]} +{float(x['priceChangePercent']):.1f}%", callback_data=f"c:{x['symbol'][:-4]}")])
+            if top_l:
+                buttons.append([InlineKeyboardButton(text="🔴 ТОП ПАДЕНИЯ (24ч):", callback_data="ignore")])
+                for x in top_l:
+                    buttons.append([InlineKeyboardButton(text=f"🩸 {x['symbol'][:-4]} {float(x['priceChangePercent']):.1f}%", callback_data=f"c:{x['symbol'][:-4]}")])
+            buttons.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")])
+            await bot.send_message(chat_id, "🧐 <b>Интересные графики</b>\nНажми на монету, чтобы увидеть ожидаемый сценарий:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        finally:
+            try: await loading.delete()
+            except Exception: pass
     elif data == "last_signals":
-        if last_signals_data["text"]: await bot.send_message(chat_id, last_signals_data["text"], parse_mode="HTML", reply_markup=last_signals_data["kb"])
-        else: await bot.send_message(chat_id, "⏳ Свежих сигналов пока нет.", reply_markup=get_coins_keyboard(0))
+        if last_signals_data["text"]:
+            await bot.send_message(chat_id, last_signals_data["text"], parse_mode="HTML", reply_markup=last_signals_data["kb"])
+        else:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📜 История за 24 часа", callback_data="hist:menu")],
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]
+            ])
+            await bot.send_message(chat_id, "⏳ Свежих сигналов пока нет. Но вы можете посмотреть историю за последние 24 часа.", reply_markup=kb)
+    elif data == "hist:menu":
+        hist = _load_signal_history()
+        if not hist:
+            await cb.answer("История за 24 часа пуста", show_alert=True)
+            return
+        buttons = []
+        row = []
+        for h in reversed(hist):
+            for c in h['coins']:
+                emoji = "🟢" if c['is_long'] else "🔴"
+                row.append(InlineKeyboardButton(text=f"{emoji} {c['coin']} ({h['time_str']})", callback_data=f"hist:view:{c['coin']}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+        if row: buttons.append(row)
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="last_signals")])
+        await cb.message.edit_text("📜 <b>История сигналов за 24 часа:</b>\nНажми на монету, чтобы сделать полный анализ.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    elif data.startswith("hist:view:"):
+        coin = data.split(":")[2]
+        await process_signal(chat_id, user_id, coin, force=True)
     elif data == "show_stats":
         loading = await bot.send_message(chat_id, "⏳ Собираю статистику...")
         try:
@@ -1641,8 +1709,6 @@ async def callback_handler(cb: types.CallbackQuery):
         await cb.message.edit_text("➕ <b>Выберите монету:</b>", reply_markup=get_save_coins_keyboard(int(data.split(":")[2])))
     elif data == "sig:save_new":
         await cb.message.edit_text("➕ <b>Выберите монету:</b>", reply_markup=get_save_coins_keyboard(0))
-    
-    # --- ИСПРАВЛЕНО ТУТ ---
     elif data.startswith("sig:do_save:") or data.startswith("sig:quick_save:"):
         coin = data.split(":")[-1]
         await cb.message.edit_text(f"⏳ Анализирую {coin}...")
@@ -1655,7 +1721,6 @@ async def callback_handler(cb: types.CallbackQuery):
             await cb.message.delete()
         except Exception as e:
             await cb.message.edit_text(f"❌ Ошибка: {html.escape(str(e))[:100]}", reply_markup=get_saved_signals_menu(user_id))
-    
     elif data.startswith("sig:view:"):
         sig = next((s for s in get_user_saved_signals(user_id) if s['coin'] == data.split(":")[2]), None)
         if sig: await bot.send_photo(chat_id, sig['photo_id'], caption=sig['text'], parse_mode="HTML")
@@ -1684,7 +1749,7 @@ async def send_payload(chat_id, p, cache):
     kind, text, markup = p["kind"], p.get("text") or "", p.get("markup")
     if kind == "text":
         await bot.send_message(chat_id, text[:4000] or "…", parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
-        return
+        return None
     media = cache.get("file_id") or BufferedInputFile(p["data"], filename=p.get("filename") or "file")
     caption = text if 0 < len(text) <= 1024 else None
     senders = {"photo": bot.send_photo, "video": bot.send_video, "document": bot.send_document, "animation": bot.send_animation, "audio": bot.send_audio, "voice": bot.send_voice}
@@ -1694,14 +1759,17 @@ async def send_payload(chat_id, p, cache):
         if obj: cache["file_id"] = obj.file_id
     if text and not caption:
         await bot.send_message(chat_id, text[:4000], parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
+    return cache.get("file_id")
 
 async def broadcast(payload, progress=None):
     chats = list(active_chats)
     cache, ok, fail, dead = {}, 0, 0, []
+    first_file_id = None
     for i, chat_id in enumerate(chats):
         for _ in range(3):
             try:
-                await send_payload(chat_id, payload, cache)
+                fid = await send_payload(chat_id, payload, cache)
+                if fid and not first_file_id: first_file_id = fid
                 ok += 1
                 break
             except TelegramRetryAfter as e: await asyncio.sleep(e.retry_after + 1)
@@ -1718,7 +1786,7 @@ async def broadcast(payload, progress=None):
     if dead:
         for c in dead: active_chats.discard(c)
         set_users_active(dead, False)
-    return ok, fail, len(dead)
+    return ok, fail, len(dead), first_file_id
 
 async def send_backup(caption="💾 Бэкап базы"):
     users = _load_users()
@@ -1808,7 +1876,7 @@ async def run_broadcast(admin_chat, payload):
     if n == 0: return await input_bot.send_message(admin_chat, "⚠️ Получателей нет.")
     status = await input_bot.send_message(admin_chat, f"⏳ Рассылка: 0/{n}")
     async def progress(done, total): await status.edit_text(f"⏳ Рассылка: {done}/{total}")
-    ok, fail, removed = await broadcast(payload, progress)
+    ok, fail, removed, _ = await broadcast(payload, progress)
     stats["broadcasts"] += 1
     try: await status.edit_text(f"✅ Доставлено: {ok} из {n}\nОшибок: {fail}\nУбрано: {removed}")
     except Exception: pass
