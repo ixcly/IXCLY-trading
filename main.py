@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.10.23
-- Исправлено подключение к MongoDB (SSL handshake)
-- Новости на русском + суть + влияние + время МСК
-- Полный список монет
-- Просторное меню
+IXCLY Trading bot v2.10.24
+MongoDB временно отключена (работаем через файл)
 """
 
 import asyncio
@@ -23,7 +20,6 @@ import aiohttp
 import feedparser
 import numpy as np
 import pandas as pd
-import pymongo
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -45,21 +41,13 @@ def home():
 def health():
     return "ok"
 
-def _rss_mb():
-    try:
-        import resource
-        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-    except Exception:
-        return None
-
 @app.route("/status")
 def status_page():
     return jsonify({
         "version": VERSION,
         "uptime_s": int(time.time() - stats["started"]),
         "recipients": len(active_chats),
-        "mongo": users_col is not None,
-        "bias": market_bias,
+        "mongo": False,
     })
 
 def _run_web():
@@ -99,7 +87,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.10.23"
+VERSION = "2.10.24"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -160,59 +148,14 @@ market_bias = {
 
 users_col = None
 
-# ====================== ИСПРАВЛЕННОЕ ПОДКЛЮЧЕНИЕ К MONGO ======================
 def init_mongo():
+    """MongoDB временно полностью отключена"""
     global users_col
-    if not MONGO_URI:
-        log.warning("MONGO_URI не задан — используем файл users.json")
-        users_col = None
-        return
-
-    # Варианты подключения (от самого строгого к самому мягкому)
-    variants = [
-        # 1. Стандартный + tls
-        MONGO_URI + ("&" if "?" in MONGO_URI else "?") + "tls=true&retryWrites=true&w=majority",
-        
-        # 2. С разрешением невалидных сертификатов (самый рабочий на Render)
-        MONGO_URI + ("&" if "?" in MONGO_URI else "?") + "tls=true&tlsAllowInvalidCertificates=true&retryWrites=true&w=majority",
-        
-        # 3. Старый вариант ssl
-        MONGO_URI + ("&" if "?" in MONGO_URI else "?") + "ssl=true&ssl_cert_reqs=CERT_NONE&retryWrites=true&w=majority",
-        
-        # 4. Оригинальная строка
-        MONGO_URI,
-    ]
-
-    for i, uri in enumerate(variants, 1):
-        try:
-            log.info(f"Пробую подключение к MongoDB (вариант {i})...")
-            client = pymongo.MongoClient(
-                uri,
-                serverSelectionTimeoutMS=8000,
-                connectTimeoutMS=8000,
-                socketTimeoutMS=10000,
-            )
-            # Проверяем реальное подключение
-            client.admin.command("ping")
-            users_col = client["ixcly_db"]["users"]
-            log.info(f"✅ MongoDB успешно подключена (вариант {i})")
-            return
-        except Exception as e:
-            log.warning(f"Вариант {i} не сработал: {str(e)[:120]}")
-            continue
-
-    # Если все варианты провалились
     users_col = None
-    log.error("❌ Не удалось подключиться к MongoDB. Работаем через файл users.json")
+    log.warning("⚠️ MongoDB отключена. Работаем через файл users.json")
 
-# ====================== ПОЛЬЗОВАТЕЛИ ======================
+# ====================== ПОЛЬЗОВАТЕЛИ (через файл) ======================
 def _load_users():
-    if users_col is not None:
-        try:
-            return {str(u["_id"]): {k: v for k, v in u.items() if k != "_id"} for u in users_col.find()}
-        except Exception as e:
-            log.error(f"Ошибка чтения Mongo: {e}")
-            return {}
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -220,39 +163,29 @@ def _load_users():
         return {}
 
 def _save_users(users):
-    if users_col is not None:
-        try:
-            for uid, data in users.items():
-                users_col.update_one({"_id": str(uid)}, {"$set": data}, upsert=True)
-            return
-        except Exception as e:
-            log.error(f"Ошибка записи в Mongo: {e}")
-    
-    # Фоллбэк на файл
     try:
         with open(USERS_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(users, f, ensure_ascii=False, indent=2)
         os.replace(USERS_FILE + ".tmp", USERS_FILE)
     except Exception as e:
-        log.error(f"Ошибка записи в файл: {e}")
+        log.error(f"Ошибка записи users.json: {e}")
 
 def save_user_data(user_id, username, first_name):
     key = str(user_id)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if users_col is not None:
-        try:
-            users_col.update_one(
-                {"_id": key},
-                {"$set": {"username": username, "first_name": first_name, "active": True},
-                 "$setOnInsert": {"joined_at": now}},
-                upsert=True
-            )
-            return
-        except Exception:
-            pass
     users = _load_users()
     if key not in users:
-        users[key] = {"username": username, "first_name": first_name, "joined_at": now, "active": True}
+        users[key] = {
+            "username": username,
+            "first_name": first_name,
+            "joined_at": now,
+            "active": True
+        }
+        _save_users(users)
+    else:
+        users[key]["username"] = username
+        users[key]["first_name"] = first_name
+        users[key]["active"] = True
         _save_users(users)
 
 def get_user_saved_signals(user_id):
@@ -260,16 +193,9 @@ def get_user_saved_signals(user_id):
 
 def add_user_saved_signal(user_id, coin, text):
     key = str(user_id)
-    if users_col is not None:
-        try:
-            users_col.update_one({"_id": key}, {"$pull": {"saved_signals": {"coin": coin}}})
-            users_col.update_one({"_id": key}, {"$push": {"saved_signals": {"coin": coin, "text": text}}}, upsert=True)
-            return
-        except Exception:
-            pass
     users = _load_users()
     if key not in users:
-        return
+        users[key] = {"active": True}
     users[key].setdefault("saved_signals", [])
     users[key]["saved_signals"] = [s for s in users[key]["saved_signals"] if s.get("coin") != coin]
     users[key]["saved_signals"].append({"coin": coin, "text": text})
@@ -277,15 +203,9 @@ def add_user_saved_signal(user_id, coin, text):
 
 def del_user_saved_signal(user_id, coin):
     key = str(user_id)
-    if users_col is not None:
-        try:
-            users_col.update_one({"_id": key}, {"$pull": {"saved_signals": {"coin": coin}}})
-            return
-        except Exception:
-            pass
     users = _load_users()
-    if key in users:
-        users[key]["saved_signals"] = [s for s in users[key].get("saved_signals", []) if s.get("coin") != coin]
+    if key in users and "saved_signals" in users[key]:
+        users[key]["saved_signals"] = [s for s in users[key]["saved_signals"] if s.get("coin") != coin]
         _save_users(users)
 
 def get_user_open_positions(user_id):
@@ -293,15 +213,6 @@ def get_user_open_positions(user_id):
 
 def set_user_open_position(user_id, coin, data):
     key = str(user_id)
-    if users_col is not None:
-        try:
-            if data is None:
-                users_col.update_one({"_id": key}, {"$unset": {f"open_positions.{coin}": ""}})
-            else:
-                users_col.update_one({"_id": key}, {"$set": {f"open_positions.{coin}": data}}, upsert=True)
-            return
-        except Exception:
-            pass
     users = _load_users()
     if key not in users:
         users[key] = {}
@@ -1583,7 +1494,7 @@ if admin_dp:
         elif act == "diag":
             text = (
                 f"🔧 Диагностика\n\n"
-                f"Mongo: {'✅' if users_col else '❌ файл'}\n"
+                f"Mongo: ❌ отключена (файл)\n"
                 f"Чатов: {len(active_chats)}\n"
                 f"Gemini: {len(GEMINI_API_KEYS)}\n"
                 f"ADMIN_IDS: {ADMIN_IDS}\n"
@@ -1611,13 +1522,8 @@ if admin_dp:
             f = await admin_bot.get_file(m.document.file_id)
             content = await admin_bot.download_file(f.file_path)
             data = json.loads(content.read().decode())
-            if users_col is not None:
-                users_col.delete_many({})
-                for uid, ud in data.items():
-                    users_col.update_one({"_id": str(uid)}, {"$set": ud}, upsert=True)
-            else:
-                with open(USERS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+            with open(USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
             load_active_chats()
             await m.answer(f"✅ Восстановлено: {len(data)} пользователей")
         except Exception as e:
@@ -1636,7 +1542,7 @@ async def main():
     asyncio.create_task(position_monitor_loop())
     asyncio.create_task(update_market_bias())
 
-    log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)}")
+    log.info(f"🚀 IXCLY v{VERSION} запущен | монет: {len(POPULAR_COINS)} | Mongo: отключена")
     
     tasks = [dp.start_polling(bot)]
     if admin_bot and admin_dp:
