@@ -10,6 +10,7 @@ IXCLY Trading bot v2.9.1
 - ИЗВЛЕЧЕНИЕ ДАТ: указывает конкретную дату/время события из новости
 - РЕАЛЬНЫЙ ВХОД: лимитная заявка на откате/отскоке, а не текущая цена
 - УЧЕТ МАКРО: ФРС, ставки, инфляция и геополитика влияют на решения ИИ
+- КНОПКА ПОСЛЕДНИХ СИГНАЛОВ: просмотр актуальных сигналов в меню
 """
 import asyncio
 import html
@@ -148,6 +149,7 @@ RESULT_TTL = 90
 COOLDOWN = 3
 last_news_link = None
 news_history = []
+last_signals_data = {"text": "", "kb": None} # <-- Хранилище последних сигналов для меню
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "alerts_sent": 0, "started": time.time(), "engines": Counter()}
 bot_flags = {"news_enabled": True, "instant": True, "alerts_enabled": True}
 
@@ -266,6 +268,7 @@ def get_coins_keyboard(page=0):
         nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"p:{page + 1}"))
     buttons.append(nav)
     
+    buttons.append([InlineKeyboardButton(text="🔥 Последние сигналы", callback_data="last_signals")]) # <-- Новая кнопка
     buttons.append([InlineKeyboardButton(text="📊 Статистика за 24 часа", callback_data="show_stats")])
     buttons.append([InlineKeyboardButton(text="🔍 Поиск монеты", callback_data="search")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1058,7 +1061,6 @@ def tech_check(tf_data):
     return {"ok": ok, "tf": tf, "is_long": is_long, "aligned": aligned, "total": total,
             "edge": edge, "prob": max(p, 100 - p)}
 
-# ИЗМЕНЕНО: реальная точка входа (лимит на откате/отскоке)
 def calc_levels(info, is_long):
     price = info["price"]
     atr = info["atr"]
@@ -1088,6 +1090,7 @@ def calc_levels(info, is_long):
     return entry, tps, sls
 
 async def scan_once(send=True):
+    global last_signals_data # <-- Объявляем использование глобальной переменной
     t0 = time.time()
     
     try:
@@ -1168,7 +1171,7 @@ async def scan_once(send=True):
 
     sent = []
     if send and approved_coins:
-        lines = ["🚨 <b>Найдены сильные сигналы!</b>\n"]
+        lines = ["🔥 <b>Найдены сильные сигналы!</b>\n"]
         buttons = []
         row = []
         for app in approved_coins:
@@ -1202,8 +1205,15 @@ async def scan_once(send=True):
             if row:
                 buttons.append(row)
             kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+            # Добавляем время обновления в текст
+            now_str = datetime.now().strftime("%H:%M")
             text = "\n".join(lines)
-            text += "\n\n👇 <i>Нажми на кнопку, чтобы получить полный разбор с точкой входа и графиком.</i>"
+            text += f"\n\n⏰ <i>Обновлено: {now_str}</i>\n👇 <i>Нажми на кнопку, чтобы получить полный разбор с точкой входа и графиком.</i>"
+            
+            # --- СОХРАНЯЕМ ДЛЯ МЕНЮ ---
+            last_signals_data["text"] = text
+            last_signals_data["kb"] = kb
+            
             payload = {"kind": "text", "text": text, "markup": kb}
             ok, fail, removed = await broadcast(payload)
             log.info("Групповой сигнал разослан: %d доставлено, %d ошибок", ok, fail)
@@ -1559,6 +1569,11 @@ async def callback_handler(cb: types.CallbackQuery):
         user_name = cb.from_user.first_name or "User"
         username = f"@{cb.from_user.username}" if cb.from_user.username else "Нет юзернейма"
         await bot.send_message(chat_id, f"👋 Привет, {html.escape(user_name)} ({html.escape(username)}).\nВыбери монету:", parse_mode="HTML", reply_markup=get_coins_keyboard(0))
+    elif data == "last_signals":
+        if last_signals_data["text"]:
+            await bot.send_message(chat_id, last_signals_data["text"], parse_mode="HTML", reply_markup=last_signals_data["kb"])
+        else:
+            await bot.send_message(chat_id, "⏳ Свежих сигналов пока нет. Бот запускает сканер каждые 17 минут, подождите немного.", reply_markup=get_coins_keyboard(0))
     elif data == "show_stats":
         await cb.answer("Собираю статистику...")
         loading = await bot.send_message(chat_id, "⏳ Собираю статистику за 24 часа...")
@@ -1590,7 +1605,7 @@ async def notify_admins(text):
 async def send_payload(chat_id, p, cache):
     kind = p["kind"]
     text = p.get("text") or ""
-    markup = p.get("markup") # <--- Добавлена поддержка кнопок
+    markup = p.get("markup") # <--- Поддержка кнопок
     if kind == "text":
         await bot.send_message(chat_id, text[:4000] or "…", parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
         return
