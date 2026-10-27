@@ -8,6 +8,8 @@ IXCLY Trading bot v2.9.1
 - ПАМЯТЬ НОВОСТЕЙ: проверка сбывшихся прогнозов по кнопке /news
 - ЕЖЕДНЕВНАЯ СТАТИСТИКА: в 00:00 МСК отчет по всем монетам
 - ИЗВЛЕЧЕНИЕ ДАТ: указывает конкретную дату/время события из новости
+- РЕАЛЬНЫЙ ВХОД: лимитная заявка на откате/отскоке, а не текущая цена
+- УЧЕТ МАКРО: ФРС, ставки, инфляция и геополитика влияют на решения ИИ
 """
 import asyncio
 import html
@@ -1019,8 +1021,8 @@ async def news_watcher():
 # ----------------------------------------------------------------------------
 # БАТЧ-СКАНЕР СИГНАЛОВ (1 ЗАПРОС К ИИ НА ВСЕ МОНЕТЫ)
 # ----------------------------------------------------------------------------
-SCAN_INTERVAL = 17 * 60  # 17 минут
-ALERT_MIN_EDGE = 20      # перевес >= 70%
+SCAN_INTERVAL = 17 * 60
+ALERT_MIN_EDGE = 20
 ALERT_COOLDOWN = 6 * 3600
 MAX_ALERTS_PER_SCAN = 5
 ALERTS_FILE = "alerts.json"
@@ -1056,6 +1058,35 @@ def tech_check(tf_data):
     return {"ok": ok, "tf": tf, "is_long": is_long, "aligned": aligned, "total": total,
             "edge": edge, "prob": max(p, 100 - p)}
 
+# ИЗМЕНЕНО: реальная точка входа (лимит на откате/отскоке)
+def calc_levels(info, is_long):
+    price = info["price"]
+    atr = info["atr"]
+    ema20 = info["ema20"]
+    if not atr or atr != atr or atr <= 0:
+        atr = price * 0.01
+
+    if is_long:
+        pullback_target = price - 0.3 * atr
+        if ema20 < price and ema20 > price - 0.5 * atr:
+            pullback_target = ema20
+        entry = pullback_target
+    else:
+        bounce_target = price + 0.3 * atr
+        if ema20 > price and ema20 < price + 0.5 * atr:
+            bounce_target = ema20
+        entry = bounce_target
+
+    if is_long:
+        dist = entry - info["recent_low"] + 0.2 * atr
+    else:
+        dist = info["recent_high"] + 0.2 * atr - entry
+    dist = min(max(dist, 1.0 * atr), 2.5 * atr)
+    sign = 1 if is_long else -1
+    sls = [entry - sign * (dist + k * 0.5 * atr) for k in range(3)]
+    tps = [entry + sign * dist * m for m in (1, 2, 3)]
+    return entry, tps, sls
+
 def format_scanner_message(coin, tf_data, source, ai_reason, tech):
     tf = tech["tf"]
     info = tf_data[tf]
@@ -1083,7 +1114,8 @@ def format_scanner_message(coin, tf_data, source, ai_reason, tech):
         f"Лонг <b>{long_prob:.0f}%</b>  ·  Шорт <b>{short_prob:.0f}%</b>\n\n"
         f"🕐 <b>По таймфреймам</b> <i>(шанс лонга)</i>\n"
         f"{multi}\n\n"
-        f"💵 <b>Вход</b> · <code>{fmt(entry)}</code>\n\n"
+        f"💵 <b>Лимит-вход</b> · <code>{fmt(entry)}</code>\n"
+        f"<i>(текущая цена: {fmt(info['price'])})</i>\n\n"
         f"🎯 <b>Цели</b>\n{tp_lines}\n\n"
         f"🛑 <b>Стопы</b>\n{sl_lines}\n\n"
         f"⚠️ <i>Не является финансовой рекомендацией</i>"
@@ -1092,23 +1124,23 @@ def format_scanner_message(coin, tf_data, source, ai_reason, tech):
 async def scan_once(send=True):
     t0 = time.time()
     
-    # 1. Собираем новости ОДИН раз
+    # ИЗМЕНЕНО: УЧЕТ МАКРО - собираем больше мировых новостей и отдельно блок
     try:
         entries = await asyncio.wait_for(get_news_entries(), timeout=10)
         crypto_titles = [e.title for e in entries[:8]]
     except Exception:
         crypto_titles = []
     try:
-        world_titles = await asyncio.wait_for(get_world_titles(4), timeout=10)
+        world_titles = await asyncio.wait_for(get_world_titles(6), timeout=10) # Берем 6 заголовков
     except Exception:
         world_titles = []
-    news_text = ". ".join(crypto_titles + world_titles)
-    global_ns = news_sentiment(news_text)
+        
+    world_block = "\n".join(f"- {t}" for t in world_titles) or "- Нет мировых новостей"
+    crypto_block = "\n".join(f"- {t}" for t in crypto_titles) or "- Нет крипто-новостей"
 
     sem = asyncio.Semaphore(5)
     failed, local_candidates = [], []
 
-    # 2. Собираем данные и фильтруем локально по технике
     async def fetch_one(coin):
         async with sem:
             try:
@@ -1127,24 +1159,35 @@ async def scan_once(send=True):
 
     await asyncio.gather(*[fetch_one(c) for c in POPULAR_COINS])
     
-    # 3. Если есть кандидаты, делаем ОДИН общий запрос к ИИ
     approved_coins = []
     if local_candidates and send:
-        # Формируем текстовый блок для ИИ
         cands_text = ""
         for c in local_candidates:
             t = c["tech"]
             cands_text += f"Монета {c['coin']}: ТФ согласованы {t['aligned']}/{t['total']}, перевес {t['prob']:.0f}%, тренд {'LONG' if t['is_long'] else 'SHORT'}.\n"
             
-        prompt = f"""Ты профессиональный трейдер. У нас есть список монет, которые технически готовы к движению.
-Текущие новости: {news_text[:1000]}
+        # ИЗМЕНЕНО: УЧЕТ МАКРО - в промпт добавлены мировые новости и правила ФРС
+        prompt = f"""Ты профессиональный крипто-трейдер и макро-аналитик.
+Оцени макроэкономический фон и реши, какие монеты из списка реально можно брать прямо сейчас.
 
-Кандидаты:
+МИРОВЫЕ НОВОСТИ (ФРС, ставки, инфляция, геополитика):
+{world_block}
+
+КРИПТО-НОВОСТИ:
+{crypto_block}
+
+Кандидаты по технике (уже прошли фильтр):
 {cands_text}
 
-Твоя задача: выбрать только те монеты, в которые РЕАЛЬНО СТОИТ ВХОДИТЬ прямо сейчас (учти новостной фон). Если новости нейтральные и график сильный — бери. Если новости против тренда — отклони.
+ЖЕСТКИЕ ПРАВИЛА:
+1. Если в мировых новостях есть ЯВНЫЙ НЕГАТИВ (ФРС повышает ставки, высокая инфляция, обвал рынков, войны) — отклони ВСЕ LONG-сигналы. Лонг в такой ситуации — ловля падающего ножа.
+2. Если в мировых новостях есть ЯВНЫЙ ПОЗИТИВ (ФРС снижает ставки, приток ликвидности, мирные соглашения) — можно брать LONG.
+3. Если макро-фон нейтральный — смотри на крипто-новости и технику.
+4. SHORT-сигналы разрешены всегда, если техника сильная (падение — это тоже движение).
+5. Для каждой одобренной монеты напиши краткое обоснование (до 100 символов), в котором будешь ссылаться на макро-фон или новости.
+
 Верни СТРОГО JSON в формате:
-{{"approved": [{{"coin": "DASH", "is_long": true, "reason": "Краткое обоснование на русском (до 100 символов)"}}]}}
+{{"approved": [{{"coin": "DASH", "is_long": true, "reason": "ФРС сделала паузу, биткоин тянет рынок вверх. Импульс на 1h."}}]}}
 Если входить никуда не стоит, верни {{"approved": []}}."""
 
         log.info(f"Отправка 1 запроса к ИИ для {len(local_candidates)} кандидатов...")
@@ -1159,7 +1202,6 @@ async def scan_once(send=True):
             except Exception as e:
                 log.warning(f"Ошибка парсинга батч-ответа ИИ: {e}")
 
-    # 4. Рассылаем одобренные монеты
     sent = []
     if send and approved_coins:
         for app in approved_coins:
@@ -1168,7 +1210,6 @@ async def scan_once(send=True):
             is_long = app.get("is_long")
             reason = app.get("reason", "Импульс поддержан.")
             
-            # Находим данные этой монеты среди кандидатов
             cand = next((c for c in local_candidates if c["coin"] == coin), None)
             if not cand: continue
             
@@ -1298,18 +1339,6 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
 # ----------------------------------------------------------------------------
 # АНАЛИЗ МОНЕТЫ (РУЧНОЙ)
 # ----------------------------------------------------------------------------
-def calc_levels(info, is_long):
-    entry = info["price"]
-    atr = info["atr"]
-    if not atr or atr != atr or atr <= 0: atr = entry * 0.01
-    if is_long: dist = entry - info["recent_low"] + 0.2 * atr
-    else: dist = info["recent_high"] + 0.2 * atr - entry
-    dist = min(max(dist, 1.0 * atr), 2.5 * atr)
-    sign = 1 if is_long else -1
-    sls = [entry - sign * (dist + k * 0.5 * atr) for k in range(3)]
-    tps = [entry + sign * dist * m for m in (1, 2, 3)]
-    return entry, tps, sls
-
 def shorten(text, n):
     text = " ".join(str(text).split())
     if len(text) <= n: return text
@@ -1379,17 +1408,19 @@ async def build_signal(coin, status, force=False):
     crypto_block = "\n".join(f"- {t}" for t in crypto_titles) or "- нет данных"
     world_block = "\n".join(f"- {t}" for t in world_titles) or "- нет данных"
 
+    # ИЗМЕНЕНО: УЧЕТ МАКРО - в промпт добавлено указание на ФРС и мировые новости
     prompt = f"""Ты профессиональный крипто-трейдер и макро-аналитик. Проанализируй {coin} по индикаторам:
 {tf_text}
 Крипто-новости:
 {crypto_block}
-Мировые новости (экономика, политика):
+Мировые новости (экономика, ФРС, ставки, политика):
 {world_block}
 
 Задача:
 1. Выбери ОДИН доминирующий таймфрейм (15m, 1h, 4h или 1d).
 2. Оцени новостной фон именно для {coin}: BULLISH, BEARISH или NEUTRAL.
-3. Оцени волатильность и согласованность таймфреймов. Флэт, хаос, расхождение ТФ или новости против тренда -> "WAIT". Чёткий тренд на большинстве ТФ, нормальная волатильность и новости не против -> "ENTER".
+3. ВАЖНО: Оцени макро-фон. Если ФРС повышает ставки, высокая инфляция или геополитический кризис — это медвежий фактор для всего рынка. Если снижение ставок или приток ликвидности — бычий.
+4. Оцени волатильность и согласованность таймфреймов. Флэт, хаос, расхождение ТФ или новости против тренда -> "WAIT". Чёткий тренд на большинстве ТФ, нормальная волатильность и новости не против -> "ENTER".
 
 Верни СТРОГО JSON без markdown:
 {{"dominant_tf": "4h", "reason": "Простое обоснование на русском, максимум 150 символов, без перечисления индикаторов и цифр", "news_sentiment": "BULLISH или BEARISH или NEUTRAL", "entry_status": "ENTER или WAIT", "entry_reason": "Конкретный вывод на русском, одно короткое предложение, максимум 90 символов"}}"""
@@ -1448,7 +1479,8 @@ async def build_signal(coin, status, force=False):
         f"Лонг <b>{long_prob:.0f}%</b>  ·  Шорт <b>{short_prob:.0f}%</b>\n\n"
         f"🕐 <b>По таймфреймам</b> <i>(шанс лонга)</i>\n"
         f"{multi}\n\n"
-        f"💵 <b>Вход</b> · <code>{fmt(entry)}</code>\n\n"
+        f"💵 <b>Лимит-вход</b> · <code>{fmt(entry)}</code>\n"
+        f"<i>(текущая цена: {fmt(info['price'])})</i>\n\n"
         f"🎯 <b>Цели</b>{lv}\n{tp_lines}\n\n"
         f"🛑 <b>Стопы</b>\n{sl_lines}\n\n"
         f"🌍 Новости: {n_emoji} {n_label}\n\n"
