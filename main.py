@@ -4,7 +4,7 @@ IXCLY Trading bot v2.9.1
 - Цепочка ИИ: Gemini/Groq/OpenRouter (с ключами) -> бесплатный GPT без ключа (Pollinations) -> локальный движок
 - Локальный движок работает ВСЕГДА (мульти-ТФ + волатильность + новостной сентимент) и даёт ENTER/WAIT
 - Мировые + крипто-новости идут в анализ каждой монеты
-- ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
+- СКАНЕР СИГНАЛОВ: каждые 17 минут ищет сильные сигналы (1 запрос к ИИ на все монеты) и рассылает их
 - ПАМЯТЬ НОВОСТЕЙ: проверка сбывшихся прогнозов по кнопке /news
 - ЕЖЕДНЕВНАЯ СТАТИСТИКА: в 00:00 МСК отчет по всем монетам
 - ИЗВЛЕЧЕНИЕ ДАТ: указывает конкретную дату/время события из новости
@@ -328,7 +328,6 @@ def normalize_ticker(text):
     return t
 
 def extract_dates_from_text(text):
-    """Ищет даты в тексте новости на случай, если ИИ не справится."""
     patterns = [
         r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?\b',
         r'\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b',
@@ -659,12 +658,12 @@ async def _ask_openai_compat(base_url, api_key, model, prompt, json_mode, extra_
     if extra_headers:
         headers.update(extra_headers)
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
-               "temperature": 0.2, "max_tokens": 900}
+               "temperature": 0.2, "max_tokens": 1500}
     if json_mode and use_json_format:
         payload["response_format"] = {"type": "json_object"}
     try:
         async with http.post(f"{base_url}/chat/completions", json=payload, headers=headers,
-                             timeout=aiohttp.ClientTimeout(total=20)) as r:
+                             timeout=aiohttp.ClientTimeout(total=25)) as r:
             j = await r.json(content_type=None)
             if r.status != 200 or "choices" not in j:
                 log.warning(f"{base_url} Error ({r.status}): {str(j)[:100]}")
@@ -707,12 +706,12 @@ async def _ask_free_gpt(prompt, json_mode):
 
     short_prompt = quote(prompt[:3000], safe="")
     attempts = [
-        ("text.pollinations.ai/openai", lambda: post_openai("https://text.pollinations.ai/openai", 8)),
-        ("gen.pollinations.ai/text", lambda: get_plain(f"https://gen.pollinations.ai/text/{short_prompt}", 6)),
-        ("text.pollinations.ai", lambda: get_plain(f"https://text.pollinations.ai/{short_prompt}", 5)),
+        ("text.pollinations.ai/openai", lambda: post_openai("https://text.pollinations.ai/openai", 12)),
+        ("gen.pollinations.ai/text", lambda: get_plain(f"https://gen.pollinations.ai/text/{short_prompt}", 8)),
+        ("text.pollinations.ai", lambda: get_plain(f"https://text.pollinations.ai/{short_prompt}", 6)),
     ]
     if POLLINATIONS_KEY:
-        attempts.insert(0, ("gen.pollinations.ai/v1", lambda: post_openai("https://gen.pollinations.ai/v1/chat/completions", 8)))
+        attempts.insert(0, ("gen.pollinations.ai/v1", lambda: post_openai("https://gen.pollinations.ai/v1/chat/completions", 12)))
 
     for name, fn in attempts:
         try:
@@ -723,7 +722,7 @@ async def _ask_free_gpt(prompt, json_mode):
             pass
     return None
 
-async def ask_ai_named(prompt, json_mode=False, validate=None, timeout=12, free_timeout=20):
+async def ask_ai_named(prompt, json_mode=False, validate=None, timeout=15, free_timeout=25):
     keyed = []
     if GEMINI_API_KEYS:
         keyed.append(("Gemini", lambda: _ask_gemini(prompt, json_mode)))
@@ -809,34 +808,6 @@ def local_reason(tf, i):
     zone = "перекупленность" if rsi >= 70 else "перепроданность" if rsi <= 30 else "нейтральная зона"
     macd = "бычий" if i["macd_hist"] > 0 else "медвежий"
     return f"На {tf}: {trend}, RSI {rsi:.0f} ({zone}), импульс MACD {macd}."
-
-def local_verdict(tf_data, news_text):
-    tf = "4h" if "4h" in tf_data else list(tf_data.keys())[-1]
-    d = tf_data[tf]
-    p = d["long_prob"]
-    is_long = p >= 50
-    aligned = sum(1 for t in tf_data if (tf_data[t]["long_prob"] >= 50) == is_long)
-    total = len(tf_data)
-    edge = abs(p - 50)
-
-    atr_mean = float(d["df"]["atr"].tail(50).mean())
-    vol_ratio = d["atr"] / atr_mean if atr_mean > 0 else 1.0
-    ns = news_sentiment(news_text)
-    news_ok = ns == 0 or (ns > 0) == is_long
-    need = max(3, total - 1)
-    enter = aligned >= need and edge >= 12 and vol_ratio >= 0.8 and news_ok
-    if enter:
-        entry_reason = f"Тренд совпадает на {aligned}/{total} ТФ, волатильность в норме, новости не против."
-    elif aligned < need:
-        entry_reason = f"Таймфреймы расходятся ({aligned}/{total}), лучше дождаться согласованности."
-    elif edge < 12:
-        entry_reason = "Сигнал слабый, преимущества у быков или медведей нет."
-    elif vol_ratio < 0.8:
-        entry_reason = "Низкая волатильность (флэт), движения может не хватить до целей."
-    else:
-        entry_reason = "Новостной фон идёт против направления сигнала."
-
-    return {"dominant_tf": tf, "reason": local_reason(tf, d), "entry_status": "ENTER" if enter else "WAIT", "entry_reason": entry_reason, "news": ns}
 
 # ----------------------------------------------------------------------------
 # НОВОСТИ И ПРОВЕРКА ПРОГНОЗОВ
@@ -973,7 +944,6 @@ async def fetch_and_analyze_news():
         summary = re.sub(r"<[^>]+>", "", getattr(news, "summary", ""))[:800]
         link = news.link
 
-        # Обновленный промпт с указанием даты
         prompt = f"""Ты профессиональный трейдер. Проанализируй эту новость и напиши краткий пост для Telegram СТРОГО НА РУССКОМ ЯЗЫКЕ.
 Заголовок: {title}
 Описание: {summary}
@@ -996,7 +966,6 @@ async def fetch_and_analyze_news():
             coins = mentioned_coins(f"{title}. {summary}") or ["BTC", "ETH"]
             action = {1: "поддержка покупателей, лонги выглядят интереснее", -1: "давление на рынок, осторожнее с лонгами", 0: "без явного перекоса, ждём подтверждения графиком"}[ns]
             
-            # Если ИИ не справился, ищем даты сами
             dates = extract_dates_from_text(f"{title}. {summary}")
             date_str = f"\n📅 <b>Указанная дата:</b> {', '.join(dates)}" if dates else ""
             
@@ -1048,12 +1017,12 @@ async def news_watcher():
         await asyncio.sleep(600)
 
 # ----------------------------------------------------------------------------
-# ЧАСОВОЙ СКАНЕР: «СРОЧНЫЙ СИГНАЛ»
+# БАТЧ-СКАНЕР СИГНАЛОВ (1 ЗАПРОС К ИИ НА ВСЕ МОНЕТЫ)
 # ----------------------------------------------------------------------------
-SCAN_INTERVAL = 3600
-ALERT_MIN_EDGE = 20
+SCAN_INTERVAL = 17 * 60  # 17 минут
+ALERT_MIN_EDGE = 20      # перевес >= 70%
 ALERT_COOLDOWN = 6 * 3600
-MAX_ALERTS_PER_SCAN = 3
+MAX_ALERTS_PER_SCAN = 5
 ALERTS_FILE = "alerts.json"
 alert_history = {}
 
@@ -1073,9 +1042,6 @@ def _save_alert_history():
     except Exception as e:
         log.info("alerts.json не сохранён: %s", e)
 
-async def _noop_status(_t):
-    return
-
 def tech_check(tf_data):
     tf = "4h" if "4h" in tf_data else list(tf_data.keys())[-1]
     d = tf_data[tf]
@@ -1090,47 +1056,43 @@ def tech_check(tf_data):
     return {"ok": ok, "tf": tf, "is_long": is_long, "aligned": aligned, "total": total,
             "edge": edge, "prob": max(p, 100 - p)}
 
-def coin_news_sentiment(coin, crypto_titles, world_titles):
-    names = {w for w, t in COIN_WORDS.items() if t == coin}
-    if len(coin) >= 3:
-        names.add(coin.lower())
-    related = [t for t in crypto_titles if names & set(re.findall(r"[a-z0-9]+", t.lower()))]
-    if related:
-        return news_sentiment(". ".join(related)), True
-    return news_sentiment(". ".join(crypto_titles + world_titles)), False
+def format_scanner_message(coin, tf_data, source, ai_reason, tech):
+    tf = tech["tf"]
+    info = tf_data[tf]
+    long_prob, short_prob = calc_probability(info["df"])
+    is_long = tech["is_long"]
+    
+    entry, tps, sls = calc_levels(info, is_long)
+    
+    direction = "🟢 <b>LONG</b>" if is_long else "🔴 <b>SHORT</b>"
+    green_n = max(0, min(10, round(long_prob / 10)))
+    bar = "🟩" * green_n + "🟥" * (10 - green_n)
+    multi = "  ·  ".join(f"{t} {tf_data[t]['long_prob']:.0f}%" for t in TFS)
+    
+    def pct(p): return f"{(p - entry) / entry * 100:+.1f}%"
+    tp_lines = "\n".join(f"TP{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(tps))
+    sl_lines = "\n".join(f"SL{i + 1} · <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls))
 
-async def scan_coin(coin, crypto_titles, world_titles):
-    tf_data, _source = await get_market_data(coin)
-    t = tech_check(tf_data)
-    if not t["ok"]:
-        return None
-    ns, related = coin_news_sentiment(coin, crypto_titles, world_titles)
-    if ns == 0 or (ns > 0) != t["is_long"]:
-        return None
-    return {"coin": coin, "tech": t, "ns": ns, "related": related}
-
-def alert_header(coin, meta, cand):
-    t = cand["tech"]
-    is_long = meta["is_long"]
-    side = "LONG 🟢" if is_long else "SHORT 🔴"
-    prob = meta["long_prob"] if is_long else meta["short_prob"]
-    news = "позитивные 🟢" if meta["ns"] > 0 else "негативные 🔴"
-    src = f"по {coin}" if cand["related"] else "общий фон рынка"
     return (
-        "🚨🚨 <b>СРОЧНЫЙ СИГНАЛ</b> 🚨🚨\n\n"
-        f"🪙 <b>{coin}/USDT</b>\n"
-        f"✅ <b>Можно входить в сделку: {side}</b>\n\n"
-        "<b>Почему именно сейчас:</b>\n"
-        f"• Перевес {'лонга' if is_long else 'шорта'}: <b>{prob:.0f}%</b>\n"
-        f"• Таймфреймы согласованы: {t['aligned']}/{t['total']}\n"
-        f"• Новости {news} ({src})\n"
-        "• Волатильность в норме\n\n"
-        "Ниже полный разбор: вход, цели и стопы. Обязательно ставьте стоп-лосс.\n"
-        "━━━━━━━━━━━━━━"
+        f"📊 <b>{coin}/USDT</b> · {tf}\n"
+        f"<i>Данные: {source}</i>\n\n"
+        f"✅ <b>ВХОДИТЬ</b>\n"
+        f"<i>{html.escape(ai_reason)}</i>\n\n"
+        f"{direction} · сильный сигнал\n"
+        f"{bar}\n"
+        f"Лонг <b>{long_prob:.0f}%</b>  ·  Шорт <b>{short_prob:.0f}%</b>\n\n"
+        f"🕐 <b>По таймфреймам</b> <i>(шанс лонга)</i>\n"
+        f"{multi}\n\n"
+        f"💵 <b>Вход</b> · <code>{fmt(entry)}</code>\n\n"
+        f"🎯 <b>Цели</b>\n{tp_lines}\n\n"
+        f"🛑 <b>Стопы</b>\n{sl_lines}\n\n"
+        f"⚠️ <i>Не является финансовой рекомендацией</i>"
     )
 
 async def scan_once(send=True):
     t0 = time.time()
+    
+    # 1. Собираем новости ОДИН раз
     try:
         entries = await asyncio.wait_for(get_news_entries(), timeout=10)
         crypto_titles = [e.title for e in entries[:8]]
@@ -1140,86 +1102,108 @@ async def scan_once(send=True):
         world_titles = await asyncio.wait_for(get_world_titles(4), timeout=10)
     except Exception:
         world_titles = []
+    news_text = ". ".join(crypto_titles + world_titles)
+    global_ns = news_sentiment(news_text)
 
-    sem = asyncio.Semaphore(3)
-    failed, cands = [], []
+    sem = asyncio.Semaphore(5)
+    failed, local_candidates = [], []
 
-    async def one(coin):
+    # 2. Собираем данные и фильтруем локально по технике
+    async def fetch_one(coin):
         async with sem:
             try:
-                r = await scan_coin(coin, crypto_titles, world_titles)
+                tf_data, source = await get_market_data(coin)
+                t = tech_check(tf_data)
+                if t["ok"]:
+                    local_candidates.append({
+                        "coin": coin,
+                        "tf_data": tf_data,
+                        "source": source,
+                        "tech": t
+                    })
             except Exception as e:
                 failed.append(coin)
                 log.info("scan %s: %s", coin, e)
-                return
-            if r:
-                cands.append(r)
 
-    await asyncio.gather(*[one(c) for c in POPULAR_COINS])
-    cands.sort(key=lambda r: r["tech"]["edge"], reverse=True)
+    await asyncio.gather(*[fetch_one(c) for c in POPULAR_COINS])
+    
+    # 3. Если есть кандидаты, делаем ОДИН общий запрос к ИИ
+    approved_coins = []
+    if local_candidates and send:
+        # Формируем текстовый блок для ИИ
+        cands_text = ""
+        for c in local_candidates:
+            t = c["tech"]
+            cands_text += f"Монета {c['coin']}: ТФ согласованы {t['aligned']}/{t['total']}, перевес {t['prob']:.0f}%, тренд {'LONG' if t['is_long'] else 'SHORT'}.\n"
+            
+        prompt = f"""Ты профессиональный трейдер. У нас есть список монет, которые технически готовы к движению.
+Текущие новости: {news_text[:1000]}
 
+Кандидаты:
+{cands_text}
+
+Твоя задача: выбрать только те монеты, в которые РЕАЛЬНО СТОИТ ВХОДИТЬ прямо сейчас (учти новостной фон). Если новости нейтральные и график сильный — бери. Если новости против тренда — отклони.
+Верни СТРОГО JSON в формате:
+{{"approved": [{{"coin": "DASH", "is_long": true, "reason": "Краткое обоснование на русском (до 100 символов)"}}]}}
+Если входить никуда не стоит, верни {{"approved": []}}."""
+
+        log.info(f"Отправка 1 запроса к ИИ для {len(local_candidates)} кандидатов...")
+        raw, engine = await ask_ai_named(prompt, json_mode=True)
+        
+        if raw:
+            try:
+                m = re.search(r"\{.*\}", raw, re.S)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    approved_coins = parsed.get("approved", [])
+            except Exception as e:
+                log.warning(f"Ошибка парсинга батч-ответа ИИ: {e}")
+
+    # 4. Рассылаем одобренные монеты
     sent = []
-    if send:
-        for r in cands:
-            if len(sent) >= MAX_ALERTS_PER_SCAN:
-                break
-            coin = r["coin"]
-            key = f"{coin}:{'L' if r['tech']['is_long'] else 'S'}"
+    if send and approved_coins:
+        for app in approved_coins:
+            if len(sent) >= MAX_ALERTS_PER_SCAN: break
+            coin = app.get("coin")
+            is_long = app.get("is_long")
+            reason = app.get("reason", "Импульс поддержан.")
+            
+            # Находим данные этой монеты среди кандидатов
+            cand = next((c for c in local_candidates if c["coin"] == coin), None)
+            if not cand: continue
+            
+            key = f"{coin}:{'L' if is_long else 'S'}"
             if time.time() - alert_history.get(key, 0) < ALERT_COOLDOWN:
                 continue
-            meta = {}
-            try:
-                async with analysis_sem:
-                    text, png = await asyncio.wait_for(
-                        build_signal(coin, _noop_status, force=True, meta_out=meta), timeout=70)
-            except Exception as e:
-                log.info("alert build %s: %s", coin, e)
-                continue
-            good = (meta.get("entry_status") == "ENTER"
-                    and meta.get("is_long") == r["tech"]["is_long"]
-                    and meta.get("ns", 0) != 0
-                    and (meta["ns"] > 0) == meta["is_long"])
-            if not good:
-                continue
-            full = alert_header(coin, meta, r) + "\n\n" + text
-            payload = {"kind": "photo", "text": full, "data": png, "filename": f"{coin}.png"}
+                
+            text = format_scanner_message(coin, cand["tf_data"], cand["source"], reason, cand["tech"])
+            
+            tf = cand["tech"]["tf"]
+            info = cand["tf_data"][tf]
+            entry, tps, sls = calc_levels(info, is_long)
+            png = await asyncio.to_thread(generate_trade_image, coin, is_long, info["df"], entry, tps, sls, tf, cand["tech"]["prob"], cand["source"], "ENTER")
+            
+            payload = {"kind": "photo", "text": text, "data": png, "filename": f"{coin}.png"}
             ok, fail, removed = await broadcast(payload)
+            
             alert_history[key] = time.time()
             _save_alert_history()
             stats["alerts_sent"] += 1
             sent.append(coin)
-            log.info("СРОЧНЫЙ СИГНАЛ %s разослан: %d доставлено, %d ошибок", coin, ok, fail)
+            log.info("СИГНАЛ %s разослан: %d доставлено, %d ошибок", coin, ok, fail)
 
-    return {"scanned": len(POPULAR_COINS), "failed": sorted(failed), "cands": cands,
+    return {"scanned": len(POPULAR_COINS), "failed": sorted(failed), "cands": local_candidates,
             "sent": sent, "secs": int(time.time() - t0)}
-
-def scan_report(r):
-    lines = [
-        f"🔎 <b>Скан завершён за {r['secs']} сек</b>",
-        "",
-        f"Монет: {r['scanned']} · загрузились: {r['scanned'] - len(r['failed'])}",
-    ]
-    if r["failed"]:
-        lines.append(f"❌ Не загрузились ({len(r['failed'])}): {', '.join(r['failed'])}")
-    else:
-        lines.append("✅ Все монеты загрузились")
-    lines += ["", f"Кандидатов (график + новости совпали): <b>{len(r['cands'])}</b>"]
-    for c in r["cands"][:10]:
-        t = c["tech"]
-        lines.append(f"• {c['coin']} {'LONG' if t['is_long'] else 'SHORT'} {t['prob']:.0f}% · "
-                     f"ТФ {t['aligned']}/{t['total']} · новости {'🟢' if c['ns'] > 0 else '🔴'}")
-    lines.append("\n<i>Это тест: рассылка не делалась. Срочный сигнал уходит, только если разбор тоже даёт ВХОДИТЬ.</i>")
-    return "\n".join(lines)
 
 async def alert_loop():
     _load_alert_history()
-    await asyncio.sleep(300)
+    await asyncio.sleep(60)
     while True:
         try:
             if bot_flags["alerts_enabled"] and active_chats:
                 res = await scan_once(send=True)
-                log.info("Часовой скан: %d монет, не загрузились %d, кандидатов %d, отправлено %d",
-                         res["scanned"], len(res["failed"]), len(res["cands"]), len(res["sent"]))
+                log.info("Скан (17 мин): %d монет, кандидатов %d, отправлено %d",
+                         res["scanned"], len(res["cands"]), len(res["sent"]))
         except Exception as e:
             log.warning("alert_loop: %s", e)
         await asyncio.sleep(SCAN_INTERVAL)
@@ -1312,7 +1296,7 @@ def generate_trade_image(coin, is_long, df, entry, tps, sls, tf, long_prob, sour
     return buf.getvalue()
 
 # ----------------------------------------------------------------------------
-# АНАЛИЗ МОНЕТЫ
+# АНАЛИЗ МОНЕТЫ (РУЧНОЙ)
 # ----------------------------------------------------------------------------
 def calc_levels(info, is_long):
     entry = info["price"]
@@ -1339,7 +1323,35 @@ def strength_label(p):
     if p >= 58: return "умеренный сигнал"
     return "слабый сигнал"
 
-async def build_signal(coin, status, force=False, meta_out=None):
+def local_verdict(tf_data, news_text):
+    tf = "4h" if "4h" in tf_data else list(tf_data.keys())[-1]
+    d = tf_data[tf]
+    p = d["long_prob"]
+    is_long = p >= 50
+    aligned = sum(1 for t in tf_data if (tf_data[t]["long_prob"] >= 50) == is_long)
+    total = len(tf_data)
+    edge = abs(p - 50)
+
+    atr_mean = float(d["df"]["atr"].tail(50).mean())
+    vol_ratio = d["atr"] / atr_mean if atr_mean > 0 else 1.0
+    ns = news_sentiment(news_text)
+    news_ok = ns == 0 or (ns > 0) == is_long
+    need = max(3, total - 1)
+    enter = aligned >= need and edge >= 12 and vol_ratio >= 0.8 and news_ok
+    if enter:
+        entry_reason = f"Тренд совпадает на {aligned}/{total} ТФ, волатильность в норме, новости не против."
+    elif aligned < need:
+        entry_reason = f"Таймфреймы расходятся ({aligned}/{total}), лучше дождаться согласованности."
+    elif edge < 12:
+        entry_reason = "Сигнал слабый, преимущества у быков или медведей нет."
+    elif vol_ratio < 0.8:
+        entry_reason = "Низкая волатильность (флэт), движения может не хватить до целей."
+    else:
+        entry_reason = "Новостной фон идёт против направления сигнала."
+
+    return {"dominant_tf": tf, "reason": local_reason(tf, d), "entry_status": "ENTER" if enter else "WAIT", "entry_reason": entry_reason, "news": ns}
+
+async def build_signal(coin, status, force=False):
     cached = result_cache.get(coin)
     if cached and not force and time.time() - cached[0] < RESULT_TTL:
         return cached[1], cached[2]
@@ -1408,13 +1420,6 @@ async def build_signal(coin, status, force=False, meta_out=None):
     long_prob, short_prob = calc_probability(info["df"])
     is_long = long_prob >= 50
     entry, tps, sls = calc_levels(info, is_long)
-
-    if meta_out is not None:
-        meta_out["entry_status"] = entry_status
-        meta_out["is_long"] = is_long
-        meta_out["ns"] = ns
-        meta_out["long_prob"] = long_prob
-        meta_out["short_prob"] = short_prob
 
     direction = "🟢 <b>LONG</b>" if is_long else "🔴 <b>SHORT</b>"
     green_n = max(0, min(10, round(long_prob / 10)))
