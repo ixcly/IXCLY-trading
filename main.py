@@ -487,6 +487,7 @@ def result_keyboard(coin):
             InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"),
             InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}"),
         ],
+        [InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
     ])
 
