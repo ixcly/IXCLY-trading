@@ -2078,57 +2078,47 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         
         if bt and bt["trades"] >= BT_MIN_TRADES and not bt_ok(bt):
             verdict = "WAIT"
-            comment = "История этой монеты по такой стратегии слабая, вход не рекомендую. " + comment
+            comment = "История этой монеты по такой стратегии слабая. " + comment
         if verdict == "ENTER" and near:
-            comment = (comment + " Но " + near + ".").strip()
+            comment = (comment + " ⚠️ " + near).strip()
 
     side_emoji = "🟢" if is_long else "🔴"
     side = "LONG" if is_long else "SHORT"
     head = "✅ <b>ВХОДИТЬ</b>" if verdict == "ENTER" else "⏳ <b>ЖДАТЬ</b>"
     bar = make_strength_bar(setup["strength"])
 
-    def pct(p):
-        return f"{(p - entry) / entry * 100:+.1f}%"
-
+    # Компактный текст, чтобы он гарантированно поместился в подпись к фото (лимит Telegram 1024 символа)
     lines = [
-        f"{side_emoji} <b>{side}  ·  {html.escape(coin)}</b>   {head}",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"📌 Тип: <b>{setup['type']}</b>   ·   Режим 4h: {info['regime']}",
+        f"{side_emoji} <b>{side} · {html.escape(coin)}</b> | {head}",
+        f"📌 Тип: <b>{setup['type']}</b> | Режим: {info['regime']}",
         f"💪 Уверенность: <b>{setup['strength']}%</b>",
         bar,
-        "",
-        f"📰 Новости: {setup['news_status']}",
-        f"🌍 BTC: {ctx.get('btc_txt')}" + (f"  ·  Fear&Greed: {ctx['fng']} ({html.escape(ctx.get('fng_txt', ''))})" if ctx.get("fng") is not None else ""),
+        f"🌍 BTC: {ctx.get('btc_txt')} | 📰 {setup['news_status']}",
     ]
     if setup["reasons"]:
-        lines += ["", "📈 <b>Почему:</b>"] + [f"• {html.escape(r)}" for r in setup["reasons"]]
+        lines.append("📈 <b>Причины:</b> " + html.escape(", ".join(setup["reasons"][:3])))
     if setup["patterns"]:
-        lines += ["", "🕯 <b>Свечи:</b> " + html.escape("; ".join(setup["patterns"]))]
+        lines.append("🕯 <b>Свечи:</b> " + html.escape(", ".join(setup["patterns"])))
     if info["squeeze"]:
-        lines.append("🎯 Сжатие волатильности: возможен резкий импульс")
-    lines += [
-        "",
-        f"💰 Текущая цена: <code>{fmt(info['price'])}</code>",
-        f"📥 <b>ВХОД (ТОЛЬКО ЛИМИТНЫЙ ОРДЕР!):</b> <code>{fmt(entry)}</code>",
-        "⚠️ <i>Не входите по рынку (Market). Ждите, пока цена откатится до указанного уровня!</i>",
-        "",
-        "🎯 <b>Тейки (TP)</b>",
-    ] + [f"   TP{i + 1}  <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(tps)] + [
-        "",
-        "🛡 <b>Стопы (SL)</b>",
-    ] + [f"   SL{i + 1}  <code>{fmt(p)}</code>  <i>{pct(p)}</i>" for i, p in enumerate(sls)] + [
-        "",
-        f"⚖ <b>Risk Gate:</b> плечо <b>{leverage}</b>, позиция <b>${pos_usdt:.2f}</b>, риск <b>${risk_usdt:.2f}</b> ({RISK_PCT * 100:.0f}% от ${DEPOSIT:.0f})",
-    ]
+        lines.append("🎯 Сжатие волатильности")
+        
+    lines.extend([
+        f"💰 Цена: <code>{fmt(info['price'])}</code>",
+        f"📥 <b>ВХОД (ТОЛЬКО ЛИМИТ!):</b> <code>{fmt(entry)}</code>",
+        "🎯 <b>Тейки:</b> " + ", ".join(f"<code>{fmt(p)}</code>" for p in tps),
+        "🛡 <b>Стопы:</b> " + ", ".join(f"<code>{fmt(p)}</code>" for p in sls),
+        f"⚖️ Плечо: <b>{leverage}</b> | Риск: <b>${risk_usdt:.2f}</b>",
+    ])
+    
     if bt:
-        lines.append(f"🧪 <b>Бэктест 4h ({bt['days']} дн.):</b> сделок {bt['trades']}, TP1 {bt['winrate']}%, ср. {bt['avg_r']:+.2f}R, PF {bt['pf']}")
-    else:
-        lines.append("🧪 Бэктест: данных недостаточно")
-    if setup["notes"]:
-        lines.append("⚙ Поправки: " + html.escape("; ".join(setup["notes"])))
+        lines.append(f"🧪 <b>Бэктест ({bt['days']}д):</b> {bt['trades']} сд., WR {bt['winrate']}%, PF {bt['pf']}")
+        
     if comment:
-        lines += ["", f"💬 <b>Аналитик ({html.escape(risk_lvl)} риск):</b> {html.escape(comment)}"]
-    lines += ["", "⚠ <i>Не является финансовой рекомендацией. Бэктест не гарантирует будущий результат.</i>"]
+        short_comment = comment if len(comment) < 200 else comment[:197] + "..."
+        lines.append(f"💬 <b>Аналитик:</b> {html.escape(short_comment)}")
+        
+    lines.append("⚠️ <i>Не является фин. рекомендацией</i>")
+    
     text = "\n".join(lines)
 
     try:
@@ -2136,6 +2126,7 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
     except Exception as e:
         log.info(f"chart {coin}: {e}")
         img = None
+        
     return {"text": text, "img": img, "coin": coin, "entry": entry, "tps": tps, "sls": sls, "is_long": is_long,
             "side": side, "price": info["price"], "type": setup["type"], "strength": setup["strength"],
             "verdict": verdict, "source": source}
