@@ -2386,15 +2386,14 @@ async def global_signal_monitor_loop():
         await asyncio.sleep(300)
 
 async def scanner_loop():
-    """Фоновая задача, которая запускает поиск сигналов по расписанию."""
     await asyncio.sleep(60)
     while True:
         try:
             if bot_flags["alerts_enabled"] and active_chats:
                 await scan_once(send=True)
         except Exception as e:
-            log.error(f"Ошибка в цикле сканера: {e}")
-            
+            log.error(f"scanner: {e}")
+            await notify_admin(f"🚨 <b>Ошибка в сканере сигналов:</b>\n<code>{html.escape(str(e))}</code>")
         next_timers["scanner"] = time.time() + SCAN_INTERVAL
         await asyncio.sleep(SCAN_INTERVAL)
 
