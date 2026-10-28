@@ -1581,7 +1581,7 @@ def calc_levels_and_risk(info, is_long, sig_type="Среднесрок"):
     sign = 1 if is_long else -1
     tps = [entry + sign * risk * m for m in (1.5, 2.5, 4.0)]
     sl2 = sl1 - sign * 0.7 * atr
-    leverage = {"Быстрый сигнал": "x15-x25", "Долгосрок": "x5-x10"}.get(sig_type, "x10-x20")
+    leverage = {"Краткосрочный": "x15-x25", "Долгосрочный": "x5-x10"}.get(sig_type, "x10-x20")
     opp = sr.get("resistance") if is_long else sr.get("support")
     near = "ближайший уровень слишком близко к входу, цель может не отработать" if opp and abs(opp - entry) < 1.2 * risk else None
     return entry, tps, [sl1, sl2], risk, leverage, near
