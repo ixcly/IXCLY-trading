@@ -2495,6 +2495,50 @@ async def scan_once(send=True):
 # =====================================================================
 #                        ВСЕ КЛАВИАТУРЫ БОТА
 # =====================================================================
+def track_msg(user_id, msg):
+    if not msg: return
+    if user_id not in msg_history: msg_history[user_id] = []
+    if msg.message_id not in msg_history[user_id]: msg_history[user_id].append(msg.message_id)
+    if len(msg_history[user_id]) > 50: msg_history[user_id] = msg_history[user_id][-50:]
+
+async def safe_delete(message):
+    try: 
+        await message.delete()
+    except Exception: 
+        pass
+
+async def safe_answer(cb, text=None, alert=False):
+    try: 
+        await cb.answer(text, show_alert=alert)
+    except Exception: 
+        pass
+
+async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_mode="HTML", user_id=None):
+    try:
+        if message.photo or message.video or message.document or message.animation:
+            await message.delete()
+            new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            if user_id: track_msg(user_id, new_msg)
+            return new_msg
+        else:
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            if user_id: track_msg(user_id, message)
+            return message
+    except TelegramBadRequest as e:
+        err = str(e).lower()
+        if "message is not modified" in err:
+            if user_id: track_msg(user_id, message)
+            return message
+        if "no text in the message" in err or "there is no text" in err:
+            try: await message.delete()
+            except Exception: pass
+            new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            if user_id: track_msg(user_id, new_msg)
+            return new_msg
+        return message
+    except Exception: 
+        return message
+
 MENU_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]])
 
 def get_coins_keyboard():
