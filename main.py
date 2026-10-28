@@ -2653,6 +2653,85 @@ def get_admin_keyboard():
     ])
 # =====================================================================
 
+# =====================================================================
+#                 ОБРАБОТЧИКИ МЕНЮ И КНОПОК
+# =====================================================================
+@dp.callback_query(F.data == "search")
+async def cb_search(cb: types.CallbackQuery):
+    await safe_edit(cb.message, "🔍 <b>Выбери монету из списка</b>\n<i>Или просто напиши тикер сообщением:</i>", reply_markup=get_search_coins_keyboard(0), user_id=cb.from_user.id)
+    await safe_answer(cb)
+
+@dp.callback_query(F.data.startswith("search_page:"))
+async def cb_search_page(cb: types.CallbackQuery):
+    page = int(cb.data.split(":")[1])
+    try: 
+        await cb.message.edit_reply_markup(reply_markup=get_search_coins_keyboard(page))
+    except Exception: 
+        pass
+    await safe_answer(cb)
+
+@dp.callback_query(F.data == "interesting_menu")
+async def cb_interesting(cb: types.CallbackQuery):
+    await safe_answer(cb, "🧐 Ищу...")
+    try:
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=9)
+        movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
+        gainers = sorted([x for x in movers if float(x["priceChangePercent"]) > 0], key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        losers = sorted([x for x in movers if float(x["priceChangePercent"]) < 0], key=lambda x: float(x["priceChangePercent"]))
+        rg = random.sample(gainers[:15], min(5, len(gainers[:15])))
+        rl = random.sample(losers[:15], min(5, len(losers[:15])))
+        rg.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        rl.sort(key=lambda x: float(x["priceChangePercent"]))
+        text = "🧐 <b>Интересные за 24ч</b>\n\n🟢 <b>Топ роста:</b>\n"
+        for x in rg: 
+            text += f"<code>{x['symbol'][:-4]}</code> +{float(x['priceChangePercent']):.1f}%\n"
+        text += "\n🔴 <b>Топ падения:</b>\n"
+        for x in rl: 
+            text += f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%\n"
+        await safe_edit(cb.message, text, reply_markup=MENU_KB, user_id=cb.from_user.id)
+    except Exception as e:
+        log.error(f"interesting error: {e}")
+        await safe_edit(cb.message, "Не удалось получить данные", reply_markup=MENU_KB, user_id=cb.from_user.id)
+
+def _signals_overview_text_kb():
+    text = f"🔥 <b>Сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(market_bias.get('impact', 'Нейтральный фон'))}\n\nВыберите категорию:"
+    kb = [
+        [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
+        [InlineKeyboardButton(text=f"⏳ Среднесрок ({len(current_signals_db['Среднесрок'])})", callback_data="sig_list:Среднесрок")],
+        [InlineKeyboardButton(text=f"🛡 Долгосрок ({len(current_signals_db['Долгосрок'])})", callback_data="sig_list:Долгосрок")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=kb)
+
+@dp.callback_query(F.data == "last_signals")
+async def cb_last(cb: types.CallbackQuery):
+    if last_signals_data.get("text") and time.time() - last_signals_data.get("ts", 0) < 3600:
+        await safe_edit(cb.message, last_signals_data["text"], reply_markup=last_signals_data.get("kb"), user_id=cb.from_user.id)
+    else:
+        text, kb = _signals_overview_text_kb()
+        await safe_edit(cb.message, text, reply_markup=kb, user_id=cb.from_user.id)
+    await safe_answer(cb)
+
+@dp.callback_query(F.data.startswith("sig_list:"))
+async def cb_sig_list(cb: types.CallbackQuery):
+    category = cb.data.split(":")[1]
+    sigs = current_signals_db.get(category, [])[:10]
+    if not sigs:
+        text = f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас сигналов в этой категории нет.</i>"
+        kb = [[InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")]]
+        await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
+        await safe_answer(cb, "Пусто", False)
+        return
+    text = f"📋 <b>Сигналы: {category}</b>\n\n"
+    kb = []
+    for s in sigs:
+        emoji = "🟢" if s["is_long"] else "🔴"
+        text += f"{emoji} <b>{s['coin']}</b> · Conf: {s['strength']}%\n"
+        kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
+    kb.append([InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")])
+    await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
+    await safe_answer(cb)
+
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message):
     await asyncio.to_thread(save_user_data, m.from_user.id, m.from_user.username, m.from_user.first_name)
