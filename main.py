@@ -2855,6 +2855,44 @@ async def check_position(user_id, coin, pos):
     except Exception: 
         pass
 
+def get_moscow_time_from_entry(entry) -> str:
+    """Переводит время новости в московское."""
+    msk = timezone(timedelta(hours=3))
+    try:
+        published = None
+        if getattr(entry, "published_parsed", None): 
+            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        elif getattr(entry, "updated_parsed", None): 
+            published = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+        elif getattr(entry, "published", None):
+            try:
+                published = parsedate_to_datetime(entry.published)
+                if published.tzinfo is None: 
+                    published = published.replace(tzinfo=timezone.utc)
+            except Exception: 
+                pass
+        if published: 
+            return published.astimezone(msk).strftime("%d.%m.%Y %H:%M") + " МСК"
+    except Exception: 
+        pass
+    return datetime.now(msk).strftime("%d.%m.%Y %H:%M") + " МСК"
+
+async def cleanup_loop():
+    """Очищает старые сообщения в чате, чтобы не засорять историю."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            for uid, mids in list(msg_history.items()):
+                if len(mids) > 1:
+                    for mid in mids[:-1]:
+                        try: 
+                            await bot.delete_message(uid, mid)
+                        except Exception: 
+                            pass
+                    msg_history[uid] = [mids[-1]]
+        except Exception as e: 
+            log.error(f"cleanup_loop: {e}")
+        await asyncio.sleep(600)
 
 async def main():
     """Точка входа в приложение."""
