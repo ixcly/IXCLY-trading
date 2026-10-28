@@ -2453,8 +2453,6 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
     }
     res["text"] = render_caption(res)
     return res
-    res["text"] = render_caption(res)
-    return res
 
 
 def fetch_error_text(coin):
