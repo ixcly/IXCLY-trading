@@ -1205,16 +1205,33 @@ async def get_market_data_light(coin, tfs=tuple(TFS)):
     return await get_market_data(coin, tfs)
 
 async def get_simple_price(coin):
-    """Быстро берет текущую цену с Binance или Bybit."""
+    # Пробуем Binance
     try:
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/price", params={"symbol": f"{coin}USDT"}, timeout=5)
         return float(j["price"])
-    except Exception:
-        try:
-            j = await http_json("https://api.bybit.com/v5/market/tickers", params={"category": "spot", "symbol": f"{coin}USDT"}, timeout=5)
-            return float(j["result"]["list"][0]["lastPrice"])
-        except Exception: 
-            return None
+    except Exception: 
+        pass
+    
+    # Пробуем Bybit
+    try:
+        j = await http_json("https://api.bybit.com/v5/market/tickers", params={"category": "spot", "symbol": f"{coin}USDT"}, timeout=5)
+        return float(j["result"]["list"][0]["lastPrice"])
+    except Exception: 
+        pass
+        
+    # Пробуем OKX
+    try:
+        j = await http_json("https://www.okx.com/api/v5/market/ticker", params={"instId": f"{coin}-USDT"}, timeout=5)
+        return float(j["data"][0]["last"])
+    except Exception: 
+        pass
+        
+    # Пробуем MEXC
+    try:
+        j = await http_json("https://api.mexc.com/api/v3/ticker/price", params={"symbol": f"{coin}USDT"}, timeout=5)
+        return float(j["price"])
+    except Exception: 
+        return None
 
 
 # =====================================================================
