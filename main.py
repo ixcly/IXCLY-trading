@@ -2839,30 +2839,43 @@ async def get_news_batch_text():
     # Берем топ-3 свежие новости
     batch = entries[:3]
     
+    # ЖЕСТКИЙ ПРОМПТ ДЛЯ ИИ
     prompt = (
         f"Ты опытный крипто-аналитик. Оцени эти {len(batch)} новости.\n"
-        "Для каждой напиши суть (1-2 предложения) и влияние на рынок (какие монеты затронет).\n"
-        "Отвечай кратко на русском языке, чтобы всё уместилось в одно сообщение.\n"
-        "Строго по формату:\n"
+        "Для каждой новости напиши строго по шаблону (на русском языке):\n"
+        "Новость [номер]:\n"
+        "📰 Суть: [О чем новость, 1-2 предложения]\n"
+        "📊 Влияние: [Бычье/Медвежье/Нейтральное] - [Как повлияет на рынок]\n"
+        "🪙 Монеты: [Какие монеты затронет, через запятую]\n\n"
+        "Вот новости:\n"
     )
+    
     for i, e in enumerate(batch):
         title = html.unescape(getattr(e, "title", "") or "")
         summary = clean_summary(getattr(e, "summary", ""))
-        prompt += f"{i+1}. Новость: {title}. Текст: {summary[:300]}\n"
-    prompt += "\nОтветь списком:\n1. [Суть и монеты]\n2. [Суть и монеты]\n..."
-
-    text, engine = await ask_ai_named(prompt, timeout=20, free_timeout=25)
+        prompt += f"{i+1}. {title}. {summary[:200]}\n"
     
-    if text and has_cyr(text, 20):
-        # Если ИИ ответил, отдаем его красивый ответ
+    prompt += "\nОтветь только чистым текстом на русском, без markdown-разметки."
+
+    # Даем ИИ больше времени на подумать (30 секунд)
+    text, engine = await ask_ai_named(prompt, timeout=30, free_timeout=30)
+    
+    # Если ИИ ответил нормальным русским текстом
+    if text and has_cyr(text, 30):
         return f"📰 <b>Дайджест новостей</b>\n\n{html.escape(text)}\n\n🔗 <a href=\"{batch[0].link}\">Источник</a>"
     
-    # Если ИИ упал, выдаем базовый перевод без ИИ (чтобы кнопка не ломалась)
+    # ЕСЛИ ИИ УПАЛ: переводим заголовки вручную, чтобы не было английского
     fallback = "📰 <b>Последние новости (Кратко):</b>\n\n"
     for i, e in enumerate(batch):
         title = html.unescape(getattr(e, "title", "") or "")
-        fallback += f"<b>{i+1}.</b> {html.escape(title)}\n"
-    fallback += f"\n🔗 <a href=\"{batch[0].link}\">Источник</a>"
+        # Принудительно переводим заголовок на русский
+        ru_title = await translate_text(title)
+        
+        fallback += f"<b>{i+1}.</b> {html.escape(ru_title)}\n"
+        fallback += "   <i>📊 Влияние: Нейтральное</i>\n"
+        fallback += "   <i>🪙 Монеты: BTC, ETH (общий рынок)</i>\n\n"
+        
+    fallback += f"🔗 <a href=\"{batch[0].link}\">Источник</a>"
     return fallback
 
 
