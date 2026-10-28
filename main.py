@@ -1215,6 +1215,17 @@ EXCHANGES = [
     {"name": "HTX", "url": "https://api.huobi.pro/market/history/kline", "params": lambda c, tf, n: {"symbol": f"{c.lower()}usdt", "period": {"15m": "15min", "1h": "60min", "4h": "4hour", "1d": "1day"}[tf], "size": min(n, 2000)}, "parse": _p_htx},
 ]
 
+
+async def http_json(url, params=None, timeout=8):
+    """Универсальная функция для отправки HTTP-запросов и получения JSON."""
+    async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        if r.status != 200:
+            raise RuntimeError(f"HTTP {r.status}")
+        return await r.json(content_type=None)
+
+async def get_fallback_price(coin):
+    # ... (дальше идет твоя старая функция)
+
 async def get_fallback_price(coin):
     """Резервные источники цен. Теперь с логами ошибок."""
     # 1. CryptoCompare
