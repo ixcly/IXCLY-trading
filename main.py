@@ -2281,12 +2281,17 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         log.info(f"Ошибка графика {coin}: {e}")
         img = None
         
-    return {
-        "text": text, "img": img, "coin": coin, "entry": entry, 
-        "tps": tps, "sls": sls, "is_long": is_long, "side": side, 
+    res = {
+        "text": text, "img": img, "coin": coin, 
+        "tps": tps, "sls": sls, "is_long": is_long,
         "price": info["price"], "type": setup["type"], 
         "strength": setup["strength"], "verdict": verdict, "source": source
     }
+           
+    # СОХРАНЯЕМ В БАЗУ АНАЛИЗОВ
+    _save_analysis_to_db(coin, res)
+    
+    return res
 
 
 async def analyze_coin(coin, user_id=None, force=False):
