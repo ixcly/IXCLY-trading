@@ -1188,6 +1188,41 @@ EXCHANGES = [
     {"name": "HTX", "url": "https://api.huobi.pro/market/history/kline", "params": lambda c, tf, n: {"symbol": f"{c.lower()}usdt", "period": {"15m": "15min", "1h": "60min", "4h": "4hour", "1d": "1day"}[tf], "size": min(n, 2000)}, "parse": _p_htx},
 ]
 
+async def get_fallback_price(coin):
+    """Цепочка резервных API. Если один падает, идем к следующему."""
+    # 1. CryptoCompare
+    try:
+        j = await http_json(f"https://min-api.cryptocompare.com/data/price?fsym={coin}&tsyms=USDT", timeout=4)
+        if "USDT" in j: return float(j["USDT"])
+    except Exception: pass
+    
+    # 2. CoinCap
+    try:
+        j = await http_json(f"https://api.coincap.io/v2/assets?search={coin}", timeout=4)
+        if j["data"] and len(j["data"]) > 0:
+            return float(j["data"][0]["priceUsd"])
+    except Exception: pass
+
+    # 3. Binance US (американская версия Binance, другие сервера)
+    try:
+        j = await http_json(f"https://api.binance.us/api/v3/ticker/price?symbol={coin}USDT", timeout=4)
+        return float(j["price"])
+    except Exception: pass
+
+    # 4. Bitstamp
+    try:
+        j = await http_json(f"https://www.bitstamp.net/api/v2/ticker/{coin.lower()}usdt/", timeout=4)
+        return float(j["last"])
+    except Exception: pass
+
+    # 5. Coinbase (в USD, но для проверки цены сойдет)
+    try:
+        j = await http_json(f"https://api.coinbase.com/v2/prices/{coin}-USD/spot", timeout=4)
+        return float(j["data"]["amount"])
+    except Exception: pass
+    
+    return None
+
 async def _fetch_klines(ex, coin, tf, limit=200):
     j = await http_json(ex["url"], params=ex["params"](coin, tf, limit), timeout=9)
     rows = ex["parse"](j)
