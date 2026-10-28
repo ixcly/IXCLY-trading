@@ -2355,10 +2355,20 @@ def render_caption(res, uid=None):
         (0, f"{emoji} <b>{res['side']} · {coin}</b>   {verdict}"),
         (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
         (1, make_strength_bar(res["strength"])),
-        parts += [
-        (0, f"{emoji} <b>{res['side']} · {coin}</b>   {verdict}"),
-        (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
-        (1, make_strength_bar(res["strength"])),
+    ]
+    
+    # === ВЫВОД ПРЕДУПРЕЖДЕНИЯ О ЛОЖНОМ ПРОБОЕ ===
+    if res.get("fake_breakout"):
+        parts.append((1, "⚠️ <b>Осторожно, ложный пробой (тонкий объем)</b>"))
+    # =============================================
+
+    parts += [
+        (2, f"📰 {html.escape(res['news_status'])}"),
+        (3, f"🌍 BTC {res['btc_txt']}" + (f" · F&G {res['fng']}" if res.get("fng") is not None else "")),
+        (7, ""),
+        (0, f"📥 Вход <b>(только ЛИМИТ)</b>: <code>{fmt(entry)}</code>"),
+        (1, f"💰 Цена сейчас: <code>{fmt(res['price'])}</code>"),
+        (7, ""),
     ]
     
     # === ВЫВОД ПРЕДУПРЕЖДЕНИЯ О ЛОЖНОМ ПРОБОЕ ===
