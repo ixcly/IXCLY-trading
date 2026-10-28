@@ -2244,28 +2244,48 @@ async def analyze_coin(coin, user_id=None, force=False):
         return cached[2], None
         
     try: 
-        # 1. Пытаемся получить полные данные со всех бирж
+        # 1. Пытаемся получить свечи со всех бирж
         tf_data, source = await get_market_data(coin)
     except Exception: 
         # 2. ЕСЛИ БИРЖИ ЗАБАНИЛИ: Берем резервную цену
         fallback_price = await get_fallback_price(coin)
         
-        # ЕСЛИ И РЕЗЕРВНЫЙ ИСТОЧНИК НЕ РАБОТАЕТ: ВЫДАЕМ ОШИБКУ И НЕ ИДЕМ В ИИ
+        # 3. ЕСЛИ И РЕЗЕРВНЫЕ ИСТОЧНИКИ УПАЛИ: Выдаем умное предупреждение
         if not fallback_price:
-            return None, f"⚠ Не удалось получить данные по <b>{html.escape(coin)}</b>.\nВсе биржи и резервные источники недоступны. Попробуйте позже."
+            dummy_text = (
+                f"🪙 <b>Анализ актива: {html.escape(coin)}</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🚫 <b>ВХОД В СДЕЛКУ СТРОГО НЕ РЕКОМЕНДОВАН</b> 🚫\n\n"
+                "<b>Причина:</b>\n"
+                "В данный момент отсутствуют актуальные рыночные данные по этой монете. "
+                "Все доступные биржи и резервные источники не отвечают (возможна блокировка IP или технический сбой).\n\n"
+                "⚠️ <b>Почему это опасно?</b>\n"
+                "• <b>Нет графика:</b> невозможно рассчитать уровни входа, тейк-профиты и стоп-лоссы.\n"
+                "• <b>Слепая зона:</b> индикаторы не работают, ИИ не может дать точный прогноз.\n"
+                "• <b>Высокий риск:</b> торговля в таких условиях равносильна игре в казино.\n\n"
+                "<i>Пожалуйста, воздержитесь от открытия позиций по этому активу. "
+                "Попробуйте запросить анализ чуть позже или выберите другую монету.</i>"
+            )
+            dummy_res = {
+                "text": dummy_text, "img": None, "coin": coin, 
+                "entry": 0, "tps": [0,0,0], "sls": [0,0], "is_long": True, 
+                "side": "N/A", "price": 0, "type": "Нет данных", 
+                "strength": 0, "verdict": "WAIT", "source": "none"
+            }
+            return dummy_res, None
             
-        # Создаем данные для аналитики на основе резервной цены
+        # Если есть хотя бы резервная цена, создаем упрощенный анализ
         tf_data = {
             "4h": {
                 "price": fallback_price, "ema20": fallback_price, "ema50": fallback_price, "ema200": fallback_price,
                 "rsi": 50.0, "atr": fallback_price * 0.02, "adx": 20.0, "macd_hist": 0.0, "bb_pct": 0.5,
                 "z_score": 0.0, "vol_delta": 0.0, "recent_low": fallback_price * 0.95, "recent_high": fallback_price * 1.05,
                 "long_prob": 50.0, "confidence": 50.0, "qv24": 1000000, "regime": "флэт",
-                "squeeze": False, "reasons": ["Взяты данные из резервного источника (биржа в бане)"], 
+                "squeeze": False, "reasons": ["Взяты данные из резервного API (биржа в бане)"], 
                 "patterns": [], "sr": {"support": fallback_price * 0.95, "resistance": fallback_price * 1.05}, "df": None
             }
         }
-        source = "CryptoCompare (Fallback)"
+        source = "Резервный API"
         
     try:
         ctx = await get_context()
@@ -2277,7 +2297,7 @@ async def analyze_coin(coin, user_id=None, force=False):
         log.error(f"Ошибка анализа {coin}: {e}")
         return None, f"⚠ Ошибка анализа <b>{html.escape(coin)}</b>, попробуйте ещё раз"
         
-    analysis_cache[coin] = (time.time(), 60, res) # Кэш на 1 минуту
+    analysis_cache[coin] = (time.time(), 60, res) 
     if len(analysis_cache) > 60:
         for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:20]: 
             analysis_cache.pop(k, None)
