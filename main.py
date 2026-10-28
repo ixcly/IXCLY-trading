@@ -241,6 +241,18 @@ SWARMS ARC ZYN LUCE GRIFFAIN ZEREBRO AI16Z BAN FARTCOIN PENGU HYPE HMSTR CATI
 """
 POPULAR_COINS = list(dict.fromkeys(_COIN_TEXT.split()))
 
+CORRELATION_GROUPS = [
+    ["ETH", "ARB", "OP", "MATIC", "STRK", "ZK", "MANTA"],  # L2 / Ethereum
+    ["SOL", "JUP", "PYTH", "WIF", "BONK"],                 # Solana
+    ["DOGE", "SHIB", "PEPE", "FLOKI", "BOME", "MEME"],     # Мемкоины
+    ["AVAX", "JOE", "GMX"],                                # Avalanche
+    ["BNB", "CAKE"],                                       # BSC
+    ["LINK", "PYTH", "BAND"],                              # Оракулы
+    ["UNI", "SUSHI", "1INCH"],                             # DEX
+    ["ATOM", "OSMO", "TIA", "INJ", "SEI"],                 # Cosmos
+    ["NEAR", "FET", "RNDR", "AGIX"]                        # AI
+]
+
 SYMBOL_ALIASES = {
     "RNDR": ["RENDER", "RNDR"], "MATIC": ["POL", "MATIC"],
     "PEPE": ["PEPE", "1000PEPE"], "BONK": ["BONK", "1000BONK"], "FLOKI": ["FLOKI", "1000FLOKI"],
