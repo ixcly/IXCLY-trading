@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.11.3 - исправлен дубляж рассылки сигналов
+IXCLY Trading bot v2.11.4 - исправлены версии моделей ИИ и дублирование рассылки
 """
 
 import asyncio
@@ -117,9 +117,9 @@ POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 MONGO_URI = clean_key(os.getenv("MONGO_URI"))
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat:free")
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 
 ADMIN_IDS = set()
@@ -131,7 +131,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.11.3"
+VERSION = "2.11.4"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -2278,7 +2278,6 @@ async def scan_once(send=True):
                       "backtest_ok": bt_pass, "final": len(final), "secs": int(time.time() - t0)}
     log.info(f"Сканер: этап1 {len(stage1)} → этап2 {len(stage2)} → бэктест {bt_pass} → итог {len(final)} за {last_scan_info['secs']} с")
 
-    # Теперь сканер отправляет ТОЛЬКО единое меню/обзор категорий с актуальными сигналами, избегая дублирования
     if send and active_chats:
         now = time.time()
         hist = _load_signal_history()
