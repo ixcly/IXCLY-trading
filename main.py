@@ -2799,7 +2799,6 @@ if admin_dp:
 # ГЛАВНЫЙ ЗАПУСК (POLLING И ФОНОВЫЕ ЗАДАЧИ)
 # =====================================================================
 async def run_polling(dispatcher, tg_bot, name, stop_event):
-    """Обертка для поллинга, чтобы бот сам перезапускался при сбоях."""
     attempt = 0
     while not stop_event.is_set():
         try:
@@ -2809,24 +2808,28 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
                 await tg_bot.delete_webhook(drop_pending_updates=(attempt == 1))
             except Exception: 
                 pass
-                
-            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=30)
+            
+            # Увеличиваем таймаут поллинга, чтобы Telegram реже закрывал соединение
+            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=60)
             
             if not stop_event.is_set():
                 log.warning(f"{name}: перезапуск через 5 сек...")
                 await asyncio.sleep(5)
+                attempt = 0  # Сбрасываем счётчик после успешного запуска
                 
         except asyncio.CancelledError: 
             raise
         except (TelegramNetworkError, aiohttp.ClientError) as e: 
             log.warning(f"{name}: сетевая ошибка: {e}")
-            await asyncio.sleep(min(2 ** attempt, 30))
+            delay = min(2 ** attempt, 60)  # Задержка растёт: 2, 4, 8, 16... до 60 сек
+            log.info(f"Ждем {delay} секунд перед повторной попыткой...")
+            await asyncio.sleep(delay)
         except TelegramConflictError as e: 
             log.warning(f"{name}: конфликт getUpdates: {e}")
-            await asyncio.sleep(min(2 ** attempt, 60))
+            await asyncio.sleep(10)
         except Exception as e:
             log.error(f"{name}: упал: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
 
 async def position_monitor_loop():
     """Следит за ручными сделками пользователей (кнопка 'Вошёл в сделку')."""
