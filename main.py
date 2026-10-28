@@ -2929,6 +2929,12 @@ async def main():
     global http, news_lock, current_signals_db
     
     keep_alive() # Запускаем Flask (чтобы Render не спал)
+
+# Создаем сессию внутри работающего event loop
+    from aiohttp import TCPConnector
+    connector = TCPConnector(limit=100, ttl_dns_cache=300, force_close=False)
+    session = AiohttpSession(timeout=30.0, connector=connector)
+    bot.session = session
     
     news_lock = asyncio.Lock()
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.0"})
