@@ -1773,6 +1773,33 @@ def _valid_news_ai(text):
     p = parse_news_ai(text)
     return has_cyr(p.get("TITLE_RU", ""), 6) and has_cyr(p.get("SUMMARY", ""), 20) and has_cyr(p.get("IMPACT", ""), 10)
 
+async def translate_text(text, target="ru"):
+    """Переводит текст на русский (если ИИ не справился)."""
+    text = (text or "").strip()
+    if not text: return text
+    try:
+        async with http.get("https://translate.googleapis.com/translate_a/single", params={"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text[:1800]}, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                out = "".join(part[0] for part in data[0] if part and part[0])
+                if has_cyr(out, 3): 
+                    return out
+    except Exception: 
+        pass
+    return text
+
+def has_cyr(text, n=1): 
+    """Проверяет, есть ли в тексте русские буквы."""
+    return len(re.findall(r"[А-Яа-яЁё]", text or "")) >= n
+
+def shorten(text, n):
+    """Обрезает длинный текст."""
+    text = " ".join(str(text).split())
+    if len(text) <= n: return text
+    cut = text[:n]
+    m = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if m >= n * 0.5: return cut[:m + 1]
+    return cut.rsplit(" ", 1)[0].rstrip(",;:-— ") + "…"
 
 async def update_market_bias(force=False):
     """
