@@ -2376,7 +2376,7 @@ def render_details(res):
 async def build_analysis(coin, tf_data, setup, bt, ctx, source):
     info = tf_data["4h"]
     is_long = setup["is_long"]
-    entry, tps, sls, risk_dist, leverage, near = calc_levels_and_risk(info, is_long, setup["type"])
+    entry, tps, sls, risk_dist, leverage, near, liq_x20 = calc_levels_and_risk(info, is_long, setup["type"])
     verdict, comment, risk_lvl, engine = "WAIT", "", "средний", ""
     if not setup["valid"]:
         comment = setup["reject"]
@@ -2403,6 +2403,8 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "entry": entry, "tps": tps, "sls": sls, "risk_dist": risk_dist, "leverage": leverage,
         "reasons": setup["reasons"], "patterns": setup["patterns"], "notes": setup["notes"], "squeeze": info["squeeze"],
         "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
+        "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
+        "liq_x20": liq_x20,  # <-- Добавляем это поле
     }
     res["text"] = render_caption(res)
     return res
