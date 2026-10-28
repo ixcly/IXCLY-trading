@@ -2362,12 +2362,9 @@ def render_caption(res, uid=None):
     # =============================================
 
     parts += [
-        (2, f"📰 {html.escape(res['news_status'])}"),
-        (3, f"🌍 BTC {res['btc_txt']}" + (f" · F&G {res['fng']}" if res.get("fng") is not None else "")),
-        (7, ""),
-        (0, f"📥 Вход <b>(только ЛИМИТ)</b>: <code>{fmt(entry)}</code>"),
-        (1, f"💰 Цена сейчас: <code>{fmt(res['price'])}</code>"),
-        (7, ""),
+        (0, f"{emoji} <b>{res['side']} · {coin}</b>   {verdict}"),
+        (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
+        (1, make_strength_bar(res["strength"])),
     ]
     
     # === ВЫВОД ПРЕДУПРЕЖДЕНИЯ О ЛОЖНОМ ПРОБОЕ ===
@@ -2383,6 +2380,7 @@ def render_caption(res, uid=None):
         (1, f"💰 Цена сейчас: <code>{fmt(res['price'])}</code>"),
         (7, ""),
     ]
+    parts += [(0, f"🎯 TP{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["tps"])]
     parts += [(0, f"🎯 TP{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["tps"])]
     parts += [(0, f"🛡 SL{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["sls"])]
     parts.append((7, ""))
