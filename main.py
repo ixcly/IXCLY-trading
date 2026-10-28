@@ -2278,17 +2278,23 @@ async def scan_once(send=True):
             if now - signal_sent_at.get(key, 0) >= SIGNAL_COOLDOWN:
                 signal_sent_at[key] = now
                 hist.append({
-                    "ts": now, 
-                    "coin": r["coin"], 
-                    "side": r["side"], 
-                    "type": r["type"], 
-                    "strength": r["strength"], 
-                    "text": r["text"],
-                    "entry": r["entry"],
-                    "tp1": r["tps"][0],
-                    "sl1": r["sls"][0],
-                    "status": "active"
-                })
+                "ts": now, 
+                "expire_ts": now + 48 * 3600, # 48 часов на вход по лимитке
+                "coin": r["coin"], 
+                "side": r["side"], 
+                "type": r["type"], 
+                "strength": r["strength"], 
+                "text": r["text"],
+                "entry": r["entry"],
+                "tp1": r["tps"][0],
+                "tp2": r["tps"][1],
+                "tp3": r["tps"][2],
+                "sl1": r["sls"][0],
+                "sl2": r["sls"][1],
+                "status": "active", # active, in_trade, win, loss, expired
+                "max_tp_hit": 0,
+                "hit_sl": 0
+            })
         _save_signal_history(hist)
 
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
@@ -2326,27 +2332,63 @@ async def global_signal_monitor_loop():
         try:
             hist = _load_signal_history()
             updated = False
+            now = time.time()
+            
             for x in hist:
-                if x.get("status") == "active":
+                if x.get("status") in ("active", "in_trade"):
                     price = await get_simple_price(x["coin"])
-                    if price:
-                        is_long = x["side"] == "LONG"
-                        tp1 = x.get("tp1", 0)
-                        sl1 = x.get("sl1", 0)
+                    if not price:
+                        continue
+                        
+                    is_long = x["side"] == "LONG"
+                    entry = x.get("entry", 0)
+                    tp1, tp2, tp3 = x.get("tp1", 0), x.get("tp2", 0), x.get("tp3", 0)
+                    sl1, sl2 = x.get("sl1", 0), x.get("sl2", 0)
+                    
+                    # 1. Если лимитка еще не зашла
+                    if x["status"] == "active":
+                        filled = (price <= entry) if is_long else (price >= entry)
+                        if filled:
+                            x["status"] = "in_trade"
+                            updated = True
+                        elif now > x.get("expire_ts", 0):
+                            x["status"] = "expired"
+                            updated = True
+                        continue 
+                        
+                    # 2. Если мы уже в сделке
+                    if x["status"] == "in_trade":
+                        max_tp = x.get("max_tp_hit", 0)
+                        
                         if is_long:
-                            if price >= tp1:
-                                x["status"] = "win"
-                                updated = True
-                            elif price <= sl1:
-                                x["status"] = "loss"
-                                updated = True
+                            if price >= tp3: max_tp = 3
+                            elif price >= tp2 and max_tp < 2: max_tp = 2
+                            elif price >= tp1 and max_tp < 1: max_tp = 1
                         else:
-                            if price <= tp1:
-                                x["status"] = "win"
-                                updated = True
-                            elif price >= sl1:
-                                x["status"] = "loss"
-                                updated = True
+                            if price <= tp3: max_tp = 3
+                            elif price <= tp2 and max_tp < 2: max_tp = 2
+                            elif price <= tp1 and max_tp < 1: max_tp = 1
+                            
+                        if max_tp > x.get("max_tp_hit", 0):
+                            x["max_tp_hit"] = max_tp
+                            updated = True
+                            
+                        hit_sl = 0
+                        if is_long:
+                            if price <= sl2: hit_sl = 2
+                            elif price <= sl1: hit_sl = 1
+                        else:
+                            if price >= sl2: hit_sl = 2
+                            elif price >= sl1: hit_sl = 1
+                            
+                        if hit_sl > 0:
+                            x["hit_sl"] = hit_sl
+                            x["status"] = "win" if max_tp >= 1 else "loss"
+                            updated = True
+                        elif max_tp == 3:
+                            x["status"] = "win"
+                            updated = True
+                            
                     await asyncio.sleep(0.2)
             if updated:
                 _save_signal_history(hist)
@@ -2482,32 +2524,93 @@ async def cb_menu(cb: types.CallbackQuery):
 async def cb_global_stats(cb: types.CallbackQuery):
     hist = _load_signal_history()
     total = len(hist)
+    
+    active = sum(1 for x in hist if x.get("status") == "active")
+    in_trade = sum(1 for x in hist if x.get("status") == "in_trade")
+    expired = sum(1 for x in hist if x.get("status") == "expired")
     wins = sum(1 for x in hist if x.get("status") == "win")
     losses = sum(1 for x in hist if x.get("status") == "loss")
-    active = sum(1 for x in hist if x.get("status") == "active")
     
     closed = wins + losses
     winrate = (wins / closed * 100) if closed > 0 else 0.0
     
-    fast_wins = sum(1 for x in hist if x.get("status") == "win" and x.get("type") == "Быстрый сигнал")
-    fast_total = sum(1 for x in hist if x.get("status") in ("win", "loss") and x.get("type") == "Быстрый сигнал")
-    fast_wr = (fast_wins / fast_total * 100) if fast_total > 0 else 0.0
-
+    tp1_hits = sum(1 for x in hist if x.get("max_tp_hit", 0) >= 1)
+    tp2_hits = sum(1 for x in hist if x.get("max_tp_hit", 0) >= 2)
+    tp3_hits = sum(1 for x in hist if x.get("max_tp_hit", 0) >= 3)
+    sl1_hits = sum(1 for x in hist if x.get("hit_sl", 0) >= 1)
+    sl2_hits = sum(1 for x in hist if x.get("hit_sl", 0) >= 2)
+    
     text = (
         f"📊 <b>Статистика сигналов бота</b>\n\n"
         f"📈 Всего отправлено: <b>{total}</b>\n"
-        f"⏳ В работе (ждут TP/SL): <b>{active}</b>\n\n"
-        f"✅ Успешных (TP1): <b>{wins}</b>\n"
-        f"❌ Убыточных (SL1): <b>{losses}</b>\n"
         f"🎯 Общий винрейт: <b>{winrate:.1f}%</b>\n"
+        f"✅ Побед: <b>{wins}</b> | ❌ Убытков: <b>{losses}</b>\n\n"
+        f"<b>Достижения целей:</b>\n"
+        f"   TP1: <b>{tp1_hits}</b> | TP2: <b>{tp2_hits}</b> | TP3: <b>{tp3_hits}</b>\n"
+        f"   SL1: <b>{sl1_hits}</b> | SL2: <b>{sl2_hits}</b>\n\n"
+        f"<i>* Статистика ведется автоматически.</i>"
     )
-    if fast_total > 0:
-        text += f"⚡ Винрейт (Быстрые): <b>{fast_wr:.1f}%</b> (из {fast_total})\n"
     
-    text += f"\n<i>* Статистика ведется автоматически. Учитываются сделки, где цена дошла до TP1 или SL1.</i>"
+    kb = [
+        [InlineKeyboardButton(text=f"⏳ В работе ({active + in_trade})", callback_data="stats_list:active:0"),
+         InlineKeyboardButton(text=f"🚫 Не отработали ({expired})", callback_data="stats_list:expired:0")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+    ]
     
-    await safe_edit(cb.message, text, reply_markup=MENU_KB, user_id=cb.from_user.id)
+    await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
     await safe_answer(cb)
+
+
+@dp.callback_query(F.data.startswith("stats_list:"))
+async def cb_stats_list(cb: types.CallbackQuery):
+    parts = cb.data.split(":")
+    list_type = parts[1]
+    page = int(parts[2])
+    per_page = 10
+    
+    hist = _load_signal_history()
+    
+    if list_type == "active":
+        filtered = [x for x in hist if x.get("status") in ("active", "in_trade")]
+        title = "⏳ Монеты в работе (ждут TP/SL)"
+    else:
+        filtered = [x for x in hist if x.get("status") == "expired"]
+        title = "🚫 Не отработавшие сигналы (лимитка не зашла)"
+        
+    total_items = len(filtered)
+    total_pages = (total_items + per_page - 1) // per_page
+    if total_pages == 0:
+        total_pages = 1
+        
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    end = start + per_page
+    current_items = filtered[start:end]
+    
+    text = f"{title}\nНайдено: <b>{total_items}</b> шт.\n\n"
+    kb = []
+    
+    for x in current_items:
+        status_emoji = "⏳" if x["status"] == "active" else "📈"
+        side_emoji = "🟢" if x["side"] == "LONG" else "🔴"
+        text += f"{status_emoji} {side_emoji} <b>{x['coin']}</b> | {x['type']}\n"
+        kb.append([InlineKeyboardButton(text=f"{side_emoji} {x['coin']} ({x['type']})", callback_data=f"c:{x['coin']}")])
+        
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"stats_list:{list_type}:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1} / {total_pages}", callback_data="ignore"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"stats_list:{list_type}:{page+1}"))
+        
+    if nav:
+        kb.append(nav)
+        
+    kb.append([InlineKeyboardButton(text="⬅️ К статистике", callback_data="global_stats")])
+    
+    await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
+    await safe_answer(cb)
+
 
 
 @dp.callback_query(F.data.startswith("search_page:"))
