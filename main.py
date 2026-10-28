@@ -2382,6 +2382,7 @@ async def global_signal_monitor_loop():
 
         except Exception as e:
             log.error(f"global_signal_monitor: {e}")
+            await notify_admin(f"🚨 <b>Ошибка в мониторинге сигналов:</b>\n<code>{html.escape(str(e))}</code>")
         next_timers["global_signals"] = time.time() + 300
         await asyncio.sleep(300)
 
