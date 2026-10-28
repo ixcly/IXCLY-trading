@@ -1153,9 +1153,14 @@ def _p_bybit(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["result"]["list"])]
 
 EXCHANGES = [
+   def _p_mexc(j):
+    return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
+
+EXCHANGES = [
     {"name": "BINANCE", "url": "https://data-api.binance.vision/api/v3/klines", "params": lambda c, tf, n: {"symbol": f"{c}USDT", "interval": tf, "limit": min(n, 1000)}, "parse": _p_binance},
-    {"name": "OKX", "url": "https://www.okx.com/api/v5/market/candles", "params": lambda c, tf, n: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": str(min(n, 300))}, "parse": _p_okx},
     {"name": "BYBIT", "url": "https://api.bybit.com/v5/market/kline", "params": lambda c, tf, n: {"category": "spot", "symbol": f"{c}USDT", "interval": {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}[tf], "limit": min(n, 1000)}, "parse": _p_bybit},
+    {"name": "OKX", "url": "https://www.okx.com/api/v5/market/candles", "params": lambda c, tf, n: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": str(min(n, 300))}, "parse": _p_okx},
+    {"name": "MEXC", "url": "https://api.mexc.com/api/v3/klines", "params": lambda c, tf, n: {"symbol": f"{c}USDT", "interval": {"15m": "15m", "1h": "60m", "4h": "4h", "1d": "1d"}[tf], "limit": min(n, 1000)}, "parse": _p_mexc},
 ]
 
 async def _fetch_klines(ex, coin, tf, limit=200):
