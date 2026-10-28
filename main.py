@@ -2778,31 +2778,55 @@ async def cb_sig_list(cb: types.CallbackQuery):
     await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
     await safe_answer(cb)
 
+# НОВАЯ ФУНКЦИЯ ДЛЯ СБОРА НОВОСТЕЙ
+async def get_news_batch_text():
+    entries = await get_news_entries()
+    if not entries:
+        return "📭 <b>На данный момент новых новостей нет.</b>\nВозвращайтесь позже!"
+
+    # Берем топ-3 свежие новости
+    batch = entries[:3]
+    
+    prompt = (
+        f"Ты опытный крипто-аналитик. Оцени эти {len(batch)} новости.\n"
+        "Для каждой напиши суть (1-2 предложения) и влияние на рынок (какие монеты затронет).\n"
+        "Отвечай кратко на русском языке, чтобы всё уместилось в одно сообщение.\n"
+        "Строго по формату:\n"
+    )
+    for i, e in enumerate(batch):
+        title = html.unescape(getattr(e, "title", "") or "")
+        summary = clean_summary(getattr(e, "summary", ""))
+        prompt += f"{i+1}. Новость: {title}. Текст: {summary[:300]}\n"
+    prompt += "\nОтветь списком:\n1. [Суть и монеты]\n2. [Суть и монеты]\n..."
+
+    text, engine = await ask_ai_named(prompt, timeout=20, free_timeout=25)
+    
+    if text and has_cyr(text, 20):
+        # Если ИИ ответил, отдаем его красивый ответ
+        return f"📰 <b>Дайджест новостей</b>\n\n{html.escape(text)}\n\n🔗 <a href=\"{batch[0].link}\">Источник</a>"
+    
+    # Если ИИ упал, выдаем базовый перевод без ИИ (чтобы кнопка не ломалась)
+    fallback = "📰 <b>Последние новости (Кратко):</b>\n\n"
+    for i, e in enumerate(batch):
+        title = html.unescape(getattr(e, "title", "") or "")
+        fallback += f"<b>{i+1}.</b> {html.escape(title)}\n"
+    fallback += f"\n🔗 <a href=\"{batch[0].link}\">Источник</a>"
+    return fallback
+
+
 @dp.callback_query(F.data == "news_menu")
 async def cb_news_menu(cb: types.CallbackQuery):
     uid = cb.from_user.id
-    await safe_answer(cb, "📰 Загружаю новость…")
-    await safe_edit(cb.message, "⏳ Перевожу и анализирую новость…", user_id=uid)
+    await safe_answer(cb, "📰 Загружаю новости…")
+    await safe_edit(cb.message, "⏳ Анализирую последние новости...", user_id=uid)
+    
     try:
-        text, img_url = await prepare_news()
-        if not text:
-            await safe_edit(cb.message, "📭 Свежих новостей пока нет", reply_markup=MENU_KB, user_id=uid)
-            return
-        img = await download_bytes(img_url) if img_url else None
-        await safe_delete(cb.message)
-        if img:
-            if len(text) <= 1024:
-                msg = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"), caption=text, parse_mode="HTML", reply_markup=MENU_KB)
-            else:
-                msg_photo = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"))
-                track_msg(uid, msg_photo)
-                msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
-        else:
-            msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
-        track_msg(uid, msg)
+        # Получаем готовый текстовый блок с новостями
+        text = await get_news_batch_text()
+        await safe_edit(cb.message, text, reply_markup=MENU_KB, user_id=uid)
     except Exception as e:
-        log.error(f"news error: {e}")
-        await safe_edit(cb.message, "Ошибка при загрузке новости.", reply_markup=MENU_KB, user_id=uid)
+        log.error(f"Ошибка новостей: {e}")
+        await safe_edit(cb.message, "📭 На данный момент новых новостей нет.\n(Ошибка сети или API)", reply_markup=MENU_KB, user_id=uid)
 
 @dp.callback_query(F.data == "sig:menu")
 async def cb_sig_menu(cb: types.CallbackQuery):
