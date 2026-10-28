@@ -2361,18 +2361,27 @@ def render_caption(res, uid=None):
     verdict = "✅ <b>ВХОДИТЬ</b>" if res["verdict"] == "ENTER" else "⏳ <b>ЖДАТЬ</b>"
     emoji = "🟢" if res["is_long"] else "🔴"
     parts = []
+    
     if res.get("stale"):
         parts.append((0, f"🕓 <i>Из архива: {age_text(res['ts'])} (свежие данные недоступны)</i>"))
-    parts += [
-        (0, f"{emoji} <b>{res['side']} · {coin}</b>   {verdict}"),
-        (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
-        (1, make_strength_bar(res["strength"])),
-    ]
-    
-    # === ВЫВОД ПРЕДУПРЕЖДЕНИЯ О ЛОЖНОМ ПРОБОЕ ===
-    if res.get("fake_breakout"):
-        parts.append((1, "⚠️ <b>Осторожно, ложный пробой (тонкий объем)</b>"))
-    # =============================================
+        
+    # === ПРОВЕРКА КОРРЕЛЯЦИИ ===
+    corr_warning = None
+    if uid:
+        open_pos = get_user_open_positions(uid)
+        for op_coin, op_data in open_pos.items():
+            if op_coin == res["coin"]:
+                continue
+            if op_data["side"] == res["side"]:
+                for group in CORRELATION_GROUPS:
+                    if op_coin in group and res["coin"] in group:
+                        corr_warning = f"⚠️ <b>Риск:</b> У вас уже есть {op_data['side']} по {op_coin}. {res['coin']} сильно коррелирует. Не удваивайте риск!"
+                        break
+            if corr_warning:
+                break
+
+    if corr_warning:
+        parts.append((0, corr_warning))
 
     parts += [
         (0, f"{emoji} <b>{res['side']} · {coin}</b>   {verdict}"),
@@ -2393,7 +2402,6 @@ def render_caption(res, uid=None):
         (1, f"💰 Цена сейчас: <code>{fmt(res['price'])}</code>"),
         (7, ""),
     ]
-    parts += [(0, f"🎯 TP{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["tps"])]
     parts += [(0, f"🎯 TP{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["tps"])]
     parts += [(0, f"🛡 SL{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["sls"])]
     parts.append((7, ""))
