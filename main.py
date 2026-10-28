@@ -195,11 +195,6 @@ if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
     admin_bot = Bot(token=INPUT_BOT_TOKEN, session=admin_session)
     admin_dp = Dispatcher()
 
-from aiohttp import TCPConnector
-
-connector = TCPConnector(limit=100, ttl_dns_cache=300, force_close=False)
-session = AiohttpSession(timeout=30.0, connector=connector)
-
 http = None
 news_lock = None
 TFS = ["15m", "1h", "4h", "1d"]
