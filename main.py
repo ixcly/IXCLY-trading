@@ -2638,7 +2638,7 @@ async def anomaly_scanner_loop():
                                     vol = float(klines[1][5])
                                     prev_vol = float(klines[0][5])
                                     if vol > prev_vol * 10 and vol > 100000:
-                                        if vol > prev_vol * 10 and vol > 100000:
+                                    if vol > prev_vol * 10 and vol > 100000:
                                         coin_name = x['symbol'][:-4]
                                         text = (
                                             f"🚨 <b>Аномальный объем!</b>\n"
