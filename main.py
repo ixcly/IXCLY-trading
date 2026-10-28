@@ -145,8 +145,14 @@ GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 
 # Ключ шифрования для API-ключей пользователей
-FERNET_KEY = os.getenv("FERNET_KEY", "dGhpc19pc19hX3NlY3JldF9rZXlfZm9yX2RlbW9fb25seV8=")
-cipher = Fernet(FERNET_KEY.encode()) if Fernet else None
+# Жестко прописываем ключ прямо в коде, чтобы Render не тупил
+FERNET_KEY = "3q2-4r5t6y7u8i9o0p1a2s3d4f5g6h7j8k9l0z1x2c3v="
+cipher = None
+if Fernet:
+    try:
+        cipher = Fernet(FERNET_KEY.encode())
+    except Exception as e:
+        log.error(f"⚠️ Ошибка шифрования: {e}. Автоторговля отключена.")
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
