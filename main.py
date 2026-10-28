@@ -2141,15 +2141,33 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
 
 
 async def analyze_coin(coin, user_id=None, force=False):
-    """Анализирует монету по запросу пользователя (с кешированием на 3 мин)."""
     cached = analysis_cache.get(coin)
     if cached and not force and time.time() - cached[0] < cached[1]: 
         return cached[2], None
         
     try: 
+        # 1. Пытаемся получить полные данные со всех бирж
         tf_data, source = await get_market_data(coin)
     except Exception: 
-        return None, f"⚠ Не удалось получить данные по <b>{html.escape(coin)}</b>"
+        # 2. ЕСЛИ БИРЖИ ЗАБАНИЛИ: Берем резервную цену
+        fallback_price = await get_fallback_price(coin)
+        
+        # ЕСЛИ И РЕЗЕРВНЫЙ ИСТОЧНИК НЕ РАБОТАЕТ: ВЫДАЕМ ОШИБКУ И НЕ ИДЕМ В ИИ
+        if not fallback_price:
+            return None, f"⚠ Не удалось получить данные по <b>{html.escape(coin)}</b>.\nВсе биржи и резервные источники недоступны. Попробуйте позже."
+            
+        # Создаем данные для аналитики на основе резервной цены
+        tf_data = {
+            "4h": {
+                "price": fallback_price, "ema20": fallback_price, "ema50": fallback_price, "ema200": fallback_price,
+                "rsi": 50.0, "atr": fallback_price * 0.02, "adx": 20.0, "macd_hist": 0.0, "bb_pct": 0.5,
+                "z_score": 0.0, "vol_delta": 0.0, "recent_low": fallback_price * 0.95, "recent_high": fallback_price * 1.05,
+                "long_prob": 50.0, "confidence": 50.0, "qv24": 1000000, "regime": "флэт",
+                "squeeze": False, "reasons": ["Взяты данные из резервного источника (биржа в бане)"], 
+                "patterns": [], "sr": {"support": fallback_price * 0.95, "resistance": fallback_price * 1.05}, "df": None
+            }
+        }
+        source = "CryptoCompare (Fallback)"
         
     try:
         ctx = await get_context()
@@ -2161,7 +2179,7 @@ async def analyze_coin(coin, user_id=None, force=False):
         log.error(f"Ошибка анализа {coin}: {e}")
         return None, f"⚠ Ошибка анализа <b>{html.escape(coin)}</b>, попробуйте ещё раз"
         
-    analysis_cache[coin] = (time.time(), 50, res)
+    analysis_cache[coin] = (time.time(), 60, res) # Кэш на 1 минуту
     if len(analysis_cache) > 60:
         for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:20]: 
             analysis_cache.pop(k, None)
