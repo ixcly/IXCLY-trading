@@ -2491,6 +2491,124 @@ async def scan_once(send=True):
 # =====================================================================
 # ОБРАБОТЧИКИ КОМАНД И КНОПОК
 # =====================================================================
+
+# =====================================================================
+#                        ВСЕ КЛАВИАТУРЫ БОТА
+# =====================================================================
+MENU_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]])
+
+def get_coins_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📰  Новости", callback_data="news_menu"), InlineKeyboardButton(text="🧐  Графики", callback_data="interesting_menu")],
+        [InlineKeyboardButton(text="🔥  Последние сигналы", callback_data="last_signals"), InlineKeyboardButton(text="📊  Статистика", callback_data="global_stats")],
+        [InlineKeyboardButton(text="⭐  Избранное", callback_data="sig:menu"), InlineKeyboardButton(text="💼  Мой Портфель", callback_data="portfolio")],
+        [InlineKeyboardButton(text="📥  Экспорт CSV", callback_data="export_csv")],
+        [InlineKeyboardButton(text="🔍  Поиск монеты", callback_data="search")],
+    ])
+
+def get_search_coins_keyboard(page=0):
+    per = 8
+    coins = POPULAR_COINS[page * per:(page + 1) * per]
+    buttons = []
+    for i in range(0, len(coins), 2):
+        row = [InlineKeyboardButton(text=f"• {coins[i]}", callback_data=f"c:{coins[i]}")]
+        if i + 1 < len(coins): 
+            row.append(InlineKeyboardButton(text=f"• {coins[i + 1]}", callback_data=f"c:{coins[i + 1]}"))
+        buttons.append(row)
+    total = (len(POPULAR_COINS) + per - 1) // per
+    nav = []
+    if page > 0: 
+        nav.append(InlineKeyboardButton(text="⬅ Назад", callback_data=f"search_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1} / {total}", callback_data="ignore"))
+    if page < total - 1: 
+        nav.append(InlineKeyboardButton(text="Вперёд ➡", callback_data=f"search_page:{page + 1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def result_keyboard(coin):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"r:{coin}"), InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}")],
+        [InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
+    ])
+
+def get_saved_signals_menu(user_id):
+    saved = get_user_saved_signals(user_id)
+    buttons, row = [], []
+    for s in saved:
+        row.append(InlineKeyboardButton(text=f"⭐ {s['coin']}", callback_data=f"sig:view:{s['coin']}"))
+        if len(row) == 2: 
+            buttons.append(row)
+            row = []
+    if row: 
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="➕ Добавить новый", callback_data="sig:save_new")])
+    if saved: 
+        buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data="sig:del_menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_delete_signals_menu(user_id):
+    saved = get_user_saved_signals(user_id)
+    buttons, row = [], []
+    for s in saved:
+        row.append(InlineKeyboardButton(text=f"❌ {s['coin']}", callback_data=f"sig:del:{s['coin']}"))
+        if len(row) == 2: 
+            buttons.append(row)
+            row = []
+    if row: 
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅ Назад", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_save_coins_keyboard(page=0):
+    per = 8
+    coins = POPULAR_COINS[page * per:(page + 1) * per]
+    buttons = []
+    for i in range(0, len(coins), 2):
+        row = [InlineKeyboardButton(text=coins[i], callback_data=f"sig:do_save:{coins[i]}")]
+        if i + 1 < len(coins): 
+            row.append(InlineKeyboardButton(text=coins[i + 1], callback_data=f"sig:do_save:{coins[i + 1]}"))
+        buttons.append(row)
+    total = (len(POPULAR_COINS) + per - 1) // per
+    nav = []
+    if page > 0: 
+        nav.append(InlineKeyboardButton(text="⬅", callback_data=f"sig:save_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="ignore"))
+    if page < total - 1: 
+        nav.append(InlineKeyboardButton(text="➡", callback_data=f"sig:save_page:{page + 1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="⬅ Назад", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_saved_signal_view_keyboard(user_id, coin):
+    pos = get_open_position(user_id, coin)
+    buttons = [[InlineKeyboardButton(text="🔄 Обновить анализ", callback_data=f"c:{coin}")]]
+    if pos:
+        buttons.append([InlineKeyboardButton(text="📈 Статус позиции", callback_data=f"pos:status:{coin}")])
+        buttons.append([InlineKeyboardButton(text="❌ Закрыл сделку", callback_data=f"pos:close:{coin}")])
+    else: 
+        buttons.append([InlineKeyboardButton(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
+    buttons.append([InlineKeyboardButton(text="⬅ Назад в избранное", callback_data="sig:menu")])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_admin_keyboard():
+    news = "🟢 ВКЛ" if bot_flags["news_enabled"] else "🔴 ВЫКЛ"
+    scan = "🟢 ВКЛ" if bot_flags["alerts_enabled"] else "🔴 ВЫКЛ"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"), InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users")],
+        [InlineKeyboardButton(text="📰 Новость сейчас", callback_data="admin:news_now"), InlineKeyboardButton(text=f"🔔 Новости: {news}", callback_data="admin:toggle_news")],
+        [InlineKeyboardButton(text=f"🚨 Сканер: {scan}", callback_data="admin:toggle_scan"), InlineKeyboardButton(text="🔍 Скан-тест", callback_data="admin:scan_test")],
+        [InlineKeyboardButton(text="⚡ Рассылка сигналов", callback_data="admin:broadcast_now")],
+        [InlineKeyboardButton(text="🔧 Диагностика", callback_data="admin:diag"), InlineKeyboardButton(text="💾 Бэкап", callback_data="admin:backup")],
+        [InlineKeyboardButton(text="📥 Восстановить", callback_data="admin:restore"), InlineKeyboardButton(text="⏳ Таймеры", callback_data="admin:timers")],
+    ])
+# =====================================================================
+
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message):
     await asyncio.to_thread(save_user_data, m.from_user.id, m.from_user.username, m.from_user.first_name)
