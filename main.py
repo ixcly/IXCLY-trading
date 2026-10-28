@@ -58,6 +58,9 @@ try:
 except ImportError:
     Fernet = None
 
+class PortfolioStates(StatesGroup):
+    waiting_for_deposit = State()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout, force=True)
 log = logging.getLogger("ixcly")
 
