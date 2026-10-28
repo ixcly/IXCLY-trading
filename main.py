@@ -1223,8 +1223,6 @@ async def http_json(url, params=None, timeout=8):
             raise RuntimeError(f"HTTP {r.status}")
         return await r.json(content_type=None)
 
-async def get_fallback_price(coin):
-    # ... (дальше идет твоя старая функция)
 
 async def get_fallback_price(coin):
     """Резервные источники цен. Теперь с логами ошибок."""
