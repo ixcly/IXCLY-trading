@@ -2449,24 +2449,36 @@ def get_user_res(uid, coin):
 # АВТОТОРГОВЛЯ (опционально, по команде /autotrade on)
 # =====================================================================
 async def execute_auto_trade(user_id, coin, is_long, entry, sl, tp):
-    """Лимитный вход + стоп на Binance Futures. НЕ проверено на реальной бирже: тестируйте на testnet и малой суммой."""
     if not ccxt:
         return False, "ccxt не установлен"
-    api_key, secret = get_user_api_keys(user_id)
+    u = _users().get(str(user_id), {})
+    exch_name = u.get("exchange", "binance")
+    api_key, secret = get_user_api_keys(user_id, exch_name)
     if not api_key:
-        return False, "API-ключи не заданы (/api)"
+        return False, "API-ключи не заданы"
     exchange = None
     try:
-        exchange = ccxt.binanceusdm({"apiKey": api_key, "secret": secret, "enableRateLimit": True})
+        if exch_name == "binance":
+            exchange = ccxt.binanceusdm({"apiKey": api_key, "secret": secret, "enableRateLimit": True})
+        elif exch_name == "bybit":
+            exchange = ccxt.bybit({"apiKey": api_key, "secret": secret, "enableRateLimit": True,
+                                   "options": {"defaultType": "swap"}})
+        elif exch_name == "bingx" and hasattr(ccxt, "bingx"):
+            exchange = ccxt.bingx({"apiKey": api_key, "secret": secret, "enableRateLimit": True,
+                                   "options": {"defaultType": "swap"}})
+        else:
+            return False, f"Биржа {exch_name} не поддерживается"
         symbol = f"{coin}/USDT:USDT"
         await exchange.load_markets()
         balance = await exchange.fetch_balance()
         risk_amount = balance["USDT"]["free"] * get_user_risk_settings(user_id)["risk_pct"] / 100
         amount = float(exchange.amount_to_precision(symbol, risk_amount / abs(entry - sl)))
         side, opp = ("buy", "sell") if is_long else ("sell", "buy")
-        await exchange.create_order(symbol, "limit", side, amount, float(exchange.price_to_precision(symbol, entry)))
+        await exchange.create_order(symbol, "limit", side, amount,
+                                    float(exchange.price_to_precision(symbol, entry)))
         await exchange.create_order(symbol, "stop_market", opp, amount, None,
-                                    {"stopPrice": float(exchange.price_to_precision(symbol, sl)), "reduceOnly": True})
+                                    {"stopPrice": float(exchange.price_to_precision(symbol, sl)),
+                                     "reduceOnly": True})
         return True, f"лимит {fmt(entry)}, стоп {fmt(sl)}, объём {amount}"
     except Exception as e:
         log.error(f"Автоторговля {user_id}/{coin}: {e}")
