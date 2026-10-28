@@ -3628,18 +3628,29 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             return await show_screen(chat_id, uid, ("fav_del",), msg)
         if data.startswith("pos:enter:"):
             coin = data.split(":")[2]
-            await safe_answer(cb, "⏳ Фиксирую…")
+            
             res = get_user_res(uid, coin)
             if not res or res.get("price_only"):
+                await safe_answer(cb, "⏳ Анализирую монету...")
                 res, err = await analyze_coin(coin)
             if not res or res.get("price_only"):
                 return await safe_answer(cb, "Не удалось получить уровни", True)
+                
             set_user_open_position(uid, coin, {"side": res["side"], "entry_price": res["entry"], "entered_at": time.time(),
                                                "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0],
                                                "sl2": res["sls"][1], "risk_pct": get_user_risk_settings(uid)["risk_pct"],
                                                "notified_close": False, "notified_tp": False})
+            
+            # === АВТОСОХРАНЕНИЕ В ИЗБРАННОЕ ===
+            text_to_save = render_caption(res, uid)
+            await asyncio.to_thread(add_user_saved_signal, uid, coin, text_to_save, res)
+            
             text = (f"{'🟢' if res['side'] == 'LONG' else '🔴'} <b>Позиция открыта</b>\n\nМонета: <b>{coin}</b>\nНаправление: <b>{res['side']}</b>\n"
-                    f"Вход: <code>{fmt(res['entry'])}</code>\n\nБуду следить и сообщу, когда лучше закрыть.")
+                    f"Вход: <code>{fmt(res['entry'])}</code>\n\n⭐ <i>Сигнал автоматически добавлен в Избранное.</i>\n\n"
+                    f"Буду следить и сообщу, когда лучше закрыть.")
+            
+            # Показываем всплывающее уведомление сверху
+            await safe_answer(cb, f"⭐ {coin} сохранен в Избранное!")
             return await present(chat_id, text, fav_view_keyboard(uid, coin), edit_msg=msg)
         if data.startswith("pos:close:"):
             coin = data.split(":")[2]
