@@ -3358,6 +3358,30 @@ async def process_deposit(m: types.Message, state: FSMContext):
     text, kb = screen_portfolio(uid)
     await present(m.chat.id, f"✅ Депозит обновлён: <b>${amount:.2f}</b>\n\n{text}", kb)
 
+@dp.message(AutotradeStates.waiting_for_api_key)
+async def process_api_key(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    exchange = data.get("exchange", "binance")
+    parts = [p.strip() for p in (m.text or "").split(",")]
+    if len(parts) < 2 or len(parts[0]) < 10 or len(parts[1]) < 10:
+        await m.answer("❌ Неверный формат. Отправьте так:\n<code>API_KEY,SECRET_KEY</code>\n\n"
+                       "Или нажмите «⬅ Назад» в меню выше.", parse_mode="HTML")
+        return
+    api_key, secret = parts[0], parts[1]
+    uid = m.from_user.id
+    await safe_delete(m)
+    ok = save_user_api_keys(uid, exchange, api_key, secret)
+    await state.clear()
+    text, kb = screen_portfolio(uid)
+    if ok:
+        set_user_field(uid, auto_trade_enabled=True)
+        await present(m.chat.id,
+                      f"✅ <b>Ключи {exchange.title()} сохранены и зашифрованы.</b>\n"
+                      f"Автоторговля включена — бот будет выставлять лимитные ордера "
+                      f"и стоп-лоссы по новым сигналам.\n\n{text}", kb)
+    else:
+        await present(m.chat.id, "❌ Шифрование недоступно, ключи не сохранены.\n\n" + text, kb)
+
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message):
     uid = m.from_user.id
