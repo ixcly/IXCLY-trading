@@ -1588,7 +1588,6 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
         fake_breakout=fake_breakout
     )
     return out
-    return out
 
 
 def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=None, resistance=None):
