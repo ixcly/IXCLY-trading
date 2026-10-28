@@ -3722,6 +3722,12 @@ async def cleanup_loop():
             log.error(f"cleanup_loop: {e}")
         await asyncio.sleep(600)
 
+@dp.callback_query(F.data == "del_anomaly")
+async def cb_del_anomaly(cb: types.CallbackQuery):
+    await safe_delete(cb.message)
+    await safe_answer(cb, "Сообщение удалено")
+
+
 async def main():
     """Точка входа в приложение."""
     global http, news_lock, current_signals_db
