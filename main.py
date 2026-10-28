@@ -1190,45 +1190,46 @@ EXCHANGES = [
 ]
 
 async def get_fallback_price(coin):
-    """Ультимативный резерв цен. Если биржи легли, ищем здесь."""
+    """Резервные источники цен. Теперь с логами ошибок."""
     # 1. CryptoCompare
     try:
-        j = await http_json(f"https://min-api.cryptocompare.com/data/price?fsym={coin}&tsyms=USDT", timeout=4)
-        if "USDT" in j: return float(j["USDT"])
-    except Exception: pass
-    
+        j = await http_json(f"https://min-api.cryptocompare.com/data/price?fsym={coin}&tsyms=USDT", timeout=6)
+        if "USDT" in j: 
+            return float(j["USDT"])
+    except Exception as e: log.warning(f"Fallback CryptoCompare error: {e}")
+
     # 2. CoinCap
     try:
-        j = await http_json(f"https://api.coincap.io/v2/assets?search={coin}", timeout=4)
+        j = await http_json(f"https://api.coincap.io/v2/assets?search={coin}", timeout=6)
         if j["data"] and len(j["data"]) > 0:
             return float(j["data"][0]["priceUsd"])
-    except Exception: pass
+    except Exception as e: log.warning(f"Fallback CoinCap error: {e}")
 
-    # 3. Binance US (другая инфраструктура, Render там не забанен)
+    # 3. Binance US
     try:
-        j = await http_json(f"https://api.binance.us/api/v3/ticker/price?symbol={coin}USDT", timeout=4)
+        j = await http_json(f"https://api.binance.us/api/v3/ticker/price?symbol={coin}USDT", timeout=6)
         return float(j["price"])
-    except Exception: pass
+    except Exception as e: log.warning(f"Fallback BinanceUS error: {e}")
 
-    # 4. Coinbase (крупнейшая биржа США)
+    # 4. Bitstamp
     try:
-        j = await http_json(f"https://api.coinbase.com/v2/prices/{coin}-USD/spot", timeout=4)
-        return float(j["data"]["amount"])
-    except Exception: pass
-        
-    # 5. Bitstamp
-    try:
-        j = await http_json(f"https://www.bitstamp.net/api/v2/ticker/{coin.lower()}usdt/", timeout=4)
+        j = await http_json(f"https://www.bitstamp.net/api/v2/ticker/{coin.lower()}usdt/", timeout=6)
         return float(j["last"])
-    except Exception: pass
-        
+    except Exception as e: log.warning(f"Fallback Bitstamp error: {e}")
+
+    # 5. Coinbase
+    try:
+        j = await http_json(f"https://api.coinbase.com/v2/prices/{coin}-USD/spot", timeout=6)
+        return float(j["data"]["amount"])
+    except Exception as e: log.warning(f"Fallback Coinbase error: {e}")
+
     # 6. Kraken
     try:
-        j = await http_json(f"https://api.kraken.com/0/public/Ticker?pair={coin}USDT", timeout=4)
+        j = await http_json(f"https://api.kraken.com/0/public/Ticker?pair={coin}USDT", timeout=6)
         if j["result"]:
             first_key = list(j["result"].keys())[0]
             return float(j["result"][first_key]["c"][0])
-    except Exception: pass
+    except Exception as e: log.warning(f"Fallback Kraken error: {e}")
     
     return None
 
