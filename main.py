@@ -3351,6 +3351,39 @@ async def on_callback(cb: types.CallbackQuery):
         if data == "del_msg":
             await safe_answer(cb, "Удалено")
             return await safe_delete(msg)
+        if data == "set_deposit":
+            await safe_edit(msg, "💰 <b>Напишите сумму депозита в USDT</b> (например, <code>500</code>):", reply_markup=MENU_KB, user_id=uid)
+            await safe_answer(cb)
+            await state.set_state(PortfolioStates.waiting_for_deposit)
+            return
+
+        if data == "set_mode":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🟢 Агрессивный (60%)", callback_data="mode:aggressive")],
+                [InlineKeyboardButton(text="🟡 Сбалансированный (66%)", callback_data="mode:balanced")],
+                [InlineKeyboardButton(text="🔴 Консервативный (80%)", callback_data="mode:conservative")],
+                [InlineKeyboardButton(text="⬅ Назад в портфель", callback_data="portfolio")]
+            ])
+            await safe_edit(msg, "⚙️ <b>Выберите режим торговли:</b>", reply_markup=kb, user_id=uid)
+            return await safe_answer(cb)
+
+        if data.startswith("mode:"):
+            mode = data.split(":")[1]
+            conf_map = {"aggressive": 60, "balanced": 66, "conservative": 80}
+            set_user_field(uid, trade_mode=mode, conf_final=conf_map[mode])
+            await safe_answer(cb, f"✅ Режим обновлен")
+            text, kb = screen_portfolio(uid)
+            return await safe_edit(msg, text, reply_markup=kb, user_id=uid)
+
+        if data == "toggle_autotrade":
+            u = _users().get(str(uid), {})
+            new_state = not u.get("auto_trade_enabled", False)
+            if new_state and not u.get("binance_api"):
+                return await safe_answer(cb, "❌ Сначала добавьте API-ключи через /api", True)
+            set_user_field(uid, auto_trade_enabled=new_state)
+            await safe_answer(cb, f"Автоторговля: {'ВКЛ' if new_state else 'ВЫКЛ'}")
+            text, kb = screen_portfolio(uid)
+            return await safe_edit(msg, text, reply_markup=kb, user_id=uid)
         if data == "menu":
             nav_reset(uid)
             await safe_answer(cb)
