@@ -1573,11 +1573,21 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
     p15, p1h = tf_data.get("15m", {}).get("long_prob", 50), tf_data.get("1h", {}).get("long_prob", 50)
     fast = "15m" in tf_data and "1h" in tf_data and cs(p15) >= 58 and cs(p1h) >= 56
     long_term = cs(p1d) >= 64 and cs(p4) >= 60
-    out.update(valid=not reject, reject=reject, notes=notes, is_long=is_long, strength=round(strength, 1),
-               type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный", news_status=news_status,
-               wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
-               reasons=collect_reasons(tf_data, is_long), patterns=pattern_lines(tf_data)
-               fake_breakout=fake_breakout)
+    out.update(
+        valid=not reject, 
+        reject=reject, 
+        notes=notes, 
+        is_long=is_long, 
+        strength=round(strength, 1),
+        type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный", 
+        news_status=news_status,
+        wp=wp, 
+        tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
+        reasons=collect_reasons(tf_data, is_long), 
+        patterns=pattern_lines(tf_data),
+        fake_breakout=fake_breakout
+    )
+    return out
     return out
 
 
