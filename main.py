@@ -2348,8 +2348,8 @@ async def anomaly_scanner_loop():
 # ПОЛНЫЙ СКАНЕР (3 ЭТАПА)
 # =====================================================================
 
-SCAN_INTERVAL = 5 * 60
-SIGNAL_COOLDOWN = 3 * 3600
+SCAN_INTERVAL = 12 * 60
+SIGNAL_COOLDOWN = 5 * 3600
 signal_sent_at = {}
 scan_skip = {}
 
@@ -2736,6 +2736,72 @@ async def cb_sig_list(cb: types.CallbackQuery):
         kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
     kb.append([InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")])
     await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
+    await safe_answer(cb)
+
+@dp.callback_query(F.data == "news_menu")
+async def cb_news_menu(cb: types.CallbackQuery):
+    uid = cb.from_user.id
+    await safe_answer(cb, "📰 Загружаю новость…")
+    await safe_edit(cb.message, "⏳ Перевожу и анализирую новость…", user_id=uid)
+    try:
+        text, img_url = await prepare_news()
+        if not text:
+            await safe_edit(cb.message, "📭 Свежих новостей пока нет", reply_markup=MENU_KB, user_id=uid)
+            return
+        img = await download_bytes(img_url) if img_url else None
+        await safe_delete(cb.message)
+        if img:
+            if len(text) <= 1024:
+                msg = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"), caption=text, parse_mode="HTML", reply_markup=MENU_KB)
+            else:
+                msg_photo = await cb.message.answer_photo(BufferedInputFile(img, "news.jpg"))
+                track_msg(uid, msg_photo)
+                msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
+        else:
+            msg = await cb.message.answer(text, parse_mode="HTML", reply_markup=MENU_KB, disable_web_page_preview=True)
+        track_msg(uid, msg)
+    except Exception as e:
+        log.error(f"news error: {e}")
+        await safe_edit(cb.message, "Ошибка при загрузке новости.", reply_markup=MENU_KB, user_id=uid)
+
+@dp.callback_query(F.data == "sig:menu")
+async def cb_sig_menu(cb: types.CallbackQuery):
+    await safe_edit(cb.message, "⭐ <b>Избранное</b>", reply_markup=get_saved_signals_menu(cb.from_user.id), user_id=cb.from_user.id)
+    await safe_answer(cb)
+
+@dp.callback_query(F.data == "interesting_menu")
+async def cb_interesting(cb: types.CallbackQuery):
+    await safe_answer(cb, "🧐 Ищу...")
+    try:
+        # Берем данные за 24ч (так отдает API), но фильтруем самые сильные движения
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
+        movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
+        
+        gainers = sorted([x for x in movers if float(x["priceChangePercent"]) > 0], key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        losers = sorted([x for x in movers if float(x["priceChangePercent"]) < 0], key=lambda x: float(x["priceChangePercent"]))
+        
+        rg = random.sample(gainers[:20], min(5, len(gainers[:20])))
+        rl = random.sample(losers[:20], min(5, len(losers[:20])))
+        
+        rg.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        rl.sort(key=lambda x: float(x["priceChangePercent"]))
+        
+        text = "🧐 <b>Интересные за 24ч</b>\n\n🟢 <b>Топ роста:</b>\n"
+        for x in rg: 
+            text += f"<code>{x['symbol'][:-4]}</code> +{float(x['priceChangePercent']):.1f}%\n"
+            
+        text += "\n🔴 <b>Топ падения:</b>\n"
+        for x in rl: 
+            text += f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%\n"
+            
+        await safe_edit(cb.message, text, reply_markup=MENU_KB, user_id=cb.from_user.id)
+    except Exception as e:
+        log.error(f"interesting error: {e}")
+        await safe_edit(cb.message, "⚠️ Биржа временно не отдает данные (лимит запросов). Попробуйте позже.", reply_markup=MENU_KB, user_id=cb.from_user.id)
+
+@dp.callback_query(F.data == "search")
+async def cb_search(cb: types.CallbackQuery):
+    await safe_edit(cb.message, "🔍 <b>Выбери монету из списка</b>\n<i>Или просто напиши тикер сообщением:</i>", reply_markup=get_search_coins_keyboard(0), user_id=cb.from_user.id)
     await safe_answer(cb)
 
 @dp.message(Command("start", "menu"))
