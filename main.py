@@ -1907,9 +1907,9 @@ NEWS_FEEDS = [
 ]
 
 async def _load_feed(url):
-    """Загружает RSS-ленту."""
     try:
-        async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        async with http.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status != 200: 
                 return []
             text = await r.text()
