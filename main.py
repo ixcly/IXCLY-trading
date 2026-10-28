@@ -338,6 +338,26 @@ def _save_signal_history(hist):
     state["signal_history"] = hist[-2000:] # Храним только последние 2000
     _save_full_state(state)
 
+def _load_analysis_db():
+    """Загружает архив анализов из файла."""
+    return _load_full_state().get("analysis_db", {})
+
+def _save_analysis_to_db(coin, res):
+    """Сохраняет или ОБНОВЛЯЕТ анализ монеты в файле (без дублей)."""
+    state = _load_full_state()
+    if "analysis_db" not in state:
+        state["analysis_db"] = {}
+        
+    # Копируем результат и УДАЛЯЕМ картинку, чтобы файл не распух до гигабайт
+    res_to_save = res.copy()
+    if "img" in res_to_save:
+        del res_to_save["img"]
+        
+    # Записываем по ключу монеты. Если она там была, она просто перезапишется (обновится)
+    state["analysis_db"][coin] = {"ts": time.time(), "data": res_to_save}
+    
+    _save_full_state(state)
+
 
 def _load_current_signals_db():
     return _load_full_state().get("current_signals_db", {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []})
