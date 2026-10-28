@@ -1152,8 +1152,7 @@ def _p_okx(j):
 def _p_bybit(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["result"]["list"])]
 
-EXCHANGES = [
-   def _p_mexc(j):
+def _p_mexc(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
 
 EXCHANGES = [
