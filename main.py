@@ -2640,8 +2640,22 @@ async def anomaly_scanner_loop():
                                     vol = float(klines[1][5])
                                     prev_vol = float(klines[0][5])
                                     if vol > prev_vol * 10 and vol > 100000:
-                                        text = f"🚨 <b>Аномальный объем!</b>\nМонета: <b>{x['symbol'][:-4]}</b>\nОбъем за 1м: <b>${vol:,.0f}</b> (x10 к предыдущей)"
-                                        await broadcast({"kind": "text", "text": text, "markup": MENU_KB})
+                                        if vol > prev_vol * 10 and vol > 100000:
+                                        coin_name = x['symbol'][:-4]
+                                        text = (
+                                            f"🚨 <b>Аномальный объем!</b>\n"
+                                            f"Монета: <b>{coin_name}</b>\n"
+                                            f"Объем за 1м: <b>${vol:,.0f}</b> (x10 к предыдущей)\n\n"
+                                            f"<b>Что это значит?</b>\n"
+                                            f"Крупные игроки (киты) начали резко скупать или продавать эту монету. "
+                                            f"Обычно это предшествует сильному импульсу (пампу или дампу). "
+                                            f"Рекомендуется срочно проверить график!"
+                                        )
+                                        # Меняем кнопку "Меню" на "Удалить"
+                                        kb_anomaly = InlineKeyboardMarkup(inline_keyboard=[
+                                            [InlineKeyboardButton(text="🗑 Удалить сообщение", callback_data="del_anomaly")]
+                                        ])
+                                        await broadcast({"kind": "text", "text": text, "markup": kb_anomaly})
         except Exception: 
             pass
         next_timers["anomaly"] = time.time() + 120
