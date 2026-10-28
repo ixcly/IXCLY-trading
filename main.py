@@ -117,9 +117,9 @@ POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 MONGO_URI = clean_key(os.getenv("MONGO_URI"))
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat:free")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-r1:free")
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
 
 ADMIN_IDS = set()
