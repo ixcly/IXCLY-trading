@@ -3469,10 +3469,14 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             await safe_answer(cb, "Удалено")
             return await safe_delete(msg)
         if data == "set_deposit":
-            await safe_edit(msg, "💰 <b>Напишите сумму депозита в USDT</b> (например, <code>500</code>):", reply_markup=MENU_KB, user_id=uid)
             await safe_answer(cb)
             await state.set_state(PortfolioStates.waiting_for_deposit)
-            return
+            return await present(chat_id,
+                "💰 <b>Изменение депозита</b>\n\n"
+                "Отправьте сумму вашего депозита в USDT одним сообщением.\n\n"
+                "📝 <b>Пример:</b> <code>1000</code> или <code>500.50</code>\n\n"
+                "После этого бот пересчитает риск на сделку под новую сумму.",
+                kb_nav(back=True), edit_msg=msg)
 
         if data == "set_mode":
             kb = InlineKeyboardMarkup(inline_keyboard=[
