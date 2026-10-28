@@ -515,20 +515,24 @@ def set_user_field(user_id, **fields):
     state_touch()
 
 
-def save_user_api_keys(user_id, api_key, secret_key):
+def save_user_api_keys(user_id, exchange, api_key, secret_key):
     if not cipher:
         return False
-    set_user_field(user_id, binance_api=cipher.encrypt(api_key.encode()).decode(),
-                   binance_secret=cipher.encrypt(secret_key.encode()).decode())
+    set_user_field(user_id,
+                   exchange=exchange,
+                   **{f"{exchange}_api": cipher.encrypt(api_key.encode()).decode(),
+                      f"{exchange}_secret": cipher.encrypt(secret_key.encode()).decode()})
     return True
 
-
-def get_user_api_keys(user_id):
+def get_user_api_keys(user_id, exchange=None):
     u = _users().get(str(user_id), {})
-    if not cipher or not u.get("binance_api"):
+    if not exchange:
+        exchange = u.get("exchange", "binance")
+    api_f, sec_f = f"{exchange}_api", f"{exchange}_secret"
+    if not cipher or not u.get(api_f):
         return None, None
     try:
-        return cipher.decrypt(u["binance_api"].encode()).decode(), cipher.decrypt(u["binance_secret"].encode()).decode()
+        return cipher.decrypt(u[api_f].encode()).decode(), cipher.decrypt(u[sec_f].encode()).decode()
     except Exception:
         return None, None
 
