@@ -3214,6 +3214,72 @@ def screen_portfolio(uid):
     return text, get_portfolio_keyboard()
 
 
+async def _show_exchange_menu(chat_id, msg):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Binance", callback_data="at:ex:binance")],
+        [InlineKeyboardButton(text="🟡 Bybit",   callback_data="at:ex:bybit")],
+        [InlineKeyboardButton(text="🔵 BingX",   callback_data="at:ex:bingx")],
+        [InlineKeyboardButton(text="⬅ Назад в портфель", callback_data="portfolio")],
+    ])
+    await present(chat_id,
+        "🤖 <b>Автоторговля</b>\n\n"
+        "Здесь вы подключаете биржу — бот будет открывать сделки автоматически по сигналам.\n\n"
+        "🔐 <b>Зачем нужен API-ключ?</b>\n"
+        "Ключ даёт боту право выставлять ордера от вашего имени. Мы <b>НЕ запрашиваем право вывода</b> — "
+        "только торговлю. Ключи шифруются (Fernet) и хранятся на сервере в зашифрованном виде.\n\n"
+        "🛡 <b>Безопасность:</b>\n"
+        "• В бирже отключите «Разрешить вывод» (Withdraw)\n"
+        "• Включите белый список IP\n"
+        "• Используйте отдельный подключ с малым балансом\n"
+        "• Сообщение с ключом будет удалено сразу после сохранения\n\n"
+        "Выберите биржу:",
+        kb, edit_msg=msg)
+
+def _exchange_instructions(exchange):
+    if exchange == "binance":
+        return (
+            "🟢 <b>Binance — как получить API-ключ</b>\n\n"
+            "1️⃣ Войдите на <b>binance.com</b> → Профиль → <b>API Management</b>\n"
+            "2️⃣ <b>Create API</b> → «System generated»\n"
+            "3️⃣ Пройдите верификацию (SMS / Google Authenticator)\n"
+            "4️⃣ В настройках ключа:\n"
+            "   • ✅ <b>Enable Futures</b>\n"
+            "   • ❌ <b>Enable Withdrawals — ВЫКЛЮЧИТЕ</b>\n"
+            "   • ✅ Restrict access to trusted IPs (IP сервера)\n"
+            "5️⃣ Скопируйте <b>API Key</b> и <b>Secret Key</b>\n\n"
+            "📩 Отправьте одним сообщением в формате:\n"
+            "<code>API_KEY,SECRET_KEY</code>\n\n"
+            "🛡 Сообщение с ключом будет удалено автоматически."
+        )
+    if exchange == "bybit":
+        return (
+            "🟡 <b>Bybit — как получить API-ключ</b>\n\n"
+            "1️⃣ Войдите на <b>bybit.com</b> → Профиль → <b>API</b>\n"
+            "2️⃣ <b>Create New Key</b> → «System-generated API Keys»\n"
+            "3️⃣ Тип: <b>Unified Trading</b> (Derivatives)\n"
+            "4️⃣ В правах:\n"
+            "   • ✅ <b>Read-Write → Contract Trading</b>\n"
+            "   • ❌ <b>Withdraw — ВЫКЛЮЧИТЕ</b>\n"
+            "   • ✅ Только ваш IP (IP-whitelist)\n"
+            "5️⃣ Скопируйте <b>API Key</b> и <b>Secret</b>\n\n"
+            "📩 Отправьте одним сообщением в формате:\n"
+            "<code>API_KEY,SECRET</code>\n\n"
+            "🛡 Сообщение с ключом будет удалено автоматически."
+        )
+    return (
+        "🔵 <b>BingX — как получить API-ключ</b>\n\n"
+        "1️⃣ Войдите на <b>bingx.com</b> → Профиль → <b>API Management</b>\n"
+        "2️⃣ <b>Create API</b> → <b>Perpetual Futures</b>\n"
+        "3️⃣ В правах:\n"
+        "   • ✅ <b>Read + Trade</b>\n"
+        "   • ❌ <b>Withdraw — ВЫКЛЮЧИТЕ</b>\n"
+        "4️⃣ Сохраните <b>API Key</b> и <b>Secret Key</b>\n\n"
+        "📩 Отправьте одним сообщением в формате:\n"
+        "<code>API_KEY,SECRET_KEY</code>\n\n"
+        "🛡 Сообщение с ключом будет удалено автоматически."
+    )
+
+
 async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
     kind = screen[0]
     if kind == "menu":
