@@ -2420,7 +2420,9 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "reasons": setup["reasons"], "patterns": setup["patterns"], "notes": setup["notes"], "squeeze": info["squeeze"],
         "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
         "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
-        "liq_x20": liq_x20,  # <-- Добавляем это поле
+        "liq_x20": liq_x20,
+        "fake_breakout": setup.get("fake_breakout", False),  # <-- Добавляем флаг
+    }
     }
     res["text"] = render_caption(res)
     return res
