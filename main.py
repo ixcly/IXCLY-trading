@@ -1179,13 +1179,27 @@ async def _fetch_klines(ex, coin, tf, limit=200):
         raise ValueError("Мало данных")
     return rows
 
+_exchange_bans = {}
+
 async def _try_exchange(ex, cand, tfs):
+    # Если биржа сейчас в бане, пропускаем её
+    if time.time() < _exchange_bans.get(ex["name"], 0):
+        return None
+        
     try: 
         results = await asyncio.wait_for(asyncio.gather(*[_fetch_klines(ex, cand, tf) for tf in tfs], return_exceptions=True), timeout=14)
     except Exception: 
         return None
+        
+    # Если биржа вернула ошибку 429 (Too Many Requests), ставим её в бан на 5 минут
+    if any(isinstance(r, Exception) and "429" in str(r) for r in results):
+        _exchange_bans[ex["name"]] = time.time() + 300 # Бан на 5 минут
+        log.warning(f"⚠️ Биржа {ex['name']} забанила IP. Пауза на 5 минут.")
+        return None
+        
     if any(isinstance(r, Exception) for r in results): 
         return None
+        
     return await asyncio.to_thread(build_tf_data, dict(zip(tfs, results))), ex["name"]
 
 async def get_market_data(coin, tfs=tuple(TFS)):
