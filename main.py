@@ -2930,11 +2930,13 @@ async def main():
     
     keep_alive() # Запускаем Flask (чтобы Render не спал)
 
-# Создаем сессию внутри работающего event loop
-    from aiohttp import TCPConnector
-    connector = TCPConnector(limit=100, ttl_dns_cache=300, force_close=False)
-    session = AiohttpSession(timeout=30.0, connector=connector)
+# Создаем сессию внутри работающего event loop (без connector)
+    session = AiohttpSession(timeout=30.0)
     bot.session = session
+    # Для админ-бота тоже обновляем сессию, если он есть
+    if admin_bot:
+        admin_session = AiohttpSession(timeout=30.0)
+        admin_bot.session = admin_session
     
     news_lock = asyncio.Lock()
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.0"})
