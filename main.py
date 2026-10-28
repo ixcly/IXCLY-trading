@@ -1165,11 +1165,27 @@ def _p_bybit(j):
 def _p_mexc(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j]
 
+def _p_kucoin(j):
+    return [[float(x[0]), float(x[1]), float(x[3]), float(x[4]), float(x[2]), float(x[5])] for x in reversed(j["data"])]
+
+def _p_gate(j):
+    return [[float(x[0]), float(x[5]), float(x[3]), float(x[4]), float(x[2]), float(x[6])] for x in j]
+
+def _p_bitget(j):
+    return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in reversed(j["data"])]
+
+def _p_htx(j):
+    return [[float(x["id"] * 1000), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]), float(x["amount"])] for x in reversed(j["data"])]
+
 EXCHANGES = [
     {"name": "BINANCE", "url": "https://data-api.binance.vision/api/v3/klines", "params": lambda c, tf, n: {"symbol": f"{c}USDT", "interval": tf, "limit": min(n, 1000)}, "parse": _p_binance},
     {"name": "BYBIT", "url": "https://api.bybit.com/v5/market/kline", "params": lambda c, tf, n: {"category": "spot", "symbol": f"{c}USDT", "interval": {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}[tf], "limit": min(n, 1000)}, "parse": _p_bybit},
     {"name": "OKX", "url": "https://www.okx.com/api/v5/market/candles", "params": lambda c, tf, n: {"instId": f"{c}-USDT", "bar": {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}[tf], "limit": str(min(n, 300))}, "parse": _p_okx},
     {"name": "MEXC", "url": "https://api.mexc.com/api/v3/klines", "params": lambda c, tf, n: {"symbol": f"{c}USDT", "interval": {"15m": "15m", "1h": "60m", "4h": "4h", "1d": "1d"}[tf], "limit": min(n, 1000)}, "parse": _p_mexc},
+    {"name": "KUCOIN", "url": "https://api.kucoin.com/api/v1/market/candles", "params": lambda c, tf, n: {"type": {"15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day"}[tf], "symbol": f"{c}-USDT"}, "parse": _p_kucoin},
+    {"name": "GATE", "url": "https://api.gateio.ws/api/v4/spot/candlesticks", "params": lambda c, tf, n: {"currency_pair": f"{c}_USDT", "interval": {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}[tf]}, "parse": _p_gate},
+    {"name": "BITGET", "url": "https://api.bitget.com/api/v2/spot/market/candles", "params": lambda c, tf, n: {"symbol": f"{c}USDT", "granularity": {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}[tf], "limit": min(n, 1000)}, "parse": _p_bitget},
+    {"name": "HTX", "url": "https://api.huobi.pro/market/history/kline", "params": lambda c, tf, n: {"symbol": f"{c.lower()}usdt", "period": {"15m": "15min", "1h": "60min", "4h": "4hour", "1d": "1day"}[tf], "size": min(n, 2000)}, "parse": _p_htx},
 ]
 
 async def _fetch_klines(ex, coin, tf, limit=200):
