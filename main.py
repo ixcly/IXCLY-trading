@@ -2305,10 +2305,16 @@ async def analyze_coin(coin, user_id=None, force=False):
 
 
 async def send_analysis(chat_id, res, uid):
-    """Отправляет готовый анализ в чат."""
-    kb = result_keyboard(res["coin"])
+    # Если это "пустышка" без данных, показываем кнопку "Обновить" и "Меню"
+    if res.get("type") == "Нет данных":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"r:{res['coin']}")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+        ])
+    else:
+        kb = result_keyboard(res["coin"])
+        
     text = res["text"]
-    
     if res["img"]:
         photo = BufferedInputFile(res["img"], f"{res['coin']}.png")
         if len(text) <= 1024:
