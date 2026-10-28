@@ -35,6 +35,8 @@ import aiohttp
 import feedparser
 import numpy as np
 import pandas as pd
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import (
