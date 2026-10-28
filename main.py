@@ -2084,6 +2084,139 @@ async def execute_auto_trade(user_id, coin, is_long, entry, sl, tp):
         log.error(f"Ошибка автоторговли: {e}")
         return False
 
+async def global_signal_monitor_loop():
+    """Следит за авто-сигналами: трейлинг-стоп, DCA, фиксация TP/SL."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            hist = _load_signal_history()
+            updated_hist = False
+            now = time.time()
+            prices_cache = {}
+            
+            for x in hist:
+                if x.get("status") in ("active", "in_trade"):
+                    coin = x["coin"]
+                    if coin not in prices_cache:
+                        prices_cache[coin] = await get_simple_price(coin)
+                        await asyncio.sleep(0.1)
+                    price = prices_cache[coin]
+                    if not price: continue
+
+                    is_long = x["side"] == "LONG"
+                    entry = x.get("entry", 0)
+                    tp1, tp2, tp3 = x.get("tp1", 0), x.get("tp2", 0), x.get("tp3", 0)
+                    sl1, sl2 = x.get("sl1", 0), x.get("sl2", 0)
+                    atr = x.get("atr", price * 0.01)
+
+                    # 1. ЖДЕМ ВХОДА
+                    if x["status"] == "active":
+                        filled = (price <= entry) if is_long else (price >= entry)
+                        passed_tp1 = (price >= tp1) if is_long else (price <= tp1)
+                        
+                        if filled:
+                            x["status"] = "in_trade"
+                            updated_hist = True
+                            asyncio.create_task(send_webhook(x.get("uid"), {"event": "entry_filled", "coin": coin, "price": price}))
+                        elif passed_tp1:
+                            try:
+                                tf_data, _ = await get_market_data(coin, ("1h",))
+                                trend_ok = (tf_data["1h"]["adx"] > 20) and (tf_data["1h"]["rsi"] < 70)
+                                if trend_ok:
+                                    new_entry = tf_data["1h"]["ema20"]
+                                    x["entry"] = new_entry
+                                    x["expire_ts"] = time.time() + 12 * 3600
+                                    updated_hist = True
+                                else:
+                                    x["status"] = "missed"
+                                    updated_hist = True
+                            except Exception:
+                                x["status"] = "missed"
+                                updated_hist = True
+                        elif now > x.get("expire_ts", 0):
+                            x["status"] = "expired"
+                            updated_hist = True
+                        continue
+
+                    # 2. МЫ В СДЕЛКЕ (Трейлинг, Тейки, Стопы, DCA)
+                    if x["status"] == "in_trade":
+                        max_tp = x.get("max_tp_hit", 0)
+                        
+                        if is_long:
+                            if price >= tp3: max_tp = 3
+                            elif price >= tp2 and max_tp < 2: max_tp = 2
+                            elif price >= tp1 and max_tp < 1: max_tp = 1
+                        else:
+                            if price <= tp3: max_tp = 3
+                            elif price <= tp2 and max_tp < 2: max_tp = 2
+                            elif price <= tp1 and max_tp < 1: max_tp = 1
+                            
+                        if max_tp > x.get("max_tp_hit", 0):
+                            x["max_tp_hit"] = max_tp
+                            updated_hist = True
+                            asyncio.create_task(send_webhook(x.get("uid"), {"event": f"tp{max_tp}_hit", "coin": coin, "price": price}))
+                            
+                            if max_tp == 1: x["sl1"] = entry
+                            elif max_tp >= 2: x["sl1"] = tp1
+
+                        # DCA (Усреднение)
+                        if not x.get("dca_done"):
+                            adverse_move = (entry - price) if is_long else (price - entry)
+                            if adverse_move > 1.5 * atr:
+                                try:
+                                    tf_data, _ = await get_market_data(coin, ("4h",))
+                                    trend_ok = (tf_data["4h"]["long_prob"] > 55) if is_long else (tf_data["4h"]["long_prob"] < 45)
+                                    if trend_ok:
+                                        x["dca_done"] = True
+                                        x["entry"] = price
+                                        x["sl1"] = price - 2 * atr if is_long else price + 2 * atr
+                                        updated_hist = True
+                                        asyncio.create_task(send_webhook(x.get("uid"), {"event": "dca_executed", "coin": coin, "new_entry": price}))
+                                except Exception:
+                                    pass
+
+                        hit_sl = 0
+                        if is_long:
+                            if price <= sl2: hit_sl = 2
+                            elif price <= sl1: hit_sl = 1
+                        else:
+                            if price >= sl2: hit_sl = 2
+                            elif price >= sl1: hit_sl = 1
+
+                        if hit_sl > 0:
+                            x["hit_sl"] = hit_sl
+                            x["status"] = "win" if max_tp >= 1 else "loss"
+                            updated_hist = True
+                            asyncio.create_task(send_webhook(x.get("uid"), {"event": "sl_hit", "coin": coin, "price": price}))
+
+            if updated_hist:
+                _save_signal_history(hist)
+            
+            # Синхронизация с биржей для юзеров
+            users = _load_users()
+            users_updated = False
+            for uid_str, u in users.items():
+                saved = u.get("saved_signals", [])
+                user_changed = False
+                for s in saved:
+                    if s.get("status") == "active":
+                        filled = (price <= s["entry"]) if s.get("is_long") else (price >= s["entry"])
+                        if filled:
+                            s["status"] = "in_trade"
+                            user_changed = True
+                            if u.get("auto_trade_enabled"):
+                                await execute_auto_trade(int(uid_str), s["coin"], s.get("is_long"), s["entry"], s.get("sl1"), s.get("tp1"))
+                if user_changed:
+                    users[uid_str]["saved_signals"] = saved
+                    users_updated = True
+            if users_updated:
+                _save_users(users)
+
+        except Exception as e:
+            log.error(f"global_signal_monitor: {e}")
+        next_timers["global_signals"] = time.time() + 300
+        await asyncio.sleep(300)
+
 async def scanner_loop():
     """Фоновая задача, которая запускает поиск сигналов по расписанию."""
     await asyncio.sleep(60)
