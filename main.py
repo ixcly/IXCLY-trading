@@ -3095,7 +3095,8 @@ async def screen_news(chat_id, uid, edit_msg):
     except Exception as e:
         log.error(f"Новости: {e}")
         text = "📭 Не удалось загрузить новости (ошибка сети или API)."
-    await present(chat_id, text, kb_nav(), edit_msg=edit_msg)
+    kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]])
+    await present(chat_id, text, kb, edit_msg=edit_msg)
 
 
 async def screen_interesting(chat_id, uid, edit_msg):
