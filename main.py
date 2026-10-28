@@ -1479,7 +1479,7 @@ def pattern_lines(tf_data):
             for tf in ("1d", "4h", "1h") if tf in tf_data and tf_data[tf]["patterns"]]
 
 
-def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0):
+def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
     """Итоговая оценка: мульти-ТФ + фильтры (BTC, F&G, funding, on-chain, новости). valid=True только если прошли гейты."""
     out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрок",
            "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": []}
@@ -1554,8 +1554,8 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
             news_status = f"❌ Противоречат ({word} фон)"
 
     strength = max(0.0, min(100.0, strength))
-    if not reject and strength < CONF_FINAL:
-        reject = f"Уверенность {strength:.0f}% ниже порога {CONF_FINAL:.0f}%"
+    if not reject and strength < conf_threshold:
+        reject = f"Уверенность {strength:.0f}% ниже порога {conf_threshold:.0f}%"
 
     p15, p1h = tf_data.get("15m", {}).get("long_prob", 50), tf_data.get("1h", {}).get("long_prob", 50)
     fast = "15m" in tf_data and "1h" in tf_data and cs(p15) >= 58 and cs(p1h) >= 56
