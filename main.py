@@ -2172,6 +2172,49 @@ async def execute_auto_trade(user_id, coin, is_long, entry, sl, tp):
         log.error(f"Ошибка автоторговли: {e}")
         return False
 
+async def broadcast(payload, only_ids=None):
+    """Функция для рассылки сообщений всем пользователям."""
+    targets = list(only_ids) if only_ids else list(active_chats)
+    sent = failed = 0
+    dead = []
+    
+    for cid in targets:
+        for _ in range(2):
+            try:
+                if payload.get("kind") == "photo" and payload.get("data"):
+                    photo = BufferedInputFile(payload["data"], filename="image.png")
+                    text = payload.get("text", "")
+                    if len(text) <= 1024:
+                        msg = await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
+                        track_msg(cid, msg)
+                    else:
+                        msg_photo = await bot.send_photo(cid, photo)
+                        track_msg(cid, msg_photo)
+                        msg = await bot.send_message(cid, text[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
+                        track_msg(cid, msg)
+                else:
+                    msg = await bot.send_message(cid, payload.get("text", "")[:4000], parse_mode="HTML", reply_markup=payload.get("markup"), disable_web_page_preview=True)
+                    track_msg(cid, msg)
+                sent += 1
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except (TelegramForbiddenError, TelegramNotFound):
+                dead.append(cid)
+                break
+            except Exception:
+                failed += 1
+                break
+        await asyncio.sleep(0.04) # Защита от спама
+        
+    if dead:
+        for cid in dead:
+            active_chats.discard(cid)
+        await asyncio.to_thread(mark_users_inactive, dead)
+        
+    stats["broadcasts"] += 1
+    return sent, failed, len(dead), []
+
 async def global_signal_monitor_loop():
     """Следит за авто-сигналами: трейлинг-стоп, DCA, фиксация TP/SL."""
     await asyncio.sleep(120)
