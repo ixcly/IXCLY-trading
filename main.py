@@ -2347,6 +2347,12 @@ async def anomaly_scanner_loop():
 # =====================================================================
 # ПОЛНЫЙ СКАНЕР (3 ЭТАПА)
 # =====================================================================
+
+SCAN_INTERVAL = 5 * 60
+SIGNAL_COOLDOWN = 3 * 3600
+signal_sent_at = {}
+scan_skip = {}
+
 async def scan_once(send=True):
     """Главный сканер. Ищет монеты, прогоняет через все фильтры и рассылает."""
     global last_signals_data, current_signals_db, last_scan_info
@@ -2378,7 +2384,7 @@ async def scan_once(send=True):
                 try: 
                     tf2, _ = await get_market_data_light(coin, ("4h", "1d"))
                 except LookupError: 
-                    scan_skip[coin] = time.time() + 6 * 3600 # Пропускаем на 6 часов, если нет на бирже
+                    scan_skip[coin] = time.time() + 6 * 100 # Пропускаем на 6 часов, если нет на бирже
                     return
                 except Exception: 
                     return
