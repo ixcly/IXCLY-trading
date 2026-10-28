@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading bot v2.11.1 - многослойный движок сигналов (Полный код)
+IXCLY Trading bot v2.11.3 - исправлен дубляж рассылки сигналов
 """
 
 import asyncio
@@ -131,7 +131,7 @@ if ADMIN_ID:
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан")
 
-VERSION = "2.11.1"
+VERSION = "2.11.3"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
@@ -228,9 +228,6 @@ SYMBOL_ALIASES = {
     "CHEEMS": ["1000CHEEMS", "CHEEMS"],
 }
 
-USERS_FILE = "users.json"
-SIGNAL_HISTORY_FILE = "signal_history.json"
-
 active_chats = set()
 busy_users = set()
 result_cache = {}
@@ -258,7 +255,58 @@ users_col = None
 def init_mongo():
     global users_col
     users_col = None
-    log.warning("⚠ MongoDB отключена. Пользователи хранятся в users.json (бэкап в админ-бот)")
+    log.warning("⚠ MongoDB отключена. Пользователи и стейт хранятся в bot_state.json (бэкап в админ-бот)")
+
+
+# ====================== ПОЛНЫЙ СТЕЙТ И БАЗА ДАННЫХ ======================
+STATE_FILE = "bot_state.json"
+
+def _load_full_state():
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        log.error(f"Ошибка загрузки state: {e}")
+    return {}
+
+def _save_full_state(state):
+    global users_dirty
+    try:
+        with open(STATE_FILE + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(STATE_FILE + ".tmp", STATE_FILE)
+        users_dirty = True
+    except Exception as e:
+        log.error(f"Ошибка записи state.json: {e}")
+
+def _load_users():
+    data = _load_full_state()
+    return data.get("users", {})
+
+def _save_users(users):
+    state = _load_full_state()
+    state["users"] = users
+    _save_full_state(state)
+
+def _load_signal_history():
+    data = _load_full_state()
+    hist = data.get("signal_history", [])
+    return [x for x in hist if time.time() - x.get("ts", 0) < 30 * 86400]
+
+def _save_signal_history(hist):
+    state = _load_full_state()
+    state["signal_history"] = hist[-2000:]
+    _save_full_state(state)
+
+def _load_current_signals_db():
+    data = _load_full_state()
+    return data.get("current_signals_db", {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []})
+
+def _save_current_signals_db(db):
+    state = _load_full_state()
+    state["current_signals_db"] = db
+    _save_full_state(state)
 
 
 # ====================== ОЧИСТКА ИСТОРИИ ======================
@@ -291,25 +339,6 @@ async def cleanup_loop():
 
 
 # ====================== ПОЛЬЗОВАТЕЛИ ======================
-def _load_users():
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_users(users):
-    global users_dirty
-    try:
-        with open(USERS_FILE + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-        os.replace(USERS_FILE + ".tmp", USERS_FILE)
-        users_dirty = True
-    except Exception as e:
-        log.error(f"Ошибка записи users.json: {e}")
-
-
 def save_user_data(user_id, username, first_name):
     key = str(user_id)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -397,37 +426,24 @@ def user_counts():
     return total, active, 0, 0
 
 
-def _load_signal_history():
-    try:
-        with open(SIGNAL_HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return [x for x in data if time.time() - x.get("ts", 0) < 30 * 86400]
-    except Exception:
-        return []
-
-
-def _save_signal_history(data):
-    try:
-        with open(SIGNAL_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(data[-2000:], f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-# ====================== БЭКАП БАЗЫ ======================
+# ====================== БЭКАП ПОЛНОГО СТЕЙТА ======================
 async def telegram_backup(reason="auto"):
     if not admin_bot or not ADMIN_IDS:
         return False
-    users = _load_users()
-    if not users:
+    state = _load_full_state()
+    if not state:
         return False
-    data = json.dumps(users, ensure_ascii=False).encode("utf-8")
+    
+    users_count = len(state.get("users", {}))
+    signals_count = len(state.get("signal_history", []))
+    
+    data = json.dumps(state, ensure_ascii=False).encode("utf-8")
     ok = False
     for aid in ADMIN_IDS:
         try:
             msg = await admin_bot.send_document(
-                aid, BufferedInputFile(data, "users.json"),
-                caption=f"💾 Бэкап базы · {len(users)} польз. · {reason} · {datetime.now().strftime('%d.%m %H:%M')}",
+                aid, BufferedInputFile(data, "bot_state.json"),
+                caption=f"💾 ПОЛНЫЙ БЭКАП БОТА · Пользователей: {users_count} · Сигналов в истории: {signals_count} · Причина: {reason} · {datetime.now().strftime('%d.%m %H:%M')}",
                 disable_notification=True)
             try:
                 await admin_bot.unpin_all_chat_messages(aid)
@@ -443,11 +459,12 @@ async def telegram_backup(reason="auto"):
             last_backup_msg[aid] = msg.message_id
             ok = True
         except Exception as e:
-            log.warning(f"Бэкап админу {aid} не отправлен: {e}")
+            log.warning(f"Полный бэкап админу {aid} не отправлен: {e}")
     return ok
 
 
 async def telegram_restore():
+    global current_signals_db
     if not admin_bot or not ADMIN_IDS:
         return 0
     for aid in ADMIN_IDS:
@@ -460,30 +477,21 @@ async def telegram_restore():
             f = await admin_bot.get_file(doc.file_id)
             buf = await admin_bot.download_file(f.file_path)
             data = json.loads(buf.read().decode("utf-8"))
+            
             if isinstance(data, dict) and data:
-                current = _load_users()
-                for k, v in data.items():
-                    if k not in current:
-                        current[k] = v
-                    else:
-                        for field in ["open_positions", "saved_signals"]:
-                            if field in v:
-                                if field not in current[k]:
-                                    current[k][field] = v[field]
-                                elif isinstance(v[field], dict) and isinstance(current[k][field], dict):
-                                    for sub_k, sub_v in v[field].items():
-                                        if sub_k not in current[k][field]:
-                                            current[k][field][sub_k] = sub_v
-                                elif isinstance(v[field], list) and isinstance(current[k][field], list):
-                                    existing = {item.get("coin") for item in current[k][field] if isinstance(item, dict)}
-                                    for item in v[field]:
-                                        if isinstance(item, dict) and item.get("coin") not in existing:
-                                            current[k][field].append(item)
-                _save_users(current)
+                with open(STATE_FILE, "w", encoding="utf-8") as out_f:
+                    json.dump(data, out_f, ensure_ascii=False, indent=2)
+                
+                if "current_signals_db" in data:
+                    current_signals_db = data["current_signals_db"]
+                
                 last_backup_msg[aid] = pm.message_id
-                return len(data)
+                users_len = len(data.get("users", {}))
+                hist_len = len(data.get("signal_history", []))
+                log.info(f"✅ Успешно восстановлено из бэкапа: пользователей: {users_len}, история сигналов: {hist_len}")
+                return users_len
         except Exception as e:
-            log.warning(f"Восстановление не удалось: {e}")
+            log.warning(f"Восстановление полного стейта не удалось: {e}")
     return 0
 
 
@@ -1289,7 +1297,7 @@ async def get_simple_price(coin):
             return None
 
 
-# ====================== КОНТЕКСТ РЫНКА (BTC, Fear&Greed, funding) ======================
+# ====================== КОНТЕКСТ РЫНКА ======================
 _ctx_cache = {"ts": 0, "data": {}}
 _funding_cache = {}
 
@@ -1502,7 +1510,6 @@ def calc_levels_and_risk(info, is_long, sig_type="Среднесрок"):
     risk_amount = DEPOSIT * RISK_PCT
     pos_usdt = (risk_amount / risk) * entry if risk > 0 else 0.0
     
-    # Рекомендуемое плечо в зависимости от типа сигнала и волатильности
     if sig_type == "Быстрый сигнал":
         leverage = "x15-x25"
     elif sig_type == "Долгосрок":
@@ -1600,9 +1607,7 @@ def bt_ok(bt):
     return bool(bt) and bt["trades"] >= BT_MIN_TRADES and bt["avg_r"] >= BT_MIN_AVG_R and bt["winrate"] >= BT_MIN_WINRATE
 
 
-# =====================================================================
-#                              ИИ
-# =====================================================================
+# ====================== ИИ ======================
 def _looks_like_junk(text):
     t = (text or "").strip()
     low = t.lower()
@@ -1760,9 +1765,7 @@ async def ai_analyst(coin, setup, bt, ctx, entry, tps, sls, tf_data):
     return res
 
 
-# =====================================================================
-#                             НОВОСТИ
-# =====================================================================
+# ====================== НОВОСТИ ======================
 BULL_STEMS = ("surg", "soar", "rall", "approv", "adopt", "inflow", "bullish", "gain", "jump", "partner", "upgrad", "breakout", "rebound", "recover", "accumul")
 BEAR_STEMS = ("hack", "exploit", "crash", "plung", "lawsuit", "sues", "outflow", "bearish", "drop", "fall", "liquidat", "fraud", "scam", "delist", "arrest", "dump", "selloff", "declin", "probe", "investigat", "collaps", "bankrupt", "fear", "slump", "tumbl", "recession", "tariff")
 COIN_WORDS = {"bitcoin": "BTC", "btc": "BTC", "ethereum": "ETH", "eth": "ETH", "solana": "SOL", "sol": "SOL", "xrp": "XRP", "bnb": "BNB", "doge": "DOGE", "ada": "ADA", "ton": "TON", "avax": "AVAX", "link": "LINK", "zcash": "ZEC", "zec": "ZEC"}
@@ -1808,9 +1811,7 @@ async def translate_text(text, target="ru"):
 
 
 NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
-WORLD_FEEDS = ["https://feeds.bbci.co.uk/news/business/rss.xml"]
 _news_cache = {"ts": 0, "entries": []}
-_world_cache = {"ts": 0, "titles": []}
 
 
 async def _load_feed(url):
@@ -1971,9 +1972,7 @@ async def news_watcher_loop():
         await asyncio.sleep(600)
 
 
-# =====================================================================
-#                    ГРАФИК (свечи + EMA + объём + уровни)
-# =====================================================================
+# ====================== ГРАФИК ======================
 def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
     info = tf_data[main_tf]
     df = info["df"].tail(60).reset_index(drop=True)
@@ -2051,7 +2050,7 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
 
 
 # =====================================================================
-#                  СБОРКА АНАЛИЗА (общая для сканера и ручного режима)
+#                  СБОРКА АНАЛИЗА
 # =====================================================================
 def local_verdict(setup, bt):
     if not setup["valid"]:
@@ -2172,11 +2171,9 @@ async def send_analysis(chat_id, res, uid):
     if res["img"]:
         photo = BufferedInputFile(res["img"], f"{res['coin']}.png")
         if len(text) <= 1024:
-            # Отправка фото с текстом В ОДНОМ СООБЩЕНИИ (caption)
             msg = await bot.send_photo(chat_id, photo, caption=text, parse_mode="HTML", reply_markup=kb)
             track_msg(uid, msg)
         else:
-            # Если текст длиннее 1024 символов, лимит Telegram превышен, отправляем фото без подписи и текст отдельно
             m1 = await bot.send_photo(chat_id, photo)
             track_msg(uid, m1)
             msg = await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
@@ -2186,9 +2183,7 @@ async def send_analysis(chat_id, res, uid):
         track_msg(uid, msg)
 
 
-# =====================================================================
-#                              СКАНЕР
-# =====================================================================
+# ====================== СКАНЕР ======================
 SCAN_INTERVAL = 25 * 60
 SIGNAL_COOLDOWN = 3 * 3600
 signal_sent_at = {}
@@ -2275,55 +2270,39 @@ async def scan_once(send=True):
                                   "side": r["side"], "text": r["text"]})
     for k in new_db:
         new_db[k] = new_db[k][:10]
+    
     current_signals_db = new_db
+    _save_current_signals_db(new_db)
 
     last_scan_info = {"ts": int(time.time()), "stage1": len(stage1), "stage2": len(stage2),
                       "backtest_ok": bt_pass, "final": len(final), "secs": int(time.time() - t0)}
     log.info(f"Сканер: этап1 {len(stage1)} → этап2 {len(stage2)} → бэктест {bt_pass} → итог {len(final)} за {last_scan_info['secs']} с")
 
-    to_broadcast = []
-    if send:
-        now = time.time()
-        for r in final:
-            key = f"{r['coin']}:{'L' if r['is_long'] else 'S'}"
-            if now - signal_sent_at.get(key, 0) >= SIGNAL_COOLDOWN:
-                to_broadcast.append(r)
-        to_broadcast = to_broadcast[:4]
-
-    if to_broadcast and send:
+    # Теперь сканер отправляет ТОЛЬКО единое меню/обзор категорий с актуальными сигналами, избегая дублирования
+    if send and active_chats:
         now = time.time()
         hist = _load_signal_history()
         
-        for r in to_broadcast:
-            signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
-            hist.append({
-                "ts": now, 
-                "coin": r["coin"], 
-                "side": r["side"], 
-                "type": r["type"], 
-                "strength": r["strength"], 
-                "text": r["text"],
-                "entry": r["entry"],
-                "tp1": r["tps"][0],
-                "sl1": r["sls"][0],
-                "status": "active"
-            })
-            
-            kb = result_keyboard(r["coin"])
-            payload = {
-                "kind": "photo" if r["img"] else "text",
-                "text": r["text"],
-                "data": r["img"],
-                "markup": kb
-            }
-            await broadcast(payload)
-            await asyncio.sleep(1.5)
-            
+        for r in final:
+            key = f"{r['coin']}:{'L' if r['is_long'] else 'S'}"
+            if now - signal_sent_at.get(key, 0) >= SIGNAL_COOLDOWN:
+                signal_sent_at[key] = now
+                hist.append({
+                    "ts": now, 
+                    "coin": r["coin"], 
+                    "side": r["side"], 
+                    "type": r["type"], 
+                    "strength": r["strength"], 
+                    "text": r["text"],
+                    "entry": r["entry"],
+                    "tp1": r["tps"][0],
+                    "sl1": r["sls"][0],
+                    "status": "active"
+                })
         _save_signal_history(hist)
-        stats["signals"] += len(to_broadcast)
 
         msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
-        text = f"🔥 <b>Сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
+        text = f"🔥 <b>Актуальные сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
         kb = [
             [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
             [InlineKeyboardButton(text=f"⏳ Среднесрок ({len(current_signals_db['Среднесрок'])})", callback_data="sig_list:Среднесрок")],
@@ -2333,7 +2312,10 @@ async def scan_once(send=True):
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
 
-    return to_broadcast
+        sent, _, _, _ = await broadcast({"kind": "text", "text": text, "markup": markup})
+        stats["signals"] += sent
+
+    return final
 
 
 async def scanner_loop():
@@ -2396,7 +2378,6 @@ async def broadcast(payload, only_ids=None):
                     photo = BufferedInputFile(payload["data"], filename="image.png")
                     text = payload.get("text", "")
                     if len(text) <= 1024:
-                        # Отправка рассылки: фото + подпись в одном сообщении
                         msg = await bot.send_photo(cid, photo, caption=text, parse_mode="HTML", reply_markup=payload.get("markup"))
                         track_msg(cid, msg)
                     else:
@@ -2927,7 +2908,7 @@ if admin_dp:
                 lines = [f"{'🟢' if s['is_long'] else '🔴'} {s['coin']} · {s['type']} · Conf {s['strength']}%" for s in sigs]
                 await cb.message.answer(f"🔍 Тест сканера\n{head}\n\n" + "\n".join(lines))
             else:
-                await cb.message.answer(f"🔍 Тест сканера: сигналов нет\n{head}\n\nЭто нормально: пороги строгие (CONF_FINAL={CONF_FINAL:.0f}, бэктест).")
+                await cb.message.answer(f"🔍 Тест сканера: сигналов нет\n{head}\n\nЭто нормально: пороги строгие.")
         elif act == "broadcast_now":
             if last_signals_data.get("text"):
                 sent, _, _, _ = await broadcast({"kind": "text", "text": last_signals_data["text"], "markup": last_signals_data.get("kb")})
@@ -2941,9 +2922,9 @@ if admin_dp:
             await cb.message.answer(text, parse_mode="HTML")
         elif act == "backup":
             ok = await telegram_backup("вручную")
-            await cb.message.answer("💾 Бэкап отправлен." if ok else "База пуста.")
+            await cb.message.answer("💾 Полный бэкап отправлен в админку." if ok else "Состояние пусто.")
         elif act == "restore":
-            await cb.message.answer("Пришли файл users.json.")
+            await cb.message.answer("Пришли файл bot_state.json или users.json.")
         elif act == "timers":
             now = time.time()
 
@@ -2963,21 +2944,27 @@ if admin_dp:
 
     @admin_dp.message(F.document)
     async def admin_on_document(m: types.Message):
+        global current_signals_db
         if m.from_user.id not in ADMIN_IDS or not (m.document.file_name or "").endswith(".json"):
             return
         try:
             f = await admin_bot.get_file(m.document.file_id)
             content = await admin_bot.download_file(f.file_path)
             data = json.loads(content.read().decode("utf-8"))
-            current = _load_users()
-            added = 0
-            for k, v in data.items():
-                if k not in current and isinstance(v, dict):
-                    current[k] = v
-                    added += 1
-            _save_users(current)
-            load_active_chats()
-            await m.answer(f"✅ Восстановлено: +{added}, всего {len(current)}.")
+            
+            if isinstance(data, dict):
+                if "users" in data or "signal_history" in data:
+                    with open(STATE_FILE, "w", encoding="utf-8") as out_f:
+                        json.dump(data, out_f, ensure_ascii=False, indent=2)
+                    if "current_signals_db" in data:
+                        current_signals_db = data["current_signals_db"]
+                else:
+                    current_state = _load_full_state()
+                    current_state["users"] = data
+                    _save_full_state(current_state)
+
+                load_active_chats()
+                await m.answer(f"✅ Полное состояние успешно восстановлено!")
         except Exception as e:
             await m.answer(f"Ошибка: {html.escape(str(e))}", parse_mode="HTML")
 
@@ -3011,7 +2998,7 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
 
 
 async def main():
-    global http, news_lock
+    global http, news_lock, current_signals_db
     keep_alive()
     news_lock = asyncio.Lock()
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/2.11"})
@@ -3060,7 +3047,9 @@ async def main():
 
         restored = await telegram_restore()
         if restored:
-            log.info(f"✅ База восстановлена: {restored}")
+            log.info(f"✅ Состояние полностью восстановлено, юзеров: {restored}")
+        
+        current_signals_db = _load_current_signals_db()
         load_active_chats()
 
         background += [
