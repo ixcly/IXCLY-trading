@@ -2348,23 +2348,22 @@ async def anomaly_scanner_loop():
 # ПОЛНЫЙ СКАНЕР (3 ЭТАПА)
 # =====================================================================
 
-SCAN_INTERVAL = 12 * 60
+SCAN_INTERVAL = 20 * 60
 SIGNAL_COOLDOWN = 5 * 3600
 signal_sent_at = {}
 scan_skip = {}
 
 async def scan_once(send=True):
-    """Главный сканер. Ищет монеты, прогоняет через все фильтры и рассылает."""
     global last_signals_data, current_signals_db, last_scan_info
+    
     if SCAN_LOCK.locked(): 
         return []
     
     async with SCAN_LOCK:
         t0 = time.time()
         
-        # Проверка на экономический календарь
-        if time.time() < news_blackout_until:
-            log.info("Сканирование на паузе из-за экономического календаря.")
+        if time.time() < news_blackout_until: 
+            log.info("Сканирование на паузе из-за новостей.")
             return []
 
         if time.time() - market_bias["ts"] > 900: 
@@ -2373,9 +2372,9 @@ async def scan_once(send=True):
         ctx = await get_context(force=True)
         onchain_change = await get_onchain_context()
         bias_text = market_bias.get("impact", "Нейтральный фон")
-        sem = asyncio.Semaphore(3) # Ограничиваем одновременные запросы к биржам
+        sem = asyncio.Semaphore(2) 
         
-        # --- ЭТАП 1: Быстрый отбор по 4h и 1d ---
+        # ЭТАП 1: Быстрый отбор
         stage1 = []
         async def s1(coin):
             if time.time() < scan_skip.get(coin, 0): 
@@ -2383,8 +2382,9 @@ async def scan_once(send=True):
             async with sem:
                 try: 
                     tf2, _ = await get_market_data_light(coin, ("4h", "1d"))
+                    await asyncio.sleep(0.2) 
                 except LookupError: 
-                    scan_skip[coin] = time.time() + 6 * 100 # Пропускаем на 6 часов, если нет на бирже
+                    scan_skip[coin] = time.time() + 6 * 3600
                     return
                 except Exception: 
                     return
@@ -2394,9 +2394,9 @@ async def scan_once(send=True):
                     
         await asyncio.gather(*[s1(c) for c in POPULAR_COINS])
         stage1.sort(key=lambda x: x[2], reverse=True)
-        stage1 = stage1[:18] # Берем топ-18
+        stage1 = stage1[:18]
         
-        # --- ЭТАП 2: Полный анализ мульти-ТФ ---
+        # ЭТАП 2: Полный анализ
         stage2 = []
         async def s2(item):
             coin, tf2, _ = item
@@ -2405,6 +2405,7 @@ async def scan_once(send=True):
                 try: 
                     extra, _src = await get_market_data_light(coin, ("1h", "15m"))
                     tf_data.update(extra)
+                    await asyncio.sleep(0.2)
                 except Exception: 
                     pass
                 funding = await get_funding(coin)
@@ -2416,7 +2417,7 @@ async def scan_once(send=True):
         stage2.sort(key=lambda x: x[2]["strength"], reverse=True)
         stage2 = stage2[:8]
         
-        # --- ЭТАП 3: Бэктест и ИИ ---
+        # ЭТАП 3: Бэктест и ИИ
         final = []
         bt_pass = 0
         sem3 = asyncio.Semaphore(2)
@@ -2431,7 +2432,7 @@ async def scan_once(send=True):
                 bt_pass += 1
                 try: 
                     res = await build_analysis(coin, tf_data, setup, bt, ctx, "scan")
-                except Exception as e: 
+                except Exception: 
                     return
                 if res["verdict"] == "ENTER": 
                     final.append(res)
@@ -2439,7 +2440,7 @@ async def scan_once(send=True):
         await asyncio.gather(*[s3(i) for i in stage2])
         final.sort(key=lambda r: r["strength"], reverse=True)
         
-        # Обновляем БД текущих сигналов
+        # Сохранение в БД
         new_db = {"Быстрый сигнал": [], "Среднесрок": [], "Долгосрок": []}
         for r in final: 
             new_db[r["type"]].append({"coin": r["coin"], "is_long": r["is_long"], "strength": r["strength"], "type": r["type"], "side": r["side"], "text": r["text"]})
@@ -2450,11 +2451,10 @@ async def scan_once(send=True):
         
         last_scan_info = {"ts": int(time.time()), "stage1": len(stage1), "stage2": len(stage2), "backtest_ok": bt_pass, "final": len(final), "secs": int(time.time() - t0)}
         
-        # --- РАССЫЛКА ---
+        # Рассылка
         if send and active_chats:
             now = time.time()
             hist = _load_signal_history()
-            # Защита от дублей: не отправляем, если по монете уже есть активный сигнал
             active_coins = {f"{x['coin']}:{x['side']}" for x in hist if x.get("status") in ("active", "in_trade")}
             
             for r in final:
@@ -2462,14 +2462,12 @@ async def scan_once(send=True):
                 if key in active_coins: 
                     continue
                 
-                # Проверка портфельного риска и отправка вебхуков
                 for uid in list(active_chats):
                     port_risk = calculate_portfolio_risk(uid)
                     if port_risk + 1.0 > get_user_risk_settings(uid)["max_open_risk"]: 
                         continue
                     asyncio.create_task(send_webhook(uid, {"event": "new_signal", "coin": r["coin"], "side": r["side"], "entry": r["entry"]}))
                 
-                # Запись в историю
                 hist.append({
                     "ts": now, "expire_ts": now + 48 * 3600, "coin": r["coin"], "side": r["side"], "type": r["type"], 
                     "strength": r["strength"], "text": r["text"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1], 
@@ -2477,7 +2475,6 @@ async def scan_once(send=True):
                 })
             _save_signal_history(hist)
             
-            # Отправка сообщения со списком
             msk_now = datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
             text = f"🔥 <b>Актуальные сигналы</b> · {msk_now} МСК\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(bias_text)}\n\nВыберите категорию:"
             kb = [
