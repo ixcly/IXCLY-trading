@@ -3383,7 +3383,8 @@ async def process_api_key(m: types.Message, state: FSMContext):
         await present(m.chat.id, "❌ Шифрование недоступно, ключи не сохранены.\n\n" + text, kb)
 
 @dp.message(Command("start", "menu"))
-async def cmd_start(m: types.Message):
+async def cmd_start(m: types.Message, state: FSMContext):
+    await state.clear()
     uid = m.from_user.id
     await asyncio.to_thread(save_user_data, uid, m.from_user.username, m.from_user.first_name)
     active_chats.add(m.chat.id)
