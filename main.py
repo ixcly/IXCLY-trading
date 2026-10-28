@@ -2161,7 +2161,7 @@ async def analyze_coin(coin, user_id=None, force=False):
         log.error(f"Ошибка анализа {coin}: {e}")
         return None, f"⚠ Ошибка анализа <b>{html.escape(coin)}</b>, попробуйте ещё раз"
         
-    analysis_cache[coin] = (time.time(), 180, res)
+    analysis_cache[coin] = (time.time(), 50, res)
     if len(analysis_cache) > 60:
         for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:20]: 
             analysis_cache.pop(k, None)
