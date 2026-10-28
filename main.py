@@ -1920,15 +1920,26 @@ async def _load_feed(url):
 
 
 async def get_news_entries():
-    """Получает список последних новостей с кешированием (5 минут)."""
+    global _news_cache
     if _news_cache["entries"] and time.time() - _news_cache["ts"] < 300: 
         return _news_cache["entries"]
-    for url in NEWS_FEEDS:
-        entries = await _load_feed(url)
-        if entries:
-            _news_cache["ts"] = time.time()
-            _news_cache["entries"] = entries[:5]
-            return _news_cache["entries"]
+        
+    # Опрашиваем все RSS-ленты одновременно
+    tasks = [_load_feed(url) for url in NEWS_FEEDS]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    all_entries = []
+    for entries in results:
+        if isinstance(entries, list):
+            all_entries.extend(entries)
+            
+    if all_entries:
+        # Сортируем все новости по времени (самые свежие вверху)
+        all_entries.sort(key=lambda x: getattr(x, "published_parsed", None) or time.gmtime(0), reverse=True)
+        _news_cache["ts"] = time.time()
+        _news_cache["entries"] = all_entries[:10]
+        return _news_cache["entries"]
+        
     return _news_cache["entries"]
 
 
