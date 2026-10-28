@@ -3344,20 +3344,19 @@ async def position_status_text(uid, coin):
 @dp.message(PortfolioStates.waiting_for_deposit)
 async def process_deposit(m: types.Message, state: FSMContext):
     try:
-        amount = float(m.text.replace(",", "."))
-        if amount <= 0: 
+        amount = float((m.text or "").replace(",", ".").strip())
+        if amount <= 0:
             raise ValueError
-    except:
-        await m.answer("❌ Пожалуйста, введите положительное число (например, <code>1000</code>).", parse_mode="HTML")
+    except Exception:
+        await m.answer("❌ Введите положительное число, например <code>1000</code> или <code>500.50</code>",
+                       parse_mode="HTML")
         return
-    
     uid = m.from_user.id
     set_user_field(uid, deposit=amount)
-    await m.delete() # Удаляем сообщение пользователя
-    await state.clear() # Сбрасываем состояние ожидания
-    
+    await safe_delete(m)
+    await state.clear()
     text, kb = screen_portfolio(uid)
-    await m.answer(text, parse_mode="HTML", reply_markup=kb)
+    await present(m.chat.id, f"✅ Депозит обновлён: <b>${amount:.2f}</b>\n\n{text}", kb)
 
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message):
