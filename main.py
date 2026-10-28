@@ -1206,7 +1206,7 @@ async def get_market_data(coin, tfs=tuple(TFS)):
     for cand in SYMBOL_ALIASES.get(coin, [coin]):
         for ex in EXCHANGES:
             res = await _try_exchange(ex, cand, tfs)
-            if res: 
+            if res:
                 preferred_source[coin] = (cand, ex["name"])
                 return res
     raise LookupError(coin)
