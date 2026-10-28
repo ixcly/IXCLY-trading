@@ -2391,8 +2391,8 @@ async def anomaly_scanner_loop():
 # ПОЛНЫЙ СКАНЕР (3 ЭТАПА)
 # =====================================================================
 
-SCAN_INTERVAL = 10 * 60
-SIGNAL_COOLDOWN = 5 * 3600
+SCAN_INTERVAL = 20 * 60
+SIGNAL_COOLDOWN = 6 * 3600
 signal_sent_at = {}
 scan_skip = {}
 
@@ -2415,7 +2415,7 @@ async def scan_once(send=True):
         ctx = await get_context(force=True)
         onchain_change = await get_onchain_context()
         bias_text = market_bias.get("impact", "Нейтральный фон")
-        sem = asyncio.Semaphore(3) 
+        sem = asyncio.Semaphore(2) 
         
         # ЭТАП 1: Быстрый отбор
         stage1 = []
@@ -2425,7 +2425,7 @@ async def scan_once(send=True):
             async with sem:
                 try: 
                     tf2, _ = await get_market_data_light(coin, ("4h", "1d"))
-                    await asyncio.sleep(0.1) 
+                    await asyncio.sleep(0.3) 
                 except LookupError: 
                     scan_skip[coin] = time.time() + 6 * 3600
                     return
@@ -2448,7 +2448,7 @@ async def scan_once(send=True):
                 try: 
                     extra, _src = await get_market_data_light(coin, ("1h", "15m"))
                     tf_data.update(extra)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.3)
                 except Exception: 
                     pass
                 funding = await get_funding(coin)
