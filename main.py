@@ -2342,6 +2342,8 @@ def render_caption(res, uid=None):
     parts += [(0, f"🛡 SL{i + 1} <code>{fmt(p)}</code> <i>{pct(p)}</i>") for i, p in enumerate(res["sls"])]
     parts.append((7, ""))
     parts.append((2, f"⚖ {res['leverage']} · позиция ${pos_usdt:.0f} · риск ${risk_usdt:.0f}"))
+    if res.get("liq_x20"):
+        parts.append((3, f"⚠ <i>При плече x20 ликвидация: <code>{fmt(res['liq_x20'])}</code></i>"))
     if res.get("bt"):
         b = res["bt"]
         parts.append((3, f"🧪 Бэктест: {b['trades']} сд · TP1 {b['winrate']}% · {b['avg_r']:+.2f}R"))
