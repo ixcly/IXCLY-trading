@@ -2204,7 +2204,8 @@ async def get_news_batch_text():
     prompt = ("Ты опытный крипто-аналитик. Разбери эти новости. Для каждой строго по шаблону на русском, без markdown:\n"
               "Новость N:\n📰 Суть: 1-2 предложения\n📊 Влияние: Бычье/Медвежье/Нейтральное и почему\n🪙 Монеты: тикеры через запятую\n\nНовости:\n")
     for i, e in enumerate(batch):
-        prompt += f"{i + 1}. {html.unescape(getattr(e, 'title', '') or '')}. {clean_summary(getattr(e, 'summary', ''))[:200]}\n"
+        pub_time = get_moscow_time_from_entry(e)
+        prompt += f"{i + 1}. [{pub_time}] {html.unescape(getattr(e, 'title', '') or '')}. {clean_summary(getattr(e, 'summary', ''))[:200]}\n"
     links = " · ".join(f"<a href=\"{html.escape(getattr(e, 'link', ''), quote=True)}\">{i + 1}</a>" for i, e in enumerate(batch))
     text, _engine = await ask_ai_named(prompt, timeout=30, free_timeout=30)
     if text and has_cyr(text, 30):
