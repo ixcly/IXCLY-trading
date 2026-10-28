@@ -2997,19 +2997,35 @@ async def cb_last(cb: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("sig_list:"))
 async def cb_sig_list(cb: types.CallbackQuery):
     category = cb.data.split(":")[1]
-    sigs = current_signals_db.get(category, [])[:10]
+    hist = _load_signal_history()
+    
+    # Фильтруем по категории и активному статусу
+    active_sigs = [x for x in hist if x.get("status") in ("active", "in_trade") and x.get("type") == category]
+    
+    # Убираем дубли
+    seen, unique = set(), []
+    for x in sorted(active_sigs, key=lambda k: k.get("ts", 0), reverse=True):
+        key = f"{x['coin']}_{x['side']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(x)
+            
+    sigs = unique[:10] # Показываем до 10 штук
+    
     if not sigs:
-        text = f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас сигналов в этой категории нет.</i>"
+        text = f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас нет активных сигналов в этой категории.</i>"
         kb = [[InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")]]
         await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
         await safe_answer(cb, "Пусто", False)
         return
+        
     text = f"📋 <b>Сигналы: {category}</b>\n\n"
     kb = []
     for s in sigs:
-        emoji = "🟢" if s["is_long"] else "🔴"
-        text += f"{emoji} <b>{s['coin']}</b> · Conf: {s['strength']}%\n"
+        emoji = "🟢" if s["side"] == "LONG" else "🔴"
+        text += f"{emoji} <b>{s['coin']}</b>\n"
         kb.append([InlineKeyboardButton(text=f"{emoji} {s['coin']}", callback_data=f"c:{s['coin']}")])
+        
     kb.append([InlineKeyboardButton(text="⬅ Назад к обзору", callback_data="last_signals")])
     await safe_edit(cb.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), user_id=cb.from_user.id)
     await safe_answer(cb)
