@@ -1542,6 +1542,19 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
         strength -= 10
         notes.append(f"приток TVL {onchain_change}% против шорта (−10)")
 
+    # === ДЕТЕКТОР ЛОЖНЫХ ПРОБОЕВ ===
+    fake_breakout = False
+    df_info = info.get("df")
+    if df_info is not None and len(df_info) > 0:
+        last_candle = df_info.iloc[-1]
+        # Если был пробой, но объем меньше 80% от среднего
+        if last_candle["brk_up"] or last_candle["brk_dn"]:
+            if last_candle["rel_vol"] < 0.8:
+                fake_breakout = True
+                strength -= 15
+                notes.append("Ложный пробой (тонкий объем) (−15)")
+    # ================================
+    
     nb = market_bias.get("bias", 0)
     news_status = "Нейтрально"
     if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
@@ -1563,7 +1576,8 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
     out.update(valid=not reject, reject=reject, notes=notes, is_long=is_long, strength=round(strength, 1),
                type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный", news_status=news_status,
                wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
-               reasons=collect_reasons(tf_data, is_long), patterns=pattern_lines(tf_data))
+               reasons=collect_reasons(tf_data, is_long), patterns=pattern_lines(tf_data)
+               fake_breakout=fake_breakout)
     return out
 
 
