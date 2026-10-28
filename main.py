@@ -3455,7 +3455,7 @@ async def msg_ticker(m: types.Message):
 
 
 @dp.callback_query()
-async def on_callback(cb: types.CallbackQuery):
+async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     if not cb.message:
         return await safe_answer(cb)
     uid, chat_id, msg, data = cb.from_user.id, cb.message.chat.id, cb.message, cb.data or ""
