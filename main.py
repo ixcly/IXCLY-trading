@@ -1550,6 +1550,8 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
     long_term = cs(p1d) >= 64 and cs(p4) >= 60
     out.update(valid=not reject, reject=reject, notes=notes, is_long=is_long, strength=round(strength, 1),
                type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный", news_status=news_status,
+               wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
+               reasons=collect_reasons(tf_data, is_long), patterns=pattern_lines(tf_data))
     return out
 
 
