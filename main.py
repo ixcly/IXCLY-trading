@@ -2084,6 +2084,18 @@ async def execute_auto_trade(user_id, coin, is_long, entry, sl, tp):
         log.error(f"Ошибка автоторговли: {e}")
         return False
 
+async def scanner_loop():
+    """Фоновая задача, которая запускает поиск сигналов по расписанию."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if bot_flags["alerts_enabled"] and active_chats:
+                await scan_once(send=True)
+        except Exception as e:
+            log.error(f"Ошибка в цикле сканера: {e}")
+            
+        next_timers["scanner"] = time.time() + SCAN_INTERVAL
+        await asyncio.sleep(SCAN_INTERVAL)
 
 async def anomaly_scanner_loop():
     """Сканирует аномальные объемы в реальном времени (каждые 2 минуты)."""
