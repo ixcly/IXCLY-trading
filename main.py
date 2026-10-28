@@ -2355,6 +2355,7 @@ async def global_signal_monitor_loop():
                             x["hit_sl"] = hit_sl
                             x["status"] = "win" if max_tp >= 1 else "loss"
                             updated_hist = True
+                            await notify_admin(f"📊 <b>Сигнал {coin} закрыт!</b>\nСтатус: {'✅ WIN' if x['status'] == 'win' else '❌ LOSS'}\nTP: {x.get('max_tp_hit', 0)}, SL: {hit_sl}")
                             asyncio.create_task(send_webhook(x.get("uid"), {"event": "sl_hit", "coin": coin, "price": price}))
 
             if updated_hist:
