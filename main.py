@@ -3415,14 +3415,6 @@ async def cmd_api(m: types.Message):
                   "⚠ Права: только чтение и торговля, <b>БЕЗ вывода средств</b>. Включите IP-whitelist. Сообщение с ключами я сразу удалю.", kb_nav())
 
 
-@dp.message(F.text.regexp(r"^[A-Za-z0-9]{64},[A-Za-z0-9]{64}$"))
-async def handle_api_keys(m: types.Message):
-    api_key, secret = m.text.split(",")
-    await safe_delete(m)  # ключи не должны оставаться в чате
-    ok = save_user_api_keys(m.from_user.id, api_key, secret)
-    await present(m.chat.id, "✅ Ключи зашифрованы и сохранены. Включить автоторговлю: <code>/autotrade on</code>" if ok
-                  else "❌ Шифрование недоступно, ключи не сохранены.", kb_nav())
-
 
 @dp.message(Command("autotrade"))
 async def cmd_autotrade(m: types.Message):
