@@ -2871,6 +2871,17 @@ async def cb_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "global_stats")
 async def cb_global_stats(cb: types.CallbackQuery):
     hist = _load_signal_history()
+    
+    # УБИРАЕМ ДУБЛИ: оставляем только самый свежий сигнал по каждой монете и направлению
+    seen = set()
+    unique_hist = []
+    for x in sorted(hist, key=lambda k: k.get("ts", 0), reverse=True):
+        key = f"{x['coin']}_{x['side']}"
+        if key not in seen: 
+            seen.add(key)
+            unique_hist.append(x)
+    hist = unique_hist
+    
     total = len(hist)
     active = sum(1 for x in hist if x.get("status") == "active")
     in_trade = sum(1 for x in hist if x.get("status") == "in_trade")
@@ -2878,19 +2889,24 @@ async def cb_global_stats(cb: types.CallbackQuery):
     missed = sum(1 for x in hist if x.get("status") == "missed")
     wins = sum(1 for x in hist if x.get("status") == "win")
     losses = sum(1 for x in hist if x.get("status") == "loss")
+    
     closed = wins + losses
     winrate = (wins / closed * 100) if closed > 0 else 0.0
     
     text = (
         f"📊 <b>Статистика сигналов</b>\n\n"
-        f"📈 Всего: <b>{total}</b>\n🎯 Винрейт: <b>{winrate:.1f}%</b>\n"
+        f"📈 Всего уникальных: <b>{total}</b>\n"
+        f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n"
         f"✅ Побед: <b>{wins}</b> | ❌ Убытков: <b>{losses}</b>\n"
         f"🚫 Упущено: <b>{missed}</b>\n\n"
-        f"<i>* Статистика ведется автоматически.</i>"
+        f"<i>* Цифры совпадают со списками ниже.</i>"
     )
+    
     kb = [
-        [InlineKeyboardButton(text=f"⏳ В работе ({active + in_trade})", callback_data="stats_list:active:0"), InlineKeyboardButton(text=f"✅ Успешные ({wins})", callback_data="stats_list:win:0")],
-        [InlineKeyboardButton(text=f"🚫 Упущено ({missed})", callback_data="stats_list:missed:0"), InlineKeyboardButton(text=f"❌ Убыточные ({losses})", callback_data="stats_list:loss:0")],
+        [InlineKeyboardButton(text=f"⏳ В работе ({active + in_trade})", callback_data="stats_list:active:0"),
+         InlineKeyboardButton(text=f"✅ Успешные ({wins})", callback_data="stats_list:win:0")],
+        [InlineKeyboardButton(text=f"🚫 Упущено ({missed})", callback_data="stats_list:missed:0"),
+         InlineKeyboardButton(text=f"❌ Убыточные ({losses})", callback_data="stats_list:loss:0")],
         [InlineKeyboardButton(text=f"⏳ По времени ({expired})", callback_data="stats_list:expired:0")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
     ]
