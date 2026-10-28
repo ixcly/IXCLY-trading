@@ -580,6 +580,16 @@ def user_counts():
 # =====================================================================
 # БЭКАПЫ БАЗЫ В АДМИН-БОТ
 # =====================================================================
+async def notify_admin(text: str):
+    """Отправляет уведомление всем админам в админ-бота."""
+    if not admin_bot or not ADMIN_IDS:
+        return
+    for aid in ADMIN_IDS:
+        try:
+            await admin_bot.send_message(aid, text, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            log.warning(f"Не удалось отправить уведомление админу {aid}: {e}")
+
 async def telegram_backup(reason="auto"):
     if not admin_bot or not ADMIN_IDS:
         return False
