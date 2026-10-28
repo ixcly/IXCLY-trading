@@ -1234,6 +1234,27 @@ async def _fetch_klines(ex, coin, tf, limit=200):
 _exchange_bans = {}
 
 async def _try_exchange(ex, cand, tfs):
+    if time.time() < _exchange_bans.get(ex["name"], 0):
+        return None
+        
+    try: 
+        results = await asyncio.wait_for(asyncio.gather(*[_fetch_klines(ex, cand, tf) for tf in tfs], return_exceptions=True), timeout=14)
+    except Exception as e: 
+        log.warning(f"Биржа {ex['name']} таймаут: {e}")
+        return None
+        
+    if any(isinstance(r, Exception) for r in results):
+        err_msg = str([r for r in results if isinstance(r, Exception)][0])
+        if "429" in err_msg or "403" in err_msg or "451" in err_msg:
+            _exchange_bans[ex["name"]] = time.time() + 300 # Бан на 5 минут
+            log.warning(f"⚠️ Биржа {ex['name']} заблокировала IP. Пауза 5 мин.")
+        else:
+            log.warning(f"Биржа {ex['name']} ошибка: {err_msg[:50]}")
+        return None
+        
+    return await asyncio.to_thread(build_tf_data, dict(zip(tfs, results))), ex["name"]
+
+async def _try_exchange(ex, cand, tfs):
     # Если биржа сейчас в бане, пропускаем её
     if time.time() < _exchange_bans.get(ex["name"], 0):
         return None
