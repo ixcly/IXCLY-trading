@@ -3371,10 +3371,33 @@ async def position_status_text(uid, coin):
     price = await get_simple_price(coin)
     if not price:
         return "Не удалось получить цену."
+        
     entry = pos["entry_price"]
-    pnl = (price - entry) / entry * 100 * (1 if pos["side"] == "LONG" else -1)
-    return (f"📈 <b>Статус {coin}</b>\n\nНаправление: <b>{pos['side']}</b>\nВход: <code>{fmt(entry)}</code>\nСейчас: <code>{fmt(price)}</code>\n"
-            f"PnL: <b>{pnl:+.2f}%</b>\n\nTP1: <code>{fmt(pos['tp1'])}</code>\nTP2: <code>{fmt(pos['tp2'])}</code>\nSL1: <code>{fmt(pos['sl1'])}</code>")
+    side = pos["side"]
+    pnl = (price - entry) / entry * 100 * (1 if side == "LONG" else -1)
+    
+    # Проверяем, какие цели уже достигнуты
+    t1 = "✅ " if pos.get("hit_tp1") else "⏳ "
+    t2 = "✅ " if pos.get("hit_tp2") else "⏳ "
+    t3 = "✅ " if pos.get("hit_tp3") else "⏳ "
+    
+    current_sl = pos["sl1"]
+    sl_note = ""
+    if current_sl == entry:
+        sl_note = " (в безубытке)"
+    elif current_sl == pos["tp1"]:
+        sl_note = " (на TP1)"
+        
+    return (f"📈 <b>Статус {coin}</b>\n\n"
+            f"Направление: <b>{side}</b>\n"
+            f"Вход: <code>{fmt(entry)}</code>\n"
+            f"Сейчас: <code>{fmt(price)}</code>\n"
+            f"PnL: <b>{pnl:+.2f}%</b>\n\n"
+            f"<b>Цели:</b>\n"
+            f"{t1} TP1: <code>{fmt(pos['tp1'])}</code>\n"
+            f"{t2} TP2: <code>{fmt(pos['tp2'])}</code>\n"
+            f"{t3} TP3: <code>{fmt(pos['tp3'])}</code>\n\n"
+            f"🛡 Текущий стоп: <code>{fmt(current_sl)}</code>{sl_note}")
 
 
 # =====================================================================
