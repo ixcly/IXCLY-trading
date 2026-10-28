@@ -3503,30 +3503,67 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
                 kb, edit_msg=msg)
 
         if data.startswith("mode:"):
-            mode = data.split(":")[1]
+            mode = data.split(":", 1)[1]
             conf_map = {"aggressive": 60, "balanced": 66, "conservative": 80}
+            if mode not in conf_map:
+                return await safe_answer(cb, "Неизвестный режим", True)
             set_user_field(uid, trade_mode=mode, conf_final=conf_map[mode])
-            await safe_answer(cb, f"✅ Режим обновлен")
+            await safe_answer(cb, "✅ Режим обновлён")
             text, kb = screen_portfolio(uid)
-            return await safe_edit(msg, text, reply_markup=kb, user_id=uid)
+            return await present(chat_id, text, kb, edit_msg=msg)
 
-        if data == "toggle_autotrade":
+        if data == "autotrade_menu":
+            await safe_answer(cb)
             u = _users().get(str(uid), {})
-            new_state = not u.get("auto_trade_enabled", False)
-            if new_state and not u.get("binance_api"):
-                return await safe_answer(cb, "❌ Сначала добавьте API-ключи через /api", True)
-            set_user_field(uid, auto_trade_enabled=new_state)
-            await safe_answer(cb, f"Автоторговля: {'ВКЛ' if new_state else 'ВЫКЛ'}")
+            if u.get("auto_trade_enabled"):
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔴 Выключить автоторговлю",  callback_data="at:off")],
+                    [InlineKeyboardButton(text="🔄 Сменить биржу / ключи",   callback_data="autotrade_menu_sel")],
+                    [InlineKeyboardButton(text="⬅ Назад в портфель",          callback_data="portfolio")],
+                ])
+                exch = (u.get("exchange") or "—").title()
+                return await present(chat_id,
+                    f"🤖 <b>Автоторговля включена</b>\n\n"
+                    f"Биржа: <b>{exch}</b>\n"
+                    f"Бот будет выставлять реальные лимитные ордера и стоп-лоссы "
+                    f"при появлении новых сигналов.\n\n"
+                    f"⚠ Ключи должны иметь права <b>только на торговлю</b>, без вывода средств.",
+                    kb, edit_msg=msg)
+            return await _show_exchange_menu(chat_id, msg)
+
+        if data == "autotrade_menu_sel":
+            await safe_answer(cb)
+            return await _show_exchange_menu(chat_id, msg)
+
+        if data == "at:off":
+            set_user_field(uid, auto_trade_enabled=False)
+            await safe_answer(cb, "🔴 Автоторговля выключена")
             text, kb = screen_portfolio(uid)
-            return await safe_edit(msg, text, reply_markup=kb, user_id=uid)
+            return await present(chat_id, text, kb, edit_msg=msg)
+
+        if data.startswith("at:ex:"):
+            exchange = data.split(":", 2)[2]
+            if exchange not in ("binance", "bybit", "bingx"):
+                return await safe_answer(cb, "Неизвестная биржа", True)
+            await safe_answer(cb)
+            await state.update_data(exchange=exchange)
+            await state.set_state(AutotradeStates.waiting_for_api_key)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅ Назад к выбору биржи", callback_data="autotrade_menu_sel")],
+                [InlineKeyboardButton(text="🏠 В портфель",            callback_data="portfolio")],
+            ])
+            return await present(chat_id, _exchange_instructions(exchange), kb, edit_msg=msg)
         if data == "menu":
+            await state.clear()
             nav_reset(uid)
             await safe_answer(cb)
             return await show_screen(chat_id, uid, ("menu",), msg)
         if data == "nav:back":
+            await state.clear()
             await safe_answer(cb)
             return await show_screen(chat_id, uid, nav_back(uid), msg)
         if data in simple:
+            await state.clear()
             await safe_answer(cb, "⏳ Загружаю…" if data == "news_menu" else None)
             nav_push(uid, simple[data])
             return await show_screen(chat_id, uid, simple[data], msg)
