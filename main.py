@@ -2765,6 +2765,16 @@ async def scan_once(send=True):
                 key = f"{r['coin']}:{'L' if r['is_long'] else 'S'}"
                 if key in active_coins: 
                     continue
+
+
+            if send and active_chats:
+            # ЕСЛИ СИГНАЛОВ НЕТ - НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ
+            if not final:
+                return final
+                
+            now = time.time()
+            hist = _load_signal_history()
+            # ... дальше идет старый код (for r in final: ...)    
                 
                 for uid in list(active_chats):
                     port_risk = calculate_portfolio_risk(uid)
