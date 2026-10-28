@@ -2829,35 +2829,72 @@ async def check_position(user_id, coin, pos):
     price = await get_simple_price(coin)
     if not price:
         return
-    side, entry, sl1 = pos["side"], pos["entry_price"], pos["sl1"]
+        
+    side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
+    
+    # Инициализация флагов для старых позиций, если их нет
+    if "hit_tp1" not in pos: pos["hit_tp1"] = False
+    if "hit_tp2" not in pos: pos["hit_tp2"] = False
+    if "hit_tp3" not in pos: pos["hit_tp3"] = False
+    
+    # Текущие уровни
+    tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
+    current_sl = pos["sl1"]
+    
+    # Проверяем, что достигнуто
+    hit_tp1 = sign * (price - tp1) >= 0
+    hit_tp2 = sign * (price - tp2) >= 0
+    hit_tp3 = sign * (price - tp3) >= 0
+    hit_sl = sign * (price - current_sl) <= 0
+    
     pnl = sign * (price - entry) / entry * 100
-    hit = [sign * (price - pos[k]) >= 0 for k in ("tp1", "tp2", "tp3")]
-    hit_sl = sign * (price - sl1) <= 0
     reason, urgency = None, "info"
+    
+    # === ЛОГИКА СРАБАТЫВАНИЯ ===
     if hit_sl:
-        reason, urgency = "🛑 Сработал стоп-лосс. Рекомендую закрыть позицию.", "danger"
-    elif hit[2]:
-        reason, urgency = "✅ Достигнут TP3. Можно фиксировать всю позицию.", "success"
-    elif hit[1] and not pos.get("notified_tp"):
-        reason, urgency = "✅ Достигнут TP2. Частично фиксируем.", "success"
-    elif hit[0] and not pos.get("notified_tp"):
-        reason, urgency = "✅ Достигнут TP1. Можно закрыть часть.", "success"
+        if current_sl == entry:
+            reason, urgency = "🛑 Сработал стоп-лосс в **безубытке** (Entry). Позиция закрыта без убытка.", "danger"
+        elif current_sl == tp1:
+            reason, urgency = "🛑 Сработал стоп-лосс на уровне **TP1**. Вы забрали часть профита, остальное закрыто.", "danger"
+        else:
+            reason, urgency = "🛑 Сработал стоп-лосс. Позиция закрыта в убыток.", "danger"
+        pos["notified_close"] = True
+        
+    elif hit_tp3 and not pos["hit_tp3"]:
+        reason, urgency = "✅ Достигнут **TP3**! Закрываем оставшиеся **20%**.\n🎉 Сделка успешно завершена!", "success"
+        pos["hit_tp3"] = True
+        pos["notified_close"] = True
+        
+    elif hit_tp2 and not pos["hit_tp2"]:
+        reason, urgency = "✅ Достигнут **TP2**! Закрываем еще **30%**.\n🛡 Стоп переносим на уровень TP1.", "success"
+        pos["hit_tp2"] = True
+        pos["sl1"] = tp1 # Трейлинг стоп на TP1
+        
+    elif hit_tp1 and not pos["hit_tp1"]:
+        reason, urgency = "✅ Достигнут **TP1**! Закрываем **50%**.\n🛡 Стоп переносим в безубыток (Entry).", "success"
+        pos["hit_tp1"] = True
+        pos["sl1"] = entry # Перевод в безубыток
+
     if not reason:
         return
-    if urgency == "success":
-        pos["notified_tp"] = True
-    text = (f"{'🛑' if urgency == 'danger' else '✅'} <b>Рекомендация по {coin}</b>\n\nНаправление: <b>{side}</b>\n"
-            f"Вход: <code>{fmt(entry)}</code>\nСейчас: <code>{fmt(price)}</code>\nPnL: <b>{pnl:+.2f}%</b>\n\n{reason}")
+
+    # Формируем сообщение
+    text = (f"{'🛑' if urgency == 'danger' else '✅'} <b>Обновление по {coin}</b>\n\n"
+            f"Направление: <b>{side}</b>\n"
+            f"Вход: <code>{fmt(entry)}</code>\n"
+            f"Сейчас: <code>{fmt(price)}</code>\n"
+            f"PnL: <b>{pnl:+.2f}%</b>\n\n"
+            f"{reason}")
+            
     kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-                 [InlineKeyboardButton(text="❌ Закрыл", callback_data=f"pos:close:{coin}")]], back=False)
+                 [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
     try:
         await present(user_id, text, kb)
         nav_reset(user_id)
     except Exception:
-        return
-    if urgency in ("danger", "success"):
-        pos["notified_close"] = True
+        pass
+        
     set_user_open_position(user_id, coin, pos)
 
 
