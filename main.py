@@ -146,13 +146,14 @@ OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 
 # Ключ шифрования для API-ключей пользователей
 # Жестко прописываем ключ прямо в коде, чтобы Render не тупил
-FERNET_KEY = "3q2-4r5t6y7u8i9o0p1a2s3d4f5g6h7j8k9l0z1x2c3v="
+FERNET_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 cipher = None
 if Fernet:
     try:
         cipher = Fernet(FERNET_KEY.encode())
+        log.info("✅ Шифрование API-ключей успешно запущено.")
     except Exception as e:
-        log.error(f"⚠️ Ошибка шифрования: {e}. Автоторговля отключена.")
+        log.error(f"⚠️ Ошибка шифрования: {e}")
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -2664,7 +2665,6 @@ async def main():
     
     news_lock = asyncio.Lock()
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.0"})
-    init_mongo()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
