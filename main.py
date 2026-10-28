@@ -200,7 +200,7 @@ news_lock = None
 TFS = ["15m", "1h", "4h", "1d"]
 MIN_CANDLES = 60
 
-    POPULAR_COINS = [
+POPULAR_COINS = [
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "TON", "SHIB", "DOT", "LINK",
     "BCH", "NEAR", "POL", "LTC", "ICP", "UNI", "APT", "STX", "FIL", "IMX", "HBAR", "ATOM",
     "INJ", "OP", "ARB", "VET", "MKR", "SUI", "RNDR", "GRT", "THETA", "S", "SAND", "MANA",
