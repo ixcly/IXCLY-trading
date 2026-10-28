@@ -3477,16 +3477,30 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
                 "📝 <b>Пример:</b> <code>1000</code> или <code>500.50</code>\n\n"
                 "После этого бот пересчитает риск на сделку под новую сумму.",
                 kb_nav(back=True), edit_msg=msg)
-
+            
+            
         if data == "set_mode":
+            await safe_answer(cb)
+            u = _users().get(str(uid), {})
+            cur = u.get("trade_mode", "balanced")
+            cur_txt = {"aggressive": "🟢 Агрессивный",
+                       "balanced": "🟡 Сбалансированный",
+                       "conservative": "🔴 Консервативный"}.get(cur, "🟡 Сбалансированный")
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🟢 Агрессивный (60%)", callback_data="mode:aggressive")],
-                [InlineKeyboardButton(text="🟡 Сбалансированный (66%)", callback_data="mode:balanced")],
-                [InlineKeyboardButton(text="🔴 Консервативный (80%)", callback_data="mode:conservative")],
-                [InlineKeyboardButton(text="⬅ Назад в портфель", callback_data="portfolio")]
+                [InlineKeyboardButton(text="🟢 Агрессивный · 60% · много сигналов",    callback_data="mode:aggressive")],
+                [InlineKeyboardButton(text="🟡 Сбалансированный · 66% · среднее",       callback_data="mode:balanced")],
+                [InlineKeyboardButton(text="🔴 Консервативный · 80% · только идеальные", callback_data="mode:conservative")],
+                [InlineKeyboardButton(text="⬅ Назад в портфель",                        callback_data="portfolio")],
             ])
-            await safe_edit(msg, "⚙️ <b>Выберите режим торговли:</b>", reply_markup=kb, user_id=uid)
-            return await safe_answer(cb)
+            return await present(chat_id,
+                f"⚙️ <b>Режим торговли</b>\n\n"
+                f"Сейчас активен: <b>{cur_txt}</b>\n\n"
+                f"Режим определяет минимальную уверенность модели, чтобы сигнал был отправлен:\n\n"
+                f"🟢 <b>Агрессивный</b> — порог 60%, много сигналов, больше шума\n"
+                f"🟡 <b>Сбалансированный</b> — порог 66%, оптимально\n"
+                f"🔴 <b>Консервативный</b> — порог 80%, только идеальные сетапы\n\n"
+                f"<i>Чем выше порог — тем реже сигналы, но выше их качество.</i>",
+                kb, edit_msg=msg)
 
         if data.startswith("mode:"):
             mode = data.split(":")[1]
