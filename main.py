@@ -1874,8 +1874,37 @@ async def get_context(force=False):
 # =====================================================================
 # НОВОСТИ И АНАЛИЗ ФОНА
 # =====================================================================
-NEWS_FEEDS = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
-_news_cache = {"ts": 0, "entries": []}
+NEWS_FEEDS = [
+    # Топ-издания (Английский)
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://www.theblock.co/rss.xml",
+    "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+    "https://cryptoslate.com/feed/",
+    "https://bitcoinmagazine.com/.rss/full/",
+    "https://www.dlnews.com/arc/outboundfeeds/rss/",
+    "https://blockworks.co/feed",
+    "https://thedefiant.io/feed",
+    "https://rekt.news/rss.xml",
+    "https://messari.io/rss",
+    "https://u.today/rss",
+    "https://www.reuters.com/technology/cryptocurrency/rss",
+    "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+    "https://finance.yahoo.com/rss/cryptocurrency",
+    "https://watcher.guru/news/feed",
+    "https://www.cryptopolitan.com/feed/",
+    "https://techcrunch.com/category/cryptocurrency/feed/",
+    "https://blog.coinmarketcap.com/feed/",
+    "https://blog.coingecko.com/feed/",
+    "https://fortune.com/section/crypto/feed/",
+    "https://www.axios.com/pro/crypto-deals/feed",
+    
+    # Русскоязычные источники
+    "https://forklog.com/feed",
+    "https://bits.media/rss/news/",
+    "https://coinspot.io/feed/",
+    "https://www.rbc.ru/crypto/rss"
+]
 
 async def _load_feed(url):
     """Загружает RSS-ленту."""
