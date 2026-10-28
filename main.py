@@ -2960,11 +2960,27 @@ async def cb_interesting(cb: types.CallbackQuery):
         await safe_edit(cb.message, "Не удалось получить данные", reply_markup=MENU_KB, user_id=cb.from_user.id)
 
 def _signals_overview_text_kb():
-    text = f"🔥 <b>Сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(market_bias.get('impact', 'Нейтральный фон'))}\n\nВыберите категорию:"
+    hist = _load_signal_history()
+    # Берем только те, что в работе
+    active_sigs = [x for x in hist if x.get("status") in ("active", "in_trade")]
+    
+    # Убираем дубли
+    seen, unique = set(), []
+    for x in sorted(active_sigs, key=lambda k: k.get("ts", 0), reverse=True):
+        key = f"{x['coin']}_{x['side']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(x)
+            
+    fast = sum(1 for x in unique if x.get("type") == "Быстрый сигнал")
+    mid = sum(1 for x in unique if x.get("type") == "Среднесрок")
+    long = sum(1 for x in unique if x.get("type") == "Долгосрок")
+
+    text = f"🔥 <b>Актуальные сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(market_bias.get('impact', 'Нейтральный фон'))}\n\nВыберите категорию:"
     kb = [
-        [InlineKeyboardButton(text=f"⚡ Быстрый ({len(current_signals_db['Быстрый сигнал'])})", callback_data="sig_list:Быстрый сигнал")],
-        [InlineKeyboardButton(text=f"⏳ Среднесрок ({len(current_signals_db['Среднесрок'])})", callback_data="sig_list:Среднесрок")],
-        [InlineKeyboardButton(text=f"🛡 Долгосрок ({len(current_signals_db['Долгосрок'])})", callback_data="sig_list:Долгосрок")],
+        [InlineKeyboardButton(text=f"⚡ Быстрый ({fast})", callback_data="sig_list:Быстрый сигнал")],
+        [InlineKeyboardButton(text=f"⏳ Среднесрок ({mid})", callback_data="sig_list:Среднесрок")],
+        [InlineKeyboardButton(text=f"🛡 Долгосрок ({long})", callback_data="sig_list:Долгосрок")],
         [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=kb)
