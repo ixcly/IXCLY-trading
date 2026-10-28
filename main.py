@@ -1190,7 +1190,7 @@ EXCHANGES = [
 ]
 
 async def get_fallback_price(coin):
-    """Цепочка резервных API. Если один падает, идем к следующему."""
+    """Ультимативный резерв цен. Если биржи легли, ищем здесь."""
     # 1. CryptoCompare
     try:
         j = await http_json(f"https://min-api.cryptocompare.com/data/price?fsym={coin}&tsyms=USDT", timeout=4)
@@ -1204,22 +1204,30 @@ async def get_fallback_price(coin):
             return float(j["data"][0]["priceUsd"])
     except Exception: pass
 
-    # 3. Binance US (американская версия Binance, другие сервера)
+    # 3. Binance US (другая инфраструктура, Render там не забанен)
     try:
         j = await http_json(f"https://api.binance.us/api/v3/ticker/price?symbol={coin}USDT", timeout=4)
         return float(j["price"])
     except Exception: pass
 
-    # 4. Bitstamp
+    # 4. Coinbase (крупнейшая биржа США)
+    try:
+        j = await http_json(f"https://api.coinbase.com/v2/prices/{coin}-USD/spot", timeout=4)
+        return float(j["data"]["amount"])
+    except Exception: pass
+        
+    # 5. Bitstamp
     try:
         j = await http_json(f"https://www.bitstamp.net/api/v2/ticker/{coin.lower()}usdt/", timeout=4)
         return float(j["last"])
     except Exception: pass
-
-    # 5. Coinbase (в USD, но для проверки цены сойдет)
+        
+    # 6. Kraken
     try:
-        j = await http_json(f"https://api.coinbase.com/v2/prices/{coin}-USD/spot", timeout=4)
-        return float(j["data"]["amount"])
+        j = await http_json(f"https://api.kraken.com/0/public/Ticker?pair={coin}USDT", timeout=4)
+        if j["result"]:
+            first_key = list(j["result"].keys())[0]
+            return float(j["result"][first_key]["c"][0])
     except Exception: pass
     
     return None
