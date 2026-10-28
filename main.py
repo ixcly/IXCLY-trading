@@ -2109,27 +2109,27 @@ async def check_economic_calendar():
 
 
 async def news_watcher_loop():
-    """Фоновый процесс: проверяет новые новости каждые 10 минут."""
     global last_news_link
     await asyncio.sleep(40)
     while True:
         try:
             entries = await get_news_entries()
             if entries:
-                link = entries[0].link
+                latest_link = entries[0].link
                 if last_news_link is None: 
-                    last_news_link = link
-                elif link != last_news_link:
-                    last_news_link = link
+                    last_news_link = latest_link
+                elif latest_link != last_news_link:
+                    last_news_link = latest_link
                     if bot_flags["news_enabled"] and active_chats:
                         text, img_url = await prepare_news(force=True)
                         if text:
+                            # Не отправляем картинку, если новость слишком длинная
                             img = await download_bytes(img_url) if img_url else None
                             payload = {"kind": "photo" if img else "text", "text": text, "data": img, "markup": MENU_KB}
                             sent, _, _, _ = await broadcast(payload)
                             stats["news_sent"] += sent
-        except Exception: 
-            pass
+        except Exception as e: 
+            log.warning(f"news_watcher: {e}")
         next_timers["news_watcher"] = time.time() + 600
         await asyncio.sleep(600)
 
