@@ -2401,7 +2401,7 @@ def fetch_error_text(coin):
     return base + ("\n\n<i>Причины: " + html.escape("; ".join(errs[-4:])) + "</i>" if errs else "") + "\n\nПроверьте тикер или выберите другую монету."
 
 
-async def analyze_coin(coin, force=False):
+async def analyze_coin(coin, uid=None, force=False):
     """(res, error). Свежий анализ → архив (если биржи недоступны) → только цена → ошибка."""
     cached = analysis_cache.get(coin)
     if cached and not force and time.time() - cached[0] < cached[1]:
@@ -2410,7 +2410,14 @@ async def analyze_coin(coin, force=False):
         tf_data, source = await get_market_data(coin)
         ctx = await get_context()
         funding = await get_funding(coin)
-        setup = evaluate_setup(coin, tf_data, ctx, funding, onchain_change=await get_onchain_context())
+        
+        # Берем настройки пользователя (если передан uid), иначе стандарт
+        user_conf = CONF_FINAL
+        if uid:
+            u = _users().get(str(uid), {})
+            user_conf = float(u.get("conf_final", CONF_FINAL))
+            
+        setup = evaluate_setup(coin, tf_data, ctx, funding, onchain_change=await get_onchain_context(), conf_threshold=user_conf)
         bt = await get_backtest(coin)
         res = await asyncio.wait_for(build_analysis(coin, tf_data, setup, bt, ctx, source), timeout=80)
         analysis_cache[coin] = (time.time(), 180, res)
