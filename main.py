@@ -3123,7 +3123,7 @@ async def screen_coin(chat_id, uid, coin, edit_msg, force):
         res = None if force else get_user_res(uid, coin)
         if res is None:
             await show_loading(chat_id, edit_msg, f"⏳ Анализирую <b>{html.escape(coin)}</b>: индикаторы, свечи, бэктест…")
-            res, err = await analyze_coin(coin, force=force)
+            res, err = await analyze_coin(coin, uid=uid, force=force)
             if err:
                 return await present(chat_id, err, kb_nav())
             remember_res(uid, coin, res)
