@@ -3948,6 +3948,55 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
             log.error(f"{name}: упал: {e}")
             await asyncio.sleep(10)
 
+async def morning_briefing_loop():
+    await asyncio.sleep(15)
+    while True:
+        now_utc = datetime.now(timezone.utc)
+        msk_now = now_utc.astimezone(timezone(timedelta(hours=3)))
+        
+        # Устанавливаем цель на 8:00 утра МСК
+        target = msk_now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if msk_now >= target:
+            target += timedelta(days=1)
+            
+        sleep_secs = (target - msk_now).total_seconds()
+        await asyncio.sleep(sleep_secs)
+        
+        try:
+            ctx = await get_context(force=True)
+            btc_txt = ctx.get("btc_txt", "нет данных")
+            fng = ctx.get("fng")
+            fng_txt = ctx.get("fng_txt", "")
+            
+            hist = load_signal_history()
+            active_sigs = len({f"{x['coin']}_{x['side']}" for x in hist if x.get("status") in ("active", "in_trade")})
+            
+            gainers_txt = "нет данных"
+            try:
+                j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
+                movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
+                gainers = sorted([x for x in movers if float(x["priceChangePercent"]) > 0], key=lambda x: float(x["priceChangePercent"]), reverse=True)[:3]
+                gainers_txt = ", ".join([f"{x['symbol'][:-4]} (+{float(x['priceChangePercent']):.1f}%)" for x in gainers]) or "нет"
+            except Exception:
+                pass
+            
+            fng_str = f"{fng} ({fng_txt})" if fng is not None else "нет данных"
+            
+            text = (
+                f"☀️ <b>Доброе утро!</b>\n\n"
+                f"🌍 <b>BTC:</b> {btc_txt}\n"
+                f"😨 <b>F&G:</b> {fng_str}\n"
+                f"🔥 <b>Активных сигналов:</b> {active_sigs}\n"
+                f"🚀 <b>Топ роста:</b> {gainers_txt}\n\n"
+                f"<i>Удачной торговли сегодня!</i>"
+            )
+            
+            kb = kb_nav([[InlineKeyboardButton(text="🔥 Сигналы", callback_data="last_signals")]], back=False)
+            await broadcast({"text": text, "kb": kb, "nav": [("menu",)]}, only_ids=active_chats)
+        except Exception as e:
+            log.error(f"Ошибка утреннего брифинга: {e}")
+            
+        await asyncio.sleep(60) # Пауза после отправки
 
 async def heartbeat_loop():
     while True:
