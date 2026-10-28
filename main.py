@@ -3741,7 +3741,8 @@ if admin_dp:
             if not text:
                 return await cb.message.answer("Свежих новостей нет")
             img = await download_bytes(img_url) if img_url else None
-            sent, failed, _ = await broadcast({"text": text, "photo": img, "kb": kb_nav(back=False), "nav": []})
+            kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]], back=False)
+            sent, failed, _ = await broadcast({"text": text, "photo": img, "kb": kb, "nav": []})
             stats["news_sent"] += sent
             await cb.message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
         elif act == "scan_test":
