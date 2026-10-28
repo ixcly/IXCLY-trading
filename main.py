@@ -1586,7 +1586,7 @@ def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=No
     return entry, sl1, sl1 - entry
 
 
-def calc_levels_and_risk(info, is_long, sig_type="Среднесрок"):
+def calc_levels_and_risk(info, is_long, sig_type="Среднесрочный"):
     price = info["price"]
     atr = info["atr"] if info["atr"] > 0 else price * 0.012
     sr = info.get("sr", {})
@@ -1595,10 +1595,24 @@ def calc_levels_and_risk(info, is_long, sig_type="Среднесрок"):
     sign = 1 if is_long else -1
     tps = [entry + sign * risk * m for m in (1.5, 2.5, 4.0)]
     sl2 = sl1 - sign * 0.7 * atr
-    leverage = {"Краткосрочный": "x15-x25", "Долгосрочный": "x5-x10"}.get(sig_type, "x10-x20")
+    
+    # === УМНОЕ ПЛЕЧО (в зависимости от волатильности) ===
+    atr_pct = (atr / price) * 100
+    if atr_pct > 3.0:
+        leverage = "x3-x5 (Высокая волатильность ⚠)"
+    elif atr_pct > 1.5:
+        leverage = "x5-x10 (Средняя волатильность)"
+    else:
+        leverage = "x10-x20 (Низкая волатильность)"
+        
+    # === КАЛЬКУЛЯТОР ЛИКВИДАЦИИ (для плеча x20) ===
+    # Примерный расчет: 1 / 20 = 5% (с учетом комиссий берем 4.75%)
+    liq_x20 = entry * (1 - 0.0475) if is_long else entry * (1 + 0.0475)
+    
     opp = sr.get("resistance") if is_long else sr.get("support")
     near = "ближайший уровень слишком близко к входу, цель может не отработать" if opp and abs(opp - entry) < 1.2 * risk else None
-    return entry, tps, [sl1, sl2], risk, leverage, near
+    
+    return entry, tps, [sl1, sl2], risk, leverage, near, liq_x20
 
 
 def backtest_df(df, conf_min=CONF_FINAL, rr1=1.5, fill_bars=6, max_hold=30, fee=0.001):
