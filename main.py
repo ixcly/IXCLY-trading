@@ -277,6 +277,7 @@ stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
 last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "secs": 0}
 market_bias = {"bias": 0, "title_ru": "Нет данных", "summary": "Нет данных", "impact": "Нейтральный фон", "coins": "BTC, ETH, SOL", "published": "", "link": "", "engine": "none", "ts": 0}
+_news_cache = {"ts": 0, "entries": []}
 last_news_link = None
 users_dirty = False
 last_backup_msg = {}
