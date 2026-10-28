@@ -2668,6 +2668,60 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
             log.error(f"{name}: упал: {e}")
             await asyncio.sleep(5)
 
+async def position_monitor_loop():
+    """Следит за ручными сделками пользователей (кнопка 'Вошёл в сделку')."""
+    await asyncio.sleep(50)
+    while True:
+        try:
+            users = _load_users()
+            for uid_str, u in users.items():
+                for coin, pos in list((u.get("open_positions") or {}).items()):
+                    try:
+                        await check_position(int(uid_str), coin, pos)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.3)
+        except Exception as e:
+            log.error(f"pos monitor: {e}")
+        next_timers["positions"] = time.time() + 320
+        await asyncio.sleep(320)
+
+async def check_position(user_id, coin, pos):
+    """Проверяет статус ручной сделки (дошла ли до TP или SL)."""
+    if pos.get("notified_close"): return
+    price = await get_simple_price(coin)
+    if not price: return
+    side, entry, tp1, tp2, tp3, sl1 = pos["side"], pos["entry_price"], pos["tp1"], pos["tp2"], pos["tp3"], pos["sl1"]
+    
+    if side == "LONG":
+        pnl = (price - entry) / entry * 100
+        hit_tp1, hit_tp2, hit_tp3, hit_sl = price >= tp1, price >= tp2, price >= tp3, price <= sl1
+    else:
+        pnl = (entry - price) / entry * 100
+        hit_tp1, hit_tp2, hit_tp3, hit_sl = price <= tp1, price <= tp2, price <= tp3, price >= sl1
+        
+    reason, urgency = None, "info"
+    if hit_sl: reason, urgency = "🛑 Сработал стоп-лосс\nРекомендую закрыть позицию.", "danger"
+    elif hit_tp3: reason, urgency = "✅ Достигнут TP3\nМожно фиксировать всю позицию.", "success"
+    elif hit_tp2 and not pos.get("notified_tp"): reason, urgency = "✅ Достигнут TP2\nЧастично фиксируем.", "success"
+    elif hit_tp1 and not pos.get("notified_tp"): reason, urgency = "✅ Достигнут TP1\nМожно закрыть часть.", "success"
+    
+    if urgency == "success": 
+        pos["notified_tp"] = True
+        set_user_open_position(user_id, coin, pos)
+        
+    if not reason: return
+    
+    text = f"{'🛑' if urgency == 'danger' else '✅'} <b>Рекомендация по {coin}</b>\n\nНаправление: <b>{side}</b>\nВход: <code>{fmt(entry)}</code>\nСейчас: <code>{fmt(price)}</code>\nPnL: <b>{pnl:+.2f}%</b>\n\n{html.escape(reason)}"
+    try:
+        msg = await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")], [InlineKeyboardButton(text="❌ Закрыл", callback_data=f"pos:close:{coin}")]]))
+        track_msg(user_id, msg)
+        if urgency in ("danger", "success"): 
+            pos["notified_close"] = True
+            set_user_open_position(user_id, coin, pos)
+    except Exception: 
+        pass
+
 
 async def main():
     """Точка входа в приложение."""
