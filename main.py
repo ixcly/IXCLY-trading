@@ -3701,8 +3701,9 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             res = get_user_res(uid, coin)
             if not res or res.get("price_only"):
                 await safe_answer(cb, "⏳ Анализирую монету...")
-                res, err = await analyze_coin(coin)
-            res, err = await analyze_coin(coin, uid=uid)
+                res, err = await analyze_coin(coin, uid=uid)
+                
+            if not res or res.get("price_only"):
                 return await safe_answer(cb, "Не удалось получить уровни", True)
                 
             set_user_open_position(uid, coin, {"side": res["side"], "entry_price": res["entry"], "entered_at": time.time(),
