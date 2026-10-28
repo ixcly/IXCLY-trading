@@ -2451,11 +2451,11 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "entry": entry, "tps": tps, "sls": sls, "risk_dist": risk_dist, "leverage": leverage,
         "reasons": setup["reasons"], "patterns": setup["patterns"], "notes": setup["notes"], "squeeze": info["squeeze"],
         "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
-        "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
         "liq_x20": liq_x20,
-        "fake_breakout": setup.get("fake_breakout", False),  # <-- Добавляем флаг
+        "fake_breakout": setup.get("fake_breakout", False),
     }
-    }
+    res["text"] = render_caption(res)
+    return res
     res["text"] = render_caption(res)
     return res
 
