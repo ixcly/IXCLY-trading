@@ -61,6 +61,9 @@ except ImportError:
 class PortfolioStates(StatesGroup):
     waiting_for_deposit = State()
 
+class AutotradeStates(StatesGroup):
+    waiting_for_api_key = State()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout, force=True)
 log = logging.getLogger("ixcly")
 
