@@ -2567,7 +2567,21 @@ async def scan_once(send=True):
             last_signals_data = {"text": text, "kb": markup, "ts": time.time()}
             sent, _, _, _ = await broadcast({"kind": "text", "text": text, "markup": markup})
             stats["signals"] += sent
+        # УВЕДОМЛЕНИЕ ДЛЯ АДМИНА О ЗАВЕРШЕНИИ СКАНА
+        if send:
+            msg = (
+                f"🔍 <b>Сканирование завершено</b>\n"
+                f"⏱ Время: {last_scan_info['secs']} сек.\n"
+                f"1 этап: {last_scan_info['stage1']} монет\n"
+                f"2 этап: {last_scan_info['stage2']} монет\n"
+                f"Бэктест: {last_scan_info['backtest_ok']} монет\n"
+                f"✅ <b>Финальных сигналов: {last_scan_info['final']}</b>"
+            )
+            if last_scan_info['final'] > 0:
+                msg += "\n\n🔥 <i>Сигналы отправлены пользователям!</i>"
+            await notify_admin(msg)
             
+        return final
         return final
 
 
