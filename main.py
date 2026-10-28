@@ -2598,7 +2598,7 @@ async def scan_once(send=True):
                     
         await asyncio.gather(*[s1(c) for c in POPULAR_COINS])
         stage1.sort(key=lambda x: x[2], reverse=True)
-        stage1 = stage1[:18]
+        stage1 = stage1[:30]
         
         # ЭТАП 2: Полный анализ
         stage2 = []
@@ -2619,7 +2619,7 @@ async def scan_once(send=True):
                     
         await asyncio.gather(*[s2(i) for i in stage1])
         stage2.sort(key=lambda x: x[2]["strength"], reverse=True)
-        stage2 = stage2[:8]
+        stage2 = stage2[:15]
         
         # ЭТАП 3: Бэктест и ИИ
         final = []
