@@ -2295,6 +2295,16 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
 
 
 async def analyze_coin(coin, user_id=None, force=False):
+    # 1. Если не просили обновить, ищем в базе данных анализов
+    if not force:
+        db = _load_analysis_db()
+        if coin in db:
+            res = db[coin]["data"].copy()
+            # Восстанавливаем текст, чтобы он был актуальным
+            res["coin"] = coin
+            return res, None
+            
+    # 2. Если в базе нет или нажали "Обновить", идем на биржу
     cached = analysis_cache.get(coin)
     if cached and not force and time.time() - cached[0] < cached[1]: 
         return cached[2], None
@@ -2306,9 +2316,8 @@ async def analyze_coin(coin, user_id=None, force=False):
         fallback_price = await get_fallback_price(coin)
         
         if not fallback_price:
-            return None, f"🚫 Не удалось получить данные по <b>{html.escape(coin)}</b>. Все биржи и резервные API молчат. Попробуйте позже."
+            return None, f"🚫 Не удалось получить данные по <b>{html.escape(coin)}</b>. Все биржи и резервные API молчат."
             
-        # СОЗДАЕМ ФЕЙКОВЫЙ ГРАФИК ДЛЯ ИИ И РИСОВАЛКИ
         import pandas as pd
         dummy_df = pd.DataFrame({"open": [fallback_price]*5, "high": [fallback_price]*5, "low": [fallback_price]*5, "close": [fallback_price]*5, "volume": [0]*5, "ema20": [fallback_price]*5, "ema50": [fallback_price]*5})
         
@@ -2318,7 +2327,7 @@ async def analyze_coin(coin, user_id=None, force=False):
                 "rsi": 50.0, "atr": fallback_price * 0.02, "adx": 20.0, "macd_hist": 0.0, "bb_pct": 0.5,
                 "z_score": 0.0, "vol_delta": 0.0, "recent_low": fallback_price * 0.95, "recent_high": fallback_price * 1.05,
                 "long_prob": 50.0, "confidence": 50.0, "qv24": 1000000, "regime": "флэт",
-                "squeeze": False, "reasons": ["Взяты данные из резервного API (биржа в бане)"], 
+                "squeeze": False, "reasons": ["Взяты данные из резервного API"], 
                 "patterns": [], "sr": {"support": fallback_price * 0.95, "resistance": fallback_price * 1.05}, "df": dummy_df
             }
         }
@@ -2329,15 +2338,19 @@ async def analyze_coin(coin, user_id=None, force=False):
         funding = await get_funding(coin)
         setup = evaluate_setup(coin, tf_data, ctx, funding)
         bt = await get_backtest(coin)
+        
+        # Здесь build_analysis автоматически сохранит данные в файл (см. шаг 2)
         res = await asyncio.wait_for(build_analysis(coin, tf_data, setup, bt, ctx, source), timeout=75)
     except Exception as e: 
         log.error(f"Ошибка анализа {coin}: {e}")
         return None, f"⚠ Ошибка анализа <b>{html.escape(coin)}</b>, попробуйте ещё раз"
         
     analysis_cache[coin] = (time.time(), 60, res) 
+    
     if len(analysis_cache) > 60:
         for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:20]: 
             analysis_cache.pop(k, None)
+            
     return res, None
 
 
