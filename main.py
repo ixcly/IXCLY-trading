@@ -3187,33 +3187,31 @@ def screen_sig_list(category):
 def get_portfolio_keyboard():
     B = InlineKeyboardButton
     return InlineKeyboardMarkup(inline_keyboard=[
-        [B(text="💰 Изменить депозит", callback_data="set_deposit")],
-        [B(text="⚙️ Режим торговли", callback_data="set_mode")],
-        [B(text="🤖 Автоторговля (Вкл/Выкл)", callback_data="toggle_autotrade")],
-        [B(text="⬅ Назад в меню", callback_data="menu")]
+        [B(text="💰  Изменить депозит",   callback_data="set_deposit")],
+        [B(text="⚙️  Режим торговли",     callback_data="set_mode")],
+        [B(text="🤖  Автоторговля",       callback_data="autotrade_menu")],
+        [B(text="⬅  Назад в меню",        callback_data="menu")],
     ])
 
 def screen_portfolio(uid):
     s = get_user_risk_settings(uid)
     u = _users().get(str(uid), {})
-    
     mode = u.get("trade_mode", "balanced")
-    mode_txt = {"aggressive": "🟢 Агрессивный (60%)", "balanced": "🟡 Сбалансированный (66%)", "conservative": "🔴 Консервативный (80%)"}.get(mode, "Сбалансированный")
+    mode_txt = {"aggressive": "🟢 Агрессивный",
+                "balanced":  "🟡 Сбалансированный",
+                "conservative": "🔴 Консервативный"}.get(mode, "🟡 Сбалансированный")
     auto = "🟢 ВКЛ" if u.get("auto_trade_enabled") else "🔴 ВЫКЛ"
-    keys = "Есть ✅" if u.get("binance_api") else "Нет ❌"
-    
-    text = (f"💼 <b>Ваш Портфель</b>\n\n"
+    exch = u.get("exchange", "")
+    keys = f"✅ {exch.title()}" if exch and u.get(f"{exch}_api") else "❌ нет"
+    text = (f"💼 <b>Ваш портфель</b>\n\n"
             f"💰 Депозит: <b>${s['deposit']:.2f}</b>\n"
             f"📉 Риск на сделку: <b>{s['risk_pct']}%</b>\n"
             f"⚙️ Режим: <b>{mode_txt}</b>\n"
-            f"🤖 Автоторговля: <b>{auto}</b> (API-ключи: {keys})\n"
-            f"⚠ Открытый риск: <b>{calculate_portfolio_risk(uid):.1f}%</b> (макс {s['max_open_risk']}%)\n\n"
-            f"<b>Что делают кнопки:</b>\n"
-            f"💰 <b>Изменить депозит</b> — бот пересчитает риск под новую сумму.\n"
-            f"⚙️ <b>Режим торговли</b> — агрессивный (много сигналов) или консервативный (только идеальные).\n"
-            f"🤖 <b>Автоторговля</b> — включение реальных сделок на Binance (требует API-ключи).")
-    
-    return text, InlineKeyboardMarkup(inline_keyboard=get_portfolio_keyboard().inline_keyboard)
+            f"🤖 Автоторговля: <b>{auto}</b> · API: {keys}\n"
+            f"⚠ Открытый риск: <b>{calculate_portfolio_risk(uid):.1f}%</b> "
+            f"(макс {s['max_open_risk']}%)\n\n"
+            f"<i>Выберите, что изменить:</i>")
+    return text, get_portfolio_keyboard()
 
 
 async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
