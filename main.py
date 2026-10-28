@@ -2275,37 +2275,18 @@ async def analyze_coin(coin, user_id=None, force=False):
         return cached[2], None
         
     try: 
-        # 1. Пытаемся получить свечи со всех бирж
         tf_data, source = await get_market_data(coin)
-    except Exception: 
-        # 2. ЕСЛИ БИРЖИ ЗАБАНИЛИ: Берем резервную цену
+    except Exception as e: 
+        log.warning(f"Основные биржи не дали свечи для {coin}: {e}")
         fallback_price = await get_fallback_price(coin)
         
-        # 3. ЕСЛИ И РЕЗЕРВНЫЕ ИСТОЧНИКИ УПАЛИ: Выдаем умное предупреждение
         if not fallback_price:
-            dummy_text = (
-                f"🪙 <b>Анализ актива: {html.escape(coin)}</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "🚫 <b>ВХОД В СДЕЛКУ СТРОГО НЕ РЕКОМЕНДОВАН</b> 🚫\n\n"
-                "<b>Причина:</b>\n"
-                "В данный момент отсутствуют актуальные рыночные данные по этой монете. "
-                "Все доступные биржи и резервные источники не отвечают (возможна блокировка IP или технический сбой).\n\n"
-                "⚠️ <b>Почему это опасно?</b>\n"
-                "• <b>Нет графика:</b> невозможно рассчитать уровни входа, тейк-профиты и стоп-лоссы.\n"
-                "• <b>Слепая зона:</b> индикаторы не работают, ИИ не может дать точный прогноз.\n"
-                "• <b>Высокий риск:</b> торговля в таких условиях равносильна игре в казино.\n\n"
-                "<i>Пожалуйста, воздержитесь от открытия позиций по этому активу. "
-                "Попробуйте запросить анализ чуть позже или выберите другую монету.</i>"
-            )
-            dummy_res = {
-                "text": dummy_text, "img": None, "coin": coin, 
-                "entry": 0, "tps": [0,0,0], "sls": [0,0], "is_long": True, 
-                "side": "N/A", "price": 0, "type": "Нет данных", 
-                "strength": 0, "verdict": "WAIT", "source": "none"
-            }
-            return dummy_res, None
+            return None, f"🚫 Не удалось получить данные по <b>{html.escape(coin)}</b>. Все биржи и резервные API молчат. Попробуйте позже."
             
-        # Если есть хотя бы резервная цена, создаем упрощенный анализ
+        # СОЗДАЕМ ФЕЙКОВЫЙ ГРАФИК ДЛЯ ИИ И РИСОВАЛКИ
+        import pandas as pd
+        dummy_df = pd.DataFrame({"open": [fallback_price]*5, "high": [fallback_price]*5, "low": [fallback_price]*5, "close": [fallback_price]*5, "volume": [0]*5, "ema20": [fallback_price]*5, "ema50": [fallback_price]*5})
+        
         tf_data = {
             "4h": {
                 "price": fallback_price, "ema20": fallback_price, "ema50": fallback_price, "ema200": fallback_price,
@@ -2313,7 +2294,7 @@ async def analyze_coin(coin, user_id=None, force=False):
                 "z_score": 0.0, "vol_delta": 0.0, "recent_low": fallback_price * 0.95, "recent_high": fallback_price * 1.05,
                 "long_prob": 50.0, "confidence": 50.0, "qv24": 1000000, "regime": "флэт",
                 "squeeze": False, "reasons": ["Взяты данные из резервного API (биржа в бане)"], 
-                "patterns": [], "sr": {"support": fallback_price * 0.95, "resistance": fallback_price * 1.05}, "df": None
+                "patterns": [], "sr": {"support": fallback_price * 0.95, "resistance": fallback_price * 1.05}, "df": dummy_df
             }
         }
         source = "Резервный API"
