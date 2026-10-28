@@ -2195,7 +2195,8 @@ async def news_watcher_loop():
                         text, img_url = await prepare_news(force=True)
                         if text:
                             img = await download_bytes(img_url) if img_url else None
-                            sent, *_ = await broadcast({"text": text, "photo": img, "kb": kb_nav(back=False), "nav": []})
+                            kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]], back=False)
+                            sent, *_ = await broadcast({"text": text, "photo": img, "kb": kb, "nav": []})
                             stats["news_sent"] += sent
         except Exception as e:
             log.warning(f"news_watcher: {e}")
