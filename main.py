@@ -1314,16 +1314,23 @@ async def get_simple_price(coin):
 TF_WEIGHTS = {"1d": 0.30, "4h": 0.30, "1h": 0.25, "15m": 0.15}
 
 def quick_check(tf_data):
-    """Быстрый фильтр: 4h и 1d должны смотреть в одну сторону."""
     if "4h" not in tf_data or "1d" not in tf_data: 
         return None
     p4, p1 = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
-    if (p4 >= 50) != (p1 >= 50): 
-        return None
+    
+    # Убрали жесткое требование совпадения 4h и 1d
+    # Теперь бот смотрит на среднее значение
     wp = (p4 + p1) / 2
     strength = max(wp, 100 - wp)
-    if strength < CONF_STAGE1 or tf_data["4h"]["adx"] < 15 or tf_data["4h"]["qv24"] < MIN_QV24: 
+    
+    # Снизили порог уверенности с 60 до 55
+    if strength < 55: 
         return None
+        
+    # Снизили требование к силе тренда (ADX) с 15 до 10
+    if tf_data["4h"]["adx"] < 10: 
+        return None
+        
     return wp >= 50, strength
 
 def collect_reasons(tf_data, is_long, tfs=("1d", "4h", "1h"), limit=5):
