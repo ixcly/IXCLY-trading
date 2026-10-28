@@ -1193,9 +1193,15 @@ async def get_market_data_light(coin, tfs=tuple(TFS)):
     if pref:
         ex = next((e for e in EXCHANGES if e["name"] == pref[1]), None)
         if ex:
-            res = await _try_exchange(ex, pref[0], tfs)
-            if res: 
-                return res
+            try:
+                res = await _try_exchange(ex, pref[0], tfs)
+                if res: 
+                    return res
+            except Exception:
+                # Если биржа забанила, забываем её для этой монеты
+                if coin in preferred_source:
+                    del preferred_source[coin]
+                
     return await get_market_data(coin, tfs)
 
 async def get_simple_price(coin):
