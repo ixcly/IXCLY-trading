@@ -2342,25 +2342,89 @@ async def news_watcher_loop():
         await asyncio.sleep(600)
 
 # --- ДОБАВИТЬ ЭТУ НОВУЮ ФУНКЦИЮ ПЕРЕД news_watcher_loop ---
+_news_alerted = set()  # (link, uid, coin): чтобы не повторять уведомления
+
+
+def _parse_news_verdicts(text):
+    try:
+        arr = json.loads(re.search(r"\[.*\]", text or "", re.S).group(0))
+        out = {}
+        for d in arr:
+            coin = str(d.get("coin", "")).upper().strip()
+            action = str(d.get("action", "")).upper().strip()
+            impact = str(d.get("impact", "")).upper().strip()
+            reason = str(d.get("reason", "")).strip()
+            if coin and action in ("CLOSE", "HOLD") and impact in ("NONE", "WEAK", "STRONG") and has_cyr(reason, 5):
+                out[coin] = {"action": action, "impact": impact, "reason": shorten(reason, 220)}
+        return out or None
+    except Exception:
+        return None
+
+
 async def check_news_conflicts_with_signals():
-    """Если вышла новость, проверяем активные сделки и пишем юзерам, если тренд по новости против них"""
-    if market_bias.get("bias", 0) == 0: return
-    
-    news_bias = market_bias["bias"]
+    """Новость против позиции: ИИ решает по каждой монете, влияет ли она реально. Пишем только если надо закрывать."""
+    nb, link = market_bias.get("bias", 0), market_bias.get("link")
+    if nb == 0 or not link:
+        return
+    if len(_news_alerted) > 2000:
+        _news_alerted.clear()
+
+    targets = []  # (uid_str, coin, pos)
     for uid_str, u in list(_users().items()):
+        if not get_user_notif_settings(uid_str)["signals"]:
+            continue
         for coin, pos in (u.get("open_positions") or {}).items():
-            if pos.get("waiting_entry"): continue # Пропускаем лимитки
-            
-            is_against = (news_bias == 1 and pos["side"] == "SHORT") or (news_bias == -1 and pos["side"] == "LONG")
-            if is_against:
-                text = (f"🚨 <b>Срочная новость против вашей позиции!</b>\n\n"
-                        f"Монета: <b>{coin}</b> ({pos['side']})\n"
-                        f"Новость: {html.escape(shorten(market_bias['title_ru'], 100))}\n"
-                        f"Фон: <b>{'Бычий 🟢' if news_bias == 1 else 'Медвежий 🔴'}</b>\n\n"
-                        f"⚠️ Рекомендуем подтянуть стоп-лосс или закрыть позицию.")
-                kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]], back=False)
-                try:
-                    await _send_new(int(uid_str), text, kb, None)
+            if pos.get("waiting_entry") or pos.get("notified_close"):
+                continue
+            against = (nb == 1 and pos["side"] == "SHORT") or (nb == -1 and pos["side"] == "LONG")
+            if against and (link, uid_str, coin) not in _news_alerted:
+                targets.append((uid_str, coin, pos))
+    if not targets:
+        return
+
+    coins = sorted({c for _, c, _ in targets})
+    sides = {c: sorted({p["side"] for _, cc, p in targets if cc == c}) for c in coins}
+    pos_txt = "; ".join(f"{c} ({'/'.join(sides[c])})" for c in coins)
+    news_txt = (f"Заголовок: {market_bias.get('title_ru')}\nСуть: {market_bias.get('summary')}\n"
+                f"Влияние: {market_bias.get('impact')}\nУпомянутые монеты: {market_bias.get('coins')}")
+    prompt = f"""Ты риск-менеджер крипто-трейдера. Вышла новость, общий фон: {'бычий' if nb == 1 else 'медвежий'}.
+{news_txt}
+
+Открытые позиции против фона: {pos_txt}.
+Для КАЖДОЙ монеты реши, надо ли закрывать позицию.
+Правила:
+- CLOSE только если новость напрямую касается этой монеты или её экосистемы, либо это рыночный шок (регуляторы, взлом крупной биржи или протокола, ETF, ФРС и макро), способный сильно двинуть цену.
+- Локальные, региональные и мелкие новости, партнёрства без влияния на цену, новости про другие проекты: impact NONE или WEAK, action HOLD.
+- Не закрывай только потому, что фон новости противоположен позиции.
+Верни СТРОГО JSON-массив без markdown:
+[{{"coin":"ETH","impact":"NONE или WEAK или STRONG","action":"CLOSE или HOLD","reason":"1 предложение по-русски"}}]"""
+
+    text, _eng = await ask_ai_named(prompt, validate=lambda t: _parse_news_verdicts(t) is not None, timeout=22, free_timeout=25)
+    verdicts = _parse_news_verdicts(text) if text else None
+
+    if verdicts is None:
+        # ИИ недоступен: действуем осторожно, только если монета названа в новости напрямую
+        blob = f"{market_bias.get('title_ru', '')} {market_bias.get('summary', '')} {market_bias.get('coins', '')}".upper()
+        verdicts = {c: {"action": "CLOSE", "impact": "STRONG", "reason": "Монета напрямую упомянута в новости."}
+                    for c in coins if re.search(rf"\b{re.escape(c)}\b", blob)}
+
+    for uid_str, coin, pos in targets:
+        _news_alerted.add((link, uid_str, coin))
+        v = verdicts.get(coin)
+        if not v or v["action"] != "CLOSE" or v["impact"] != "STRONG":
+            continue
+        text = (f"🚨 <b>Закройте позицию: {html.escape(coin)} ({pos['side']})</b>\n\n"
+                f"📰 {html.escape(shorten(market_bias.get('title_ru', ''), 120))}\n"
+                f"Фон: <b>{'Бычий 🟢' if nb == 1 else 'Медвежий 🔴'}</b>\n\n"
+                f"💡 {html.escape(v['reason'])}")
+        kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+                     [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
+        try:
+            await _send_new(int(uid_str), text, kb, None)
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+
                 except Exception:
                     pass
 
