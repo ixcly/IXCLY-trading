@@ -3550,14 +3550,32 @@ def screen_stats_list(list_type, page, per=10):
     return f"{titles.get(list_type, '')}\nНайдено: <b>{len(items)}</b>", kb_nav(rows + [nav])
 
 
-def screen_sig_list(category):
+def screen_sig_list(uid, category):
+    active = get_active_signals()
+    
     if category == "Все":
-        active = get_active_signals()
+        # Фильтруем "Все сигналы" под режим торговли пользователя
+        u = _users().get(str(uid), {})
+        mode = u.get("trade_mode", "balanced")
+        threshold = {"aggressive": 60, "balanced": 66, "conservative": 80}.get(mode, 0)
+        active = [x for x in active if x.get("strength", 0) >= threshold]
+        title = f"Сигналы (режим {mode})"
+    elif category.startswith("mode:"):
+        # Фильтруем по конкретному выбранному режиму
+        mode = category.split(":")[1]
+        threshold = {"aggressive": 60, "balanced": 66, "conservative": 80}.get(mode, 0)
+        active = [x for x in active if x.get("strength", 0) >= threshold]
+        mode_names = {"aggressive": "🟢 Агрессивный", "balanced": "🟡 Сбалансированный", "conservative": "🔴 Консервативный"}
+        title = f"Режим: {mode_names.get(mode, mode)}"
+    elif category != "Все":
+        # Фильтруем по типу сигнала (Краткосрочный, Среднесрочный и т.д.)
+        active = [x for x in active if x.get("type") == category]
+        title = f"Сигналы: {category}"
     else:
-        active = [x for x in get_active_signals() if x.get("type") == category]
+        title = "Сигналы: Все"
     
     if not active:
-        return f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас активных сигналов в этой категории нет.</i>", kb_nav()
+        return f"📋 <b>{title}</b>\n\n<i>Сейчас активных сигналов в этой категории нет.</i>", kb_nav()
         
     rows = []
     for x in active[:20]: # Показываем до 20 монет
@@ -3568,7 +3586,7 @@ def screen_sig_list(category):
             callback_data=f"c:{x['coin']}"
         )])
         
-    return f"📋 <b>Сигналы: {category}</b>\n\nВыберите монету:", kb_nav(rows)
+    return f"📋 <b>{title}</b>\n\nВыберите монету:", kb_nav(rows)
 
 
 def get_portfolio_keyboard():
