@@ -2808,7 +2808,7 @@ async def scan_once(send=True):
                     tf_data.update(extra)
                 except Exception:
                     pass
-                setup = evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True, onchain_change=onchain)
+                setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True, onchain_change=onchain)
                 if setup["valid"]:
                     stage2.append((coin, tf_data, setup))
 
