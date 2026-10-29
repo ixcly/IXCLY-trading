@@ -2971,20 +2971,38 @@ async def send_position_update(uid, coin, pos):
     entry, side = pos["entry_price"], pos["side"]
     sign = 1 if side == "LONG" else -1
 
+    # === 1. ОЖИДАНИЕ ЛИМИТКИ ===
     if pos.get("waiting_entry"):
-        # ... (твой код проверки лимитки)
+        dist_pct = abs(price - entry) / entry * 100
+        text = (f"⏳ <b>Ожидание входа: {coin} ({side})</b>\n\n"
+                f"Целевая цена (лимит): <code>{fmt(entry)}</code>\n"
+                f"Цена сейчас: <code>{fmt(price)}</code>\n"
+                f"Расстояние: <b>{dist_pct:.2f}%</b>\n\n"
+                f"💡 <b>План:</b> Ждем отката цены к уровню входа. "
+                f"Если цена резко улетит в сторону профита, не догоняем её по рынку — просто пропускаем сделку.")
+        
+        kb = kb_nav([
+            [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
+            [InlineKeyboardButton(text="❌ Отменить ордер", callback_data=f"pos:close:{coin}")],
+            [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+        ], back=False)
+        
+        try:
+            await _send_new(uid, text, kb, None)
+        except Exception as e:
+            log.info(f"Ошибка отправки ожидания по {coin}: {e}")
         return
 
+    # === 2. СДЕЛКА АКТИВНА ===
     pnl = sign * (price - entry) / entry * 100
     
-    # === ЛОГИКА ВИРТУАЛЬНОГО DCA ===
     advice = ""
+    # Логика Виртуального DCA
     try:
         tf_data, _ = await get_market_data_light(coin, ("4h",))
         atr_4h = tf_data["4h"]["atr"]
         rsi_4h = tf_data["4h"]["rsi"]
         
-        # Если цена ушла против нас на 2 ATR, но RSI 4h > 40 (для лонга)
         dist_to_entry = (entry - price) if side == "LONG" else (price - entry)
         
         if dist_to_entry > (2 * atr_4h):
@@ -3000,55 +3018,31 @@ async def send_position_update(uid, coin, pos):
                           f"Новый средний вход: <code>{fmt(new_avg)}</code>. Стоп остается прежним.")
     except Exception:
         pass
-    # ===============================
     
     if not advice:
-        if pnl < -3.0: advice = "🛑 Цена идет против вас. Будьте готовы к стопу."
-        else: advice = "⏳ Тренд в силе. Держим позицию по плану."
-
-    text = (f"📊 <b>Обновление сделки: {coin} ({side})</b>\n\n"
-            f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
-            f"Текущий PnL: <b>{pnl:+.2f}%</b>\n\n"
-            f"💡 <b>План:</b> {advice}")
-    # ... (дальше твой код отправки сообщения _send_new)
-        
         try:
-            await _send_new(uid, text, kb, None)
-        except Exception as e:
-            log.info(f"Ошибка отправки ожидания по {coin}: {e}")
-        return # Выходим, так как PnL еще нет
+            tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
+            trend_1h_long = tf_data["1h"]["long_prob"] >= 50
+            trend_4h_long = tf_data["4h"]["long_prob"] >= 50
+        except Exception:
+            trend_1h_long = True if side == "LONG" else False
+            trend_4h_long = True if side == "LONG" else False
 
-    # === ОБЫЧНАЯ ЛОГИКА ДЛЯ АКТИВНОЙ СДЕЛКИ ===
-    pnl = sign * (price - entry) / entry * 100
-    
-    try:
-        tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
-        trend_1h_long = tf_data["1h"]["long_prob"] >= 50
-        trend_4h_long = tf_data["4h"]["long_prob"] >= 50
-    except Exception:
-        trend_1h_long = True if side == "LONG" else False
-        trend_4h_long = True if side == "LONG" else False
-
-    advice = ""
-    urgency = "info"
-    
-    is_trend_against = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
-    is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
-    
-    if pos.get("hit_tp1") and is_global_against:
-        advice = "⚠️ <b>Глобальный тренд развернулся.</b> Рекомендуем закрыть остаток позиции."
-        urgency = "danger"
-    elif is_trend_against and pnl < 0:
-        advice = "🚨 <b>Тренд на 1h против вас, PnL в минусе.</b> Сократите позицию или подтяните стоп."
-        urgency = "danger"
-    elif pos.get("hit_tp2"):
-        advice = "🔥 <b>TP2 взят!</b> Держим оставшиеся 20% до TP3."
-    elif pos.get("hit_tp1"):
-        advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Держим дальше."
-    elif pnl < -3.0:
-        advice = "🛑 Цена идет против вас. Будьте готовы к стопу."
-    else:
-        advice = "⏳ Тренд в силе. Держим позицию по плану."
+        is_trend_against = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
+        is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
+        
+        if pos.get("hit_tp1") and is_global_against:
+            advice = "⚠️ <b>Глобальный тренд развернулся.</b> Рекомендуем закрыть остаток позиции."
+        elif is_trend_against and pnl < 0:
+            advice = "🚨 <b>Тренд на 1h против вас, PnL в минусе.</b> Сократите позицию или подтяните стоп."
+        elif pos.get("hit_tp2"):
+            advice = "🔥 <b>TP2 взят!</b> Держим оставшиеся 20% до TP3."
+        elif pos.get("hit_tp1"):
+            advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Держим дальше."
+        elif pnl < -3.0:
+            advice = "🛑 Цена идет против вас. Будьте готовы к стопу."
+        else:
+            advice = "⏳ Тренд в силе. Держим позицию по плану."
 
     text = (f"📊 <b>Обновление сделки: {coin} ({side})</b>\n\n"
             f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
