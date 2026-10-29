@@ -3557,16 +3557,30 @@ def screen_sig_list(uid, category):
         # Фильтруем "Все сигналы" под режим торговли пользователя
         u = _users().get(str(uid), {})
         mode = u.get("trade_mode", "balanced")
-        threshold = {"aggressive": 60, "balanced": 66, "conservative": 80}.get(mode, 0)
-        active = [x for x in active if x.get("strength", 0) >= threshold]
-        title = f"Сигналы (режим {mode})"
+        if mode == "aggressive":
+            active = [x for x in active if x.get("type") in ("Краткосрочный", "Среднесрочный")]
+        elif mode == "balanced":
+            active = [x for x in active if x.get("type") in ("Среднесрочный", "Долгосрочный")]
+        elif mode == "conservative":
+            active = [x for x in active if x.get("type") == "Долгосрочный"]
+        title = f"Все сигналы (режим {mode})"
+        
     elif category.startswith("mode:"):
-        # Фильтруем по конкретному выбранному режиму
+        # Фильтруем по конкретному выбранному режиму (по типу сигнала)
         mode = category.split(":")[1]
-        threshold = {"aggressive": 60, "balanced": 66, "conservative": 80}.get(mode, 0)
-        active = [x for x in active if x.get("strength", 0) >= threshold]
-        mode_names = {"aggressive": "🟢 Агрессивный", "balanced": "🟡 Сбалансированный", "conservative": "🔴 Консервативный"}
-        title = f"Режим: {mode_names.get(mode, mode)}"
+        if mode == "aggressive":
+            active = [x for x in active if x.get("type") in ("Краткосрочный", "Среднесрочный")]
+            title = "Режим: 🟢 Агрессивный"
+        elif mode == "balanced":
+            active = [x for x in active if x.get("type") in ("Среднесрочный", "Долгосрочный")]
+            title = "Режим: 🟡 Сбалансированный"
+        elif mode == "conservative":
+            active = [x for x in active if x.get("type") == "Долгосрочный"]
+            title = "Режим: 🔴 Консервативный"
+        else:
+            active = []
+            title = f"Режим: {mode}"
+            
     elif category != "Все":
         # Фильтруем по типу сигнала (Краткосрочный, Среднесрочный и т.д.)
         active = [x for x in active if x.get("type") == category]
