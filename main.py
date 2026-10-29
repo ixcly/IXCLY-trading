@@ -5194,13 +5194,13 @@ async def main():
 
     background, pollers = [], []
     try:
-        for tg_bot, key in ((bot, "main_bot"), (admin_bot, "admin_bot")):
-            if tg_bot:
-                try:
-                    runtime[key] = f"@{(await tg_bot.get_me()).username}"
-                except Exception as e:
-                    log.error(f"get_me ({key}): {e}")
-             try:
+            for tg_bot, key in ((bot, "main_bot"), (admin_bot, "admin_bot")):
+                if tg_bot:
+                    try:
+                        runtime[key] = f"@{(await tg_bot.get_me()).username}"
+                    except Exception as e:
+                        log.error(f"get_me ({key}): {e}")
+
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot:
                 await admin_bot.delete_webhook(drop_pending_updates=True)
@@ -5262,7 +5262,7 @@ async def main():
         await asyncio.gather(*background, return_exceptions=True)
         for tg_bot in (bot, admin_bot):
             if tg_bot:
-                try:
+        try:
                     await tg_bot.session.close()
                 except Exception:
                     pass
