@@ -2922,19 +2922,25 @@ async def scan_once(send=True):
 
         stage2 = []
 
-                async def s2(item):
+        # ИСПРАВЛЕНИЕ 1: Выровнен отступ для async def s2
+        async def s2(item):
             coin, tf2, _ = item
             if coin_recently_lost(coin):
                 return
             async with sem:
-                ...
+                tf_data = dict(tf2)
+                try:
+                    extra, _src = await get_market_data_light(coin, ("1h", "15m"))
+                    tf_data.update(extra)
+                except Exception:
+                    pass
                 setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True,
                                              onchain_change=onchain, conf_threshold=CONF_FINAL + adaptive_conf_bonus())
 
                 if setup["valid"]:
                     stage2.append((coin, tf_data, setup))
 
-        # ВАЖНО: Добавлен вызов второго этапа (его не было)
+        # ВАЖНО: Вызов второго этапа (его не было)
         await asyncio.gather(*[s2(i) for i in stage1])
 
         # ВАЖНО: Добавлены недостающие переменные
@@ -2979,8 +2985,11 @@ async def scan_once(send=True):
                 key = f"{r['coin']}:{r['side']}"
                 if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
                     continue
-                                if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
+                    
+                # ИСПРАВЛЕНИЕ 2: Выровнен отступ для if len(new_items)
+                if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
                     continue
+                    
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
                 if grp is not None:
                     if (grp, r["side"]) in used_groups:
