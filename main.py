@@ -2634,13 +2634,19 @@ async def get_scan_universe():
 
 
 def signals_overview():
+    # Заново берем актуальные сигналы из базы, чтобы цифры всегда были точными
     active_signals = get_active_signals()
     cnt = {t: sum(1 for x in active_signals if x.get("type") == t) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
+    total_active = len(active_signals)
     
     text = f"🔥 <b>Актуальные сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(shorten(market_bias.get('impact', 'Нейтральный фон'), 500))}\n\nВыберите категорию:"
-    rows = [[InlineKeyboardButton(text=f"⚡ Краткосрочный ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
-            [InlineKeyboardButton(text=f"⏳ Среднесрочный ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрок")],
-            [InlineKeyboardButton(text=f"🛡 Долгосрочный ({cnt['Долгосрочный']})", callback_data="sig_list:Долгосрок")]]
+    rows = [
+        [InlineKeyboardButton(text=f"📋 Все сигналы ({total_active})", callback_data="sig_list:Все")],
+        [InlineKeyboardButton(text=f"⚡ Краткосрочный ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
+        [InlineKeyboardButton(text=f"⏳ Среднесрочный ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрок")],
+        [InlineKeyboardButton(text=f"🛡 Долгосрочный ({cnt['Долгосрочный']})", callback_data="sig_list:Долгосрок")],
+        [InlineKeyboardButton(text="🔄 Обновить меню", callback_data="last_signals")]
+    ]
     return text, kb_nav(rows)
 
 
