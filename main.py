@@ -2594,6 +2594,20 @@ async def execute_auto_trade(user_id, coin, is_long, entry, sl, tp):
 # =====================================================================
 # СИГНАЛЫ: сканер, симуляция по свечам, мониторинг, аномалии
 # =====================================================================
+def get_active_signals():
+    """Возвращает список реально актуальных сигналов (скрывает те, что висят без входа > 12 часов)."""
+    hist = load_signal_history()
+    now = time.time()
+    active, seen = [], set()
+    for x in sorted(hist, key=lambda k: k.get("ts", 0), reverse=True):
+        key = f"{x['coin']}_{x['side']}"
+        if x.get("status") in ("active", "in_trade") and key not in seen:
+            if x.get("status") == "active" and (now - x.get("ts", 0) > 12 * 3600):
+                continue
+            seen.add(key)
+            active.append(x)
+    return active
+
 async def get_scan_universe():
     """Монеты, реально торгующиеся на Binance с достаточным оборотом: сканер не тратит запросы на мёртвые тикеры."""
     try:
