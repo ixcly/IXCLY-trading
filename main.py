@@ -3890,6 +3890,14 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     try:
         if data == "ignore":
             return await safe_answer(cb)
+        if data.startswith("toggle_setting:"):
+            key = data.split(":", 1)[1]
+            u = _users().get(str(uid), {})
+            curr = u.get(f"notify_{key}", True)
+            set_user_field(uid, **{f"notify_{key}": not curr})
+            await safe_answer(cb, "✅ Настройка сохранена")
+            text, kb = screen_settings(uid)
+            return await present(chat_id, text, kb, edit_msg=msg)
         if data == "del_msg":
             await safe_answer(cb, "Удалено")
             return await safe_delete(msg)
