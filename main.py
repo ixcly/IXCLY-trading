@@ -2829,6 +2829,45 @@ def signals_overview():
     ]
     return text, kb_nav(rows)
 
+def recent_results(n=20):
+    hist = sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True)
+    return [x for x in hist if x.get("status") in ("win", "loss")][:n]
+
+
+def adaptive_conf_bonus():
+    """Если последние сигналы отрабатывают плохо, порог уверенности растёт сам."""
+    r = recent_results(20)
+    if len(r) < 8:
+        return 0
+    wr = sum(1 for x in r if x["status"] == "win") / len(r)
+    return 10 if wr < 0.35 else 6 if wr < 0.45 else 0
+
+
+def streak_pause():
+    r = recent_results(3)
+    return len(r) == 3 and all(x["status"] == "loss" for x in r) and time.time() - r[0]["ts"] < 6 * 3600
+
+
+def coin_recently_lost(coin, hours=24):
+    now = time.time()
+    return any(x["coin"] == coin and x.get("status") == "loss" and now - x.get("ts", 0) < hours * 3600
+               for x in load_signal_history())
+
+
+def set_blackout(secs):
+    global news_blackout_until
+    news_blackout_until = time.time() + secs
+
+
+async def btc_shock():
+    """Свеча BTC на 1h больше 2.5 ATR: рынок в шоке, сигналы не выдаём."""
+    try:
+        tf, _ = await get_market_data_light("BTC", ("1h",))
+        last = tf["1h"]["df"].iloc[-1]
+        return (last["high"] - last["low"]) > 2.5 * last["atr"]
+    except Exception:
+        return False
+
 
 async def scan_once(send=True):
     if scan_lock.locked():
@@ -2837,6 +2876,14 @@ async def scan_once(send=True):
         t0 = time.time()
         if time.time() < news_blackout_until:
             return []
+        if streak_pause():
+            log.info("Сканер на паузе: серия убытков")
+            return []
+        if await btc_shock():
+            set_blackout(3600)
+            await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
+            return []
+
         if streak_pause():
             log.info("Сканер на паузе: серия убытков")
             return []
@@ -2875,20 +2922,15 @@ async def scan_once(send=True):
 
         stage2 = []
 
-        async def s2(item):
+                async def s2(item):
             coin, tf2, _ = item
             if coin_recently_lost(coin):
                 return
             async with sem:
-                tf_data = dict(tf2)
-                try:
-                    extra, _src = await get_market_data_light(coin, ("1h", "15m"))
-                    tf_data.update(extra)
-                except Exception:
-                    pass
+                ...
                 setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True,
-                                             onchain_change=onchain,
-                                             conf_threshold=CONF_FINAL + adaptive_conf_bonus())
+                                             onchain_change=onchain, conf_threshold=CONF_FINAL + adaptive_conf_bonus())
+
                 if setup["valid"]:
                     stage2.append((coin, tf_data, setup))
 
@@ -2937,9 +2979,8 @@ async def scan_once(send=True):
                 key = f"{r['coin']}:{r['side']}"
                 if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
                     continue
-                if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
+                                if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
                     continue
-                
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
                 if grp is not None:
                     if (grp, r["side"]) in used_groups:
