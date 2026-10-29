@@ -3244,101 +3244,61 @@ async def scanner_loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 async def send_position_update(uid, coin, pos):
-    if pos.get("notified_close"): return
+    if pos.get("notified_close") or pos.get("waiting_entry"): 
+        return # Если ждем лимитку или уже закрыли, не спамим
+        
     price = await get_simple_price(coin)
     if not price: return
         
     entry, side = pos["entry_price"], pos["side"]
     sign = 1 if side == "LONG" else -1
-
-    # === 1. ОЖИДАНИЕ ЛИМИТКИ ===
-    if pos.get("waiting_entry"):
-        dist_pct = abs(price - entry) / entry * 100
-        text = (f"⏳ <b>Ожидание входа: {coin} ({side})</b>\n\n"
-                f"Целевая цена (лимит): <code>{fmt(entry)}</code>\n"
-                f"Цена сейчас: <code>{fmt(price)}</code>\n"
-                f"Расстояние: <b>{dist_pct:.2f}%</b>\n\n"
-                f"💡 <b>План:</b> Ждем отката цены к уровню входа. "
-                f"Если цена резко улетит в сторону профита, не догоняем её по рынку — просто пропускаем сделку.")
-        
-        kb = kb_nav([
-            [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
-            [InlineKeyboardButton(text="❌ Отменить ордер", callback_data=f"pos:close:{coin}")],
-            [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
-        ], back=False)
-        
-        try:
-            await _send_new(uid, text, kb, None)
-        except Exception as e:
-            log.info(f"Ошибка отправки ожидания по {coin}: {e}")
-        return
-
-    # === 2. СДЕЛКА АКТИВНА ===
     pnl = sign * (price - entry) / entry * 100
     
     advice = ""
-    # Логика Виртуального DCA
+    trend_1h_long, trend_4h_long = True, True
+    
     try:
-        tf_data, _ = await get_market_data_light(coin, ("4h",))
-        atr_4h = tf_data["4h"]["atr"]
-        rsi_4h = tf_data["4h"]["rsi"]
-        
-        dist_to_entry = (entry - price) if side == "LONG" else (price - entry)
-        
-        if dist_to_entry > (2 * atr_4h):
-            if side == "LONG" and rsi_4h > 40:
-                new_avg = (entry + price) / 2
-                advice = (f"⚠️ <b>Просадка. Тренд не сломан (RSI 4h: {rsi_4h:.0f}).</b>\n"
-                          f"Рекомендую усредниться (DCA) на уровне <code>{fmt(price)}</code>.\n"
-                          f"Новый средний вход: <code>{fmt(new_avg)}</code>. Стоп остается прежним.")
-            elif side == "SHORT" and rsi_4h < 60:
-                new_avg = (entry + price) / 2
-                advice = (f"⚠️ <b>Просадка. Тренд не сломан (RSI 4h: {rsi_4h:.0f}).</b>\n"
-                          f"Рекомендую усредниться (DCA) на уровне <code>{fmt(price)}</code>.\n"
-                          f"Новый средний вход: <code>{fmt(new_avg)}</code>. Стоп остается прежним.")
+        tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
+        trend_1h_long = tf_data["1h"]["long_prob"] >= 50
+        trend_4h_long = tf_data["4h"]["long_prob"] >= 50
     except Exception:
         pass
-    
-    if not advice:
-        try:
-            tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
-            trend_1h_long = tf_data["1h"]["long_prob"] >= 50
-            trend_4h_long = tf_data["4h"]["long_prob"] >= 50
-        except Exception:
-            trend_1h_long = True if side == "LONG" else False
-            trend_4h_long = True if side == "LONG" else False
 
-        is_trend_against = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
-        is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
-        
-        if pos.get("hit_tp1") and is_global_against:
-            advice = "⚠️ <b>Глобальный тренд развернулся.</b> Рекомендуем закрыть остаток позиции."
-        elif is_trend_against and pnl < 0:
-            advice = "🚨 <b>Тренд на 1h против вас, PnL в минусе.</b> Сократите позицию или подтяните стоп."
-        elif pos.get("hit_tp2"):
-            advice = "🔥 <b>TP2 взят!</b> Держим оставшиеся 20% до TP3."
-        elif pos.get("hit_tp1"):
-            advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Держим дальше."
-        elif pnl < -3.0:
-            advice = "🛑 Цена идет против вас. Будьте готовы к стопу."
+    is_trend_against_1h = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
+    is_trend_against_4h = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
+
+    # Формируем умный совет на основе состояния сделки
+    if pos.get("hit_tp2"):
+        advice = "🔥 <b>Сделка в отличном плюсе.</b> Трейлинг-стоп защищает вашу прибыль. Держим до TP3, следим за 4h трендом."
+    elif pos.get("hit_tp1"):
+        if is_trend_against_1h:
+            advice = "⚠️ <b>TP1 взят, но тренд на 1h развернулся против нас.</b> Бот подтягивает трейлинг-стоп. Будьте готовы к выходу."
         else:
-            advice = "⏳ Тренд в силе. Держим позицию по плану."
+            advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Включен трейлинг. Держим до TP2."
+    elif pnl > 1.5:
+        advice = "🛡 <b>Сделка в плюсе!</b> Скоро бот переведет стоп в безубыток (при 1.5%) и включит трейлинг."
+    elif is_trend_against_4h and pnl < 0:
+        advice = "🚨 <b>Глобальный тренд (4h) против вас, PnL в минусе.</b> Высокий риск! Рекомендуем сократить позицию."
+    elif is_trend_against_1h and pnl < 0:
+        advice = "⚠️ <b>Тренд на 1h против вас.</b> Подтяните стоп-лосс поближе к текущей цене."
+    else:
+        advice = "⏳ <b>Тренд в силе.</b> Держим позицию по плану, ждем отработки целей."
 
-    text = (f"📊 <b>Обновление сделки: {coin} ({side})</b>\n\n"
+    text = (f"📊 <b>Отчет по сделке: {coin} ({side})</b>\n\n"
             f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
-            f"Текущий PnL: <b>{pnl:+.2f}%</b>\n\n"
-            f"💡 <b>План:</b> {advice}")
+            f"Текущий PnL: <b>{pnl:+.2f}%</b>\n"
+            f"Текущий стоп: <code>{fmt(pos['sl1'])}</code>\n\n"
+            f"💡 <b>Статус:</b> {advice}")
     
     kb = kb_nav([
-        [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-        [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
-        [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+        [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
+        [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]
     ], back=False)
     
     try:
         await _send_new(uid, text, kb, None)
     except Exception as e:
-        log.info(f"Ошибка отправки обновления по {coin}: {e}")
+        log.info(f"Ошибка отправки отчета по {coin}: {e}")
 
 
 async def position_update_loop():
