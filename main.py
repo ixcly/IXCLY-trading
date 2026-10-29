@@ -2867,8 +2867,10 @@ async def scan_once(send=True):
 
         stage2 = []
 
-        async def s2(item):
+                async def s2(item):
             coin, tf2, _ = item
+            if coin_recently_lost(coin):
+                return
             async with sem:
                 tf_data = dict(tf2)
                 try:
@@ -2876,15 +2878,12 @@ async def scan_once(send=True):
                     tf_data.update(extra)
                 except Exception:
                     pass
-                setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True, onchain_change=onchain)
+                setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True,
+                                             onchain_change=onchain,
+                                             conf_threshold=CONF_FINAL + adaptive_conf_bonus())
                 if setup["valid"]:
                     stage2.append((coin, tf_data, setup))
 
-        await asyncio.gather(*[s2(i) for i in stage1])
-        stage2 = sorted(stage2, key=lambda x: x[2]["strength"], reverse=True)[:15]
-
-        final, bt_pass = [], 0
-        sem3 = asyncio.Semaphore(2)
 
         async def s3(item):
             nonlocal bt_pass
