@@ -4476,8 +4476,50 @@ async def morning_briefing_loop():
             await broadcast({"text": text, "kb": kb, "nav": [("menu",)]}, only_ids=active_chats, notif_type="briefing")
         except Exception as e:
             log.error(f"Ошибка утреннего брифинга: {e}")
-            
         await asyncio.sleep(60) # Пауза после отправки
+
+async def price_alerts_loop():
+    """Цикл проверки алертов по цене (раз в 2 минуты)"""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            for uid_str, u in list(_users().items()):
+                alerts = u.get("price_alerts", [])
+                if not alerts:
+                    continue
+                
+                triggered = []
+                for alert in alerts:
+                    coin = alert["coin"]
+                    price = await get_simple_price(coin)
+                    if not price:
+                        continue
+                    
+                    op = alert["op"]
+                    target = alert["price"]
+                    
+                    is_hit = (op == ">" and price >= target) or (op == "<" and price <= target)
+                    if is_hit:
+                        triggered.append(alert)
+                        text = (f"🔔 <b>Алерт сработал!</b>\n\n"
+                                f"Монета: <b>{coin}</b>\n"
+                                f"Условие: <code>{op} {fmt(target)}</code>\n"
+                                f"Текущая цена: <code>{fmt(price)}</code>")
+                        kb = kb_nav([[InlineKeyboardButton(text="📈 Анализ", callback_data=f"c:{coin}")]], back=False)
+                        try:
+                            await _send_new(int(uid_str), text, kb, None)
+                        except Exception:
+                            pass
+                
+                if triggered:
+                    with STATE_LOCK:
+                        u["price_alerts"] = [a for a in alerts if a not in triggered]
+                    state_touch()
+                    
+        except Exception as e:
+            log.error(f"price_alerts_loop: {e}")
+        await asyncio.sleep(120)
+
 
 async def heartbeat_loop():
     while True:
