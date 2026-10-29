@@ -2916,6 +2916,24 @@ async def scan_once(send=True):
         if streak_pause():
             log.info("Сканер на паузе: серия убытков")
             return []
+            
+        # --- НОВАЯ ПРОВЕРКА: МАКРО-НОВОСТИ ФРС ---
+        if await check_macro_calendar():
+            set_blackout(3600) # Ставим паузу на 1 час
+            await notify_admin("🏦 <b>Макро-новость (ФРС/CPI)!</b>\nСканер на паузе 1 час во избежание проскальзываний.")
+            return []
+        # ------------------------------------------
+            
+        if await btc_shock():
+            set_blackout(3600)
+            await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
+            return []
+
+        # Дальше идет дублирующийся код проверок (можете его удалить, если он там есть)
+        if streak_pause():
+            log.info("Сканер на паузе: серия убытков")
+            return []
+        # ... и так далее
         if await btc_shock():
             set_blackout(3600)
             await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
