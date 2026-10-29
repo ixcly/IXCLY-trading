@@ -2420,8 +2420,10 @@ async def check_news_conflicts_with_signals():
         kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
                      [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
         try:
-            await _send_new(int(uid_str), text, kb, None)
-        await asyncio.sleep(0.05)
+                    await _send_new(int(uid_str), text, kb, None)
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    log.info(f"Ошибка отправки уведомления о новости: {e}")
 
 
 
