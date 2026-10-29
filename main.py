@@ -3650,7 +3650,6 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             await safe_answer(cb, "Удалено")
             return await safe_delete(msg)
             if data == "trade_history":
-            if data == "trade_history":
             await safe_answer(cb)
             text, kb = screen_trade_history(uid)
             return await present(chat_id, text, kb, edit_msg=msg)
