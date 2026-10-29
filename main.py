@@ -2829,6 +2829,14 @@ async def scan_once(send=True):
         t0 = time.time()
         if time.time() < news_blackout_until:
             return []
+        if streak_pause():
+            log.info("Сканер на паузе: серия убытков")
+            return []
+        if await btc_shock():
+            set_blackout(3600)
+            await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
+            return []
+            
         if time.time() - market_bias["ts"] > 900:
             await update_market_bias()
         ctx = await get_context(force=True)
