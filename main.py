@@ -287,7 +287,7 @@ market_bias = {"bias": 0, "title_ru": "Нет данных", "summary": "", "imp
                "published": "", "link": "", "engine": "none", "ts": 0}
 last_news_link = None
 last_backup_msg = {}
-next_timers = {"scanner": 0, "positions": 0, "news_watcher": 0, "backup": 0, "global_signals": 0, "anomaly": 0}
+next_timers = {"scanner": 0, "positions": 0, "pos_updates": 0, "news_watcher": 0, "backup": 0, "global_signals": 0, "anomaly": 0}
 exchange_bans = {}
 news_blackout_until = 0.0
 
