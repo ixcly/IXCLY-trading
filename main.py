@@ -3748,7 +3748,6 @@ async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
     if kind == "sig_modes":
         text, kb = screen_sig_modes()
         return await present(chat_id, text, kb, edit_msg=edit_msg)
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
     if kind == "news":
         return await screen_news(chat_id, uid, edit_msg)
     if kind == "interesting":
