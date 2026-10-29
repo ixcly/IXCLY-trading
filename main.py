@@ -1431,6 +1431,36 @@ async def get_simple_price(coin):
 _funding_cache = {}
 
 
+async def check_order_book_walls(coin, current_price, is_long):
+    """Ищет огромные лимитные стены в стакане (более $500k) в пределах 2% от цены."""
+    try:
+        # Берем стакан с фьючерсов Binance (публичный API)
+        url = "https://fapi.binance.com/fapi/v1/depth"
+        j = await http_json(url, params={"symbol": f"{coin}USDT", "limit": 50}, timeout=5)
+        if not j or "bids" not in j or "asks" not in j:
+            return None
+
+        bids = [(float(p), float(q)) for p, q in j["bids"]]
+        asks = [(float(p), float(q)) for p, q in j["asks"]]
+
+        # Ищем самую большую стену в пределах 2% от текущей цены
+        # Стена на покупку (bids) - поддержка
+        max_bid_wall = max((p * q for p, q in bids if current_price * 0.98 <= p <= current_price), default=0)
+        # Стена на продажу (asks) - сопротивление
+        max_ask_wall = max((p * q for p, q in asks if current_price <= p <= current_price * 1.02), default=0)
+
+        wall_size = 500_000 # Порог в $500,000
+
+        if is_long and max_ask_wall > wall_size:
+            return f"Стена на продажу (${max_ask_wall/1000:.0f}K) прямо над ценой. Риск отскока."
+        if not is_long and max_bid_wall > wall_size:
+            return f"Стена на покупку (${max_bid_wall/1000:.0f}K) прямо под ценой. Риск отскока."
+            
+    except Exception as e:
+        log.info(f"Ошибка стакана {coin}: {e}")
+    return None
+
+
 async def get_funding(coin):
     c = _funding_cache.get(coin)
     if c and time.time() - c[0] < 600:
