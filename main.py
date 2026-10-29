@@ -3415,8 +3415,7 @@ async def check_position(user_id, coin, pos):
 
     current_sl = pos["sl1"]
 
-        pos["peak_pnl"] = max(pos.get("peak_pnl", 0.0), pnl)
-
+    pos["peak_pnl"] = max(pos.get("peak_pnl", 0.0), pnl)
 
     # --- А) Защита прибыли до TP1 (Безубыток) ---
     if not pos["hit_tp1"] and pnl >= 1.5 and current_sl != entry:
