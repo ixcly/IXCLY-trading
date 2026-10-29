@@ -5279,9 +5279,8 @@ async def main():
                 except Exception:
                     pass
         await http.close()
-    if __name__ == "__main__":
-    try:
+    if __name__ == "__main__":  # <--- ЛИШНИЙ ОТСТУП
+    try:                        # <--- НЕПРАВИЛЬНЫЙ ОТСТУП
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         log.info("Бот остановлен")
-
