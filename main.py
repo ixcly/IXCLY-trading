@@ -3356,6 +3356,21 @@ def screen_portfolio(uid):
             f"<i>Выберите, что изменить:</i>")
     return text, get_portfolio_keyboard()
 
+def screen_trade_history(uid):
+    u = _users().get(str(uid), {})
+    th = u.get("trade_history", [])
+    if not th:
+        return "📜 <b>История моих входов</b>\n\n<i>Вы еще не входили в сделки.</i>", kb_nav()
+
+    text = "📜 <b>История моих входов (последние 50)</b>\n\n"
+    # Показываем последние 15 сделок, чтобы не превысить лимит сообщения
+    for t in reversed(th[-15:]):
+        dt = datetime.fromtimestamp(t["entered_at"]).strftime("%d.%m %H:%M")
+        icon = "🟢" if t["side"] == "LONG" else "🔴"
+        text += f"{icon} <b>{t['coin']}</b> ({dt})\n"
+        text += f"Вход: <code>{fmt(t['entry'])}</code> | TP1: <code>{fmt(t['tp1'])}</code> | SL: <code>{fmt(t['sl1'])}</code>\n\n"
+        
+    return trim_html(text, 4000), kb_nav()
 
 async def _show_exchange_menu(chat_id, msg):
     kb = InlineKeyboardMarkup(inline_keyboard=[
