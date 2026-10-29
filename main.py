@@ -4013,9 +4013,9 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             return await present(chat_id, text, kb, edit_msg=msg)
 
         if data == "autotrade_menu":
-            await safe_answer(cb)
-            u = _users().get(str(uid), {})
-            if u.get("auto_trade_enabled"):
+            await safe_answer(cb, "⛔ Временно недоступно", show_alert=True)
+            await present(chat_id, "⛔ <b>Автоторговля временно недоступна.</b>\n\nПриносим извинения за неудобства. Бот продолжает работать в режиме ручных сигналов и аналитики.", kb_nav(), edit_msg=msg)
+            return
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🔴 Выключить автоторговлю",  callback_data="at:off")],
                     [InlineKeyboardButton(text="🔄 Сменить биржу / ключи",   callback_data="autotrade_menu_sel")],
