@@ -4559,20 +4559,27 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
                 await tg_bot.delete_webhook(drop_pending_updates=(attempt == 1))
             except Exception:
                 pass
-            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=30)
+            
+            # Ключевое исправление: явная обработка разрыва соединения
+            try:
+                await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=30)
+            except Exception as poll_err:
+                log.warning(f"{name}: Ошибка поллинга: {poll_err}")
+                raise poll_err
+
             if not stop_event.is_set():
                 log.warning(f"{name}: поллинг завершился, перезапуск через 5 сек")
                 await asyncio.sleep(5)
                 attempt = 0
         except asyncio.CancelledError:
             raise
-        except (TelegramNetworkError, aiohttp.ClientError) as e:
-            log.warning(f"{name}: сетевая ошибка: {e}")
+        except (TelegramNetworkError, aiohttp.ClientError, ConnectionError) as e:
+            log.warning(f"{name}: сетевая ошибка ({e}), повтор через {min(2 ** attempt, 60)} сек")
             await asyncio.sleep(min(2 ** attempt, 60))
         except TelegramConflictError:
             await asyncio.sleep(min(2 ** attempt, 30))
         except Exception as e:
-            log.error(f"{name}: упал: {e}")
+            log.error(f"{name}: непредвиденная ошибка: {e}")
             await asyncio.sleep(10)
 
 async def morning_briefing_loop():
