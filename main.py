@@ -1554,6 +1554,19 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
         strength -= 10
         notes.append(f"приток TVL {onchain_change}% против шорта (−10)")
 
+    # === ВРЕМЕННОЙ ФИЛЬТР ===
+    msk = timezone(timedelta(hours=3))
+    now_msk = datetime.now(msk)
+    is_weekend = now_msk.weekday() >= 5
+    is_night = now_msk.hour < 8 or now_msk.hour >= 22
+    
+    if is_weekend or is_night:
+        strength -= 7
+        reason = "Ночь" if is_night else "Выходные"
+        notes.append(f"{reason}: низкая ликвидность (−7)")
+    # ========================
+
+    
     # === ДЕТЕКТОР ЛОЖНЫХ ПРОБОЕВ ===
     fake_breakout = False
     df_info = info.get("df")
