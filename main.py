@@ -5104,8 +5104,10 @@ async def invalidate_flipped_signals():
 
 
 async def main():
-    global http, news_lock, scan_lock
+    global http, news_lock, scan_lock, MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
     keep_alive()
+
     news_lock, scan_lock = asyncio.Lock(), asyncio.Lock()
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.0"})
     load_state_file()
