@@ -5172,13 +5172,6 @@ async def invalidate_flipped_signals():
     if changed:
         save_signal_history(hist)
       
-def keep_alive():
-    global _web_started
-    if not _web_started:
-        _web_started = True
-        log.info("🌐 Попытка запуска Flask...")
-        Thread(target=_run_web, daemon=True).start()
-
 # ... (остальной код)
 
 async def main():
@@ -5278,9 +5271,11 @@ async def main():
                     await tg_bot.session.close()
                 except Exception:
                     pass
-        await http.close()
-    if __name__ == "__main__":  # <--- ЛИШНИЙ ОТСТУП
-    try:                        # <--- НЕПРАВИЛЬНЫЙ ОТСТУП
+
+await http.close()
+
+if __name__ == "__main__":
+    try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         log.info("Бот остановлен")
