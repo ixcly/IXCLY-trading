@@ -1536,13 +1536,31 @@ def pattern_lines(tf_data):
     return [f"{tf}: {', '.join(p[0] for p in tf_data[tf]['patterns'][:3])}"
             for tf in ("1d", "4h", "1h") if tf in tf_data and tf_data[tf]["patterns"]]
 
-async def get_open_interest(coin):
+async def get_open_interest_change(coin):
+    """
+    Возвращает изменение Open Interest за последние 15 минут в процентах.
+    """
     try:
-        # Используем фьючерсный API Binance
-        j = await http_json(f"https://fapi.binance.com/fapi/v1/openInterest", params={"symbol": f"{coin}USDT"}, timeout=5)
-        return float(j["openInterest"])
-    except Exception:
-        return None
+        url = "https://fapi.binance.com/futures/data/openInterestHist"
+        # Запрашиваем историю OI (период 15 минут, последние 2 свечи)
+        params = {"symbol": f"{coin}USDT", "period": "15m", "limit": 2}
+        async with http.get(url, params=params, timeout=5) as r:
+            if r.status != 200:
+                return 0.0
+            data = await r.json(content_type=None)
+            
+            if len(data) < 2:
+                return 0.0
+                
+            oi_old = float(data[0]["sumOpenInterest"])
+            oi_new = float(data[1]["sumOpenInterest"])
+            
+            # Считаем процент изменения
+            change_pct = ((oi_new - oi_old) / oi_old) * 100
+            return round(change_pct, 2)
+    except Exception as e:
+        log.info(f"Ошибка OI {coin}: {e}")
+        return 0.0
 
 async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
     """Итоговая оценка: мульти-ТФ + фильтры (BTC, F&G, funding, on-chain, новости). valid=True только если прошли гейты."""
