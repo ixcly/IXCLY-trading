@@ -5178,7 +5178,7 @@ async def main():
     global http, news_lock, scan_lock, MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
     
-    # Запускаем Flask СРАЗУ, до всех await
+    # СРАЗУ ЗАПУСКАЕМ ВЕБ-СЕРВЕР (чтобы Render увидел порт и не убил бота)
     keep_alive()
 
     news_lock, scan_lock = asyncio.Lock(), asyncio.Lock()
@@ -5271,9 +5271,11 @@ async def main():
                     await tg_bot.session.close()
                 except Exception:
                     pass
-                    await http.close()
-                    if __name__ == "__main__":
-                        try:
-                            asyncio.run(main())
-                        except (KeyboardInterrupt, SystemExit):
-                            log.info("Бот остановлен")
+        await http.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Бот остановлен")
