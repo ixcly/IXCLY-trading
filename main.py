@@ -3934,7 +3934,7 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid, chat_id, msg, data = cb.from_user.id, cb.message.chat.id, cb.message, cb.data or ""
     simple = {"news_menu": ("news",), "interesting_menu": ("interesting",), "last_signals": ("signals",), "global_stats": ("gstats",),
               "sig:menu": ("fav",), "portfolio": ("portfolio",), "search": ("search", 0), "sig:save_new": ("fav_save", 0),
-              "sig:del_menu": ("fav_del",), "settings_menu": ("settings",)}
+              "sig:del_menu": ("fav_del",), "settings_menu": ("settings",), "sig_modes": ("sig_modes",)}
     try:
         if data == "ignore":
             return await safe_answer(cb)
