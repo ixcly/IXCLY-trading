@@ -3974,10 +3974,21 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             if not res or res.get("price_only"):
                 return await safe_answer(cb, "Не удалось получить уровни", True)
                 
-            set_user_open_position(uid, coin, {"side": res["side"], "entry_price": res["entry"], "entered_at": time.time(),
-                                               "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0],
-                                               "sl2": res["sls"][1], "risk_pct": get_user_risk_settings(uid)["risk_pct"],
-                                               "notified_close": False, "notified_tp": False})
+            set_user_open_position(uid, coin, {
+                "side": res["side"], 
+                "entry_price": res["entry"], 
+                "created_at": time.time(), # Время выставления ордера
+                "entered_at": time.time(),
+                "tp1": res["tps"][0], 
+                "tp2": res["tps"][1], 
+                "tp3": res["tps"][2], 
+                "sl1": res["sls"][0],
+                "sl2": res["sls"][1], 
+                "risk_pct": get_user_risk_settings(uid)["risk_pct"],
+                "notified_close": False, 
+                "notified_tp": False,
+                "waiting_entry": True # ФЛАГ ОЖИДАНИЯ ЛИМИТКИ
+            })
             
             # === СОХРАНЕНИЕ В ИСТОРИЮ ВХОДОВ ===
             with STATE_LOCK:
@@ -3993,19 +4004,18 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
                     "sl1": res["sls"][0],
                     "entered_at": time.time()
                 })
-                u["trade_history"] = th[-50:] # Храним последние 50
+                u["trade_history"] = th[-50:]
             state_touch()
-            # ====================================
             
             # === АВТОСОХРАНЕНИЕ В ИЗБРАННОЕ ===
             text_to_save = render_caption(res, uid)
             await asyncio.to_thread(add_user_saved_signal, uid, coin, text_to_save, res)
             
-            text = (f"{'🟢' if res['side'] == 'LONG' else '🔴'} <b>Позиция открыта</b>\n\nМонета: <b>{coin}</b>\nНаправление: <b>{res['side']}</b>\n"
-                    f"Вход: <code>{fmt(res['entry'])}</code>\n\n⭐ <i>Сигнал автоматически добавлен в Избранное.</i>\n\n"
-                    f"Буду следить и сообщу, когда лучше закрыть.")
+            text = (f"⏳ <b>Лимитный ордер выставлен</b>\n\nМонета: <b>{coin}</b>\nНаправление: <b>{res['side']}</b>\n"
+                    f"Ожидаем откат к цене: <code>{fmt(res['entry'])}</code>\n\n"
+                    f"<i>Бот не открыл сделку по рынку. Теперь он будет ждать, пока цена дойдет до уровня входа.</i>")
             
-            await safe_answer(cb, f"⭐ {coin} сохранен в Избранное!")
+            await safe_answer(cb, f"⏳ Ждем цену входа...")
             return await present(chat_id, text, fav_view_keyboard(uid, coin), edit_msg=msg)
         if data.startswith("pos:close:"):
             coin = data.split(":")[2]
