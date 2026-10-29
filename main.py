@@ -1568,8 +1568,12 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
         reject = "4h и 1d смотрят в разные стороны"
     if not reject and info["adx"] < 15:
         reject = f"Вялый рынок (ADX {info['adx']:.0f})"
-    if scan and info["qv24"] < MIN_QV24:
-        reject = reject or "Низкая ликвидность"
+        agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
+    if not reject and agree < min(3, len(tfs)):
+        reject = f"Таймфреймы не согласны ({agree}/{len(tfs)})"
+    if not reject and info["atr"] / info["price"] > 0.06:
+        reject = "Слишком высокая волатильность (ATR > 6%)"
+
 
     if "1h" in tf_data and (tf_data["1h"]["long_prob"] >= 50) != is_long and tf_data["1h"]["confidence"] >= 65:
         strength -= 8
