@@ -4598,6 +4598,276 @@ if admin_dp:
         except Exception as e:
             await m.answer(f"Ошибка восстановления: {html.escape(str(e))}", parse_mode="HTML")
 
+# =====================================================================
+# MINI APP (Telegram WebApp): ВСТАВИТЬ ЦЕЛИКОМ перед блоком "# ЗАПУСК" (перед async def run_polling)
+# Рядом с bot.py положите webapp.html. На Render задайте WEBAPP_URL = https://ВАШ-СЕРВИС.onrender.com/app
+# =====================================================================
+import hmac
+from urllib.parse import parse_qsl
+from flask import request, Response, send_file
+from aiogram.types import WebAppInfo, MenuButtonWebApp
+
+WEBAPP_URL = clean_key(os.getenv("WEBAPP_URL")) or (
+    os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") + "/app" if os.getenv("RENDER_EXTERNAL_URL") else None)
+MAIN_LOOP = None
+MODE_TYPES = {"aggressive": ("Краткосрочный", "Среднесрочный"), "balanced": ("Среднесрочный", "Долгосрочный"),
+              "conservative": ("Долгосрочный",)}
+MODE_NAMES = {"aggressive": "🟢 Агрессивный", "balanced": "🟡 Сбалансированный", "conservative": "🔴 Консервативный"}
+NOTIFY_NAMES = {"signals": "Сигналы", "news": "Новости", "anomalies": "Аномалии объёма",
+                "pos_updates": "Отчёты по сделкам", "briefing": "Утренний брифинг"}
+
+
+def tg_auth(init):
+    """Проверка подписи initData от Telegram (HMAC-SHA256)."""
+    try:
+        pairs = dict(parse_qsl(init, keep_blank_values=True))
+        got = pairs.pop("hash")
+        check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
+            return None
+        if time.time() - int(pairs.get("auth_date", 0)) > 86400:
+            return None
+        return json.loads(pairs["user"])
+    except Exception:
+        return None
+
+
+@app.route("/app")
+def mini_page():
+    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp.html"))
+
+
+@app.route("/api/<act>", methods=["POST"])
+def mini_api(act):
+    d = request.get_json(silent=True) or {}
+    u = tg_auth(d.get("initData", ""))
+    if not u:
+        return Response('{"error":"Нет доступа: откройте приложение из Telegram"}', 401, mimetype="application/json")
+    try:
+        out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(100)
+    except Exception as e:
+        log.warning(f"mini_api {act}: {e}")
+        out = {"error": "Ошибка сервера, попробуйте ещё раз"}
+    return Response(json.dumps(out, ensure_ascii=False, default=str), mimetype="application/json")
+
+
+def _sig_item(x):
+    return {k: x.get(k) for k in ("coin", "side", "type", "strength", "entry", "tp1", "sl1", "status", "ts", "max_tp_hit")}
+
+
+async def _tell(uid, text, kb=None):
+    """Уведомление в чат Telegram о действии из приложения."""
+    try:
+        await _send_new(uid, text, kb or kb_nav(back=False), None)
+    except Exception as e:
+        log.info(f"mini notify {uid}: {e}")
+
+
+async def mini_dispatch(uid, u, act, d):
+    if uid not in active_chats:
+        active_chats.add(uid)
+        await asyncio.to_thread(save_user_data, uid, u.get("username"), u.get("first_name"))
+    uu = _users().get(str(uid), {})
+    coin = normalize_ticker(str(d.get("coin", ""))) if d.get("coin") else None
+
+    if act == "me":
+        return {"name": u.get("first_name") or "трейдер", "version": VERSION, "risk": get_user_risk_settings(uid),
+                "mode": uu.get("trade_mode", "balanced"), "notif": get_user_notif_settings(uid),
+                "saved": get_user_saved_signals(uid), "alerts": uu.get("price_alerts", []),
+                "webhook": uu.get("webhook_url", ""), "news": market_bias, "ctx": await get_context(),
+                "coins": POPULAR_COINS[:150]}
+
+    if act == "movers":
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
+        mv = [(x["symbol"][:-4], float(x["priceChangePercent"])) for x in j
+              if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
+        up = sorted([m for m in mv if m[1] > 0], key=lambda m: -m[1])[:20]
+        dn = sorted([m for m in mv if m[1] < 0], key=lambda m: m[1])[:20]
+        return {"up": random.sample(up, min(5, len(up))), "down": random.sample(dn, min(5, len(dn)))}
+
+    if act == "signals":
+        flt, items = d.get("flt", "Все"), get_active_signals()
+        mode = flt.split(":")[1] if flt.startswith("mode:") else (uu.get("trade_mode", "balanced") if flt == "Все" else None)
+        if mode in MODE_TYPES and flt != "Все":
+            items = [x for x in items if x.get("type") in MODE_TYPES[mode]]
+        elif flt not in ("Все",) and not flt.startswith("mode:"):
+            items = [x for x in items if x.get("type") == flt]
+        return {"items": [_sig_item(x) for x in items[:40]]}
+
+    if act == "analyze" and coin:
+        res, err = await analyze_coin(coin, uid=uid, force=bool(d.get("force")))
+        if err:
+            return {"error": strip_tags(err)[:200]}
+        remember_res(uid, coin, res)
+        if res.get("price_only"):
+            return {"price_only": True, "price": res["price"], "coin": coin}
+        out = {k: v for k, v in res.items() if k not in ("img", "text")}
+        out["img"] = ("data:image/png;base64," + base64.b64encode(res["img"]).decode()) if res.get("img") else None
+        s = get_user_risk_settings(uid)
+        out["risk_usdt"] = s["deposit"] * s["risk_pct"] / 100
+        out["pos_usdt"] = out["risk_usdt"] / res["risk_dist"] * res["entry"] if res["risk_dist"] > 0 else 0.0
+        out["in_fav"] = any(x["coin"] == coin for x in get_user_saved_signals(uid))
+        out["position"] = bool(get_open_position(uid, coin))
+        for oc, od in get_user_open_positions(uid).items():
+            if oc != coin and od["side"] == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
+                out["corr"] = f"Уже открыт {od['side']} по {oc}: монеты коррелируют"
+        return out
+
+    if act == "stats":
+        uniq, seen = [], set()
+        for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
+            if f"{x['coin']}_{x['side']}" not in seen:
+                seen.add(f"{x['coin']}_{x['side']}")
+                uniq.append(x)
+        lists = {s: [_sig_item(x) for x in uniq if x.get("status") == s][:30] for s in ("win", "missed", "loss", "expired")}
+        lists["active"] = [_sig_item(x) for x in get_active_signals()][:30]
+        cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("win", "missed", "loss", "expired")}
+        cnt["active"] = len(get_active_signals())
+        closed = cnt["win"] + cnt["loss"]
+        return {"counts": cnt, "lists": lists, "total": len(uniq), "wr": cnt["win"] / closed * 100 if closed else 0.0,
+                "exp_r": (cnt["win"] * 1.5 - cnt["loss"]) / closed if closed else 0.0}
+
+    if act == "news":
+        return {"bias": market_bias, "html": await get_news_batch_text()}
+
+    if act == "portfolio":
+        pos = {}
+        for c, p in get_user_open_positions(uid).items():
+            price = await get_simple_price(c) or p["entry_price"]
+            sign = 1 if p["side"] == "LONG" else -1
+            pos[c] = dict(p, price=price, pnl=sign * (price - p["entry_price"]) / p["entry_price"] * 100)
+        return {"risk": get_user_risk_settings(uid), "open_risk": calculate_portfolio_risk(uid), "mode": uu.get("trade_mode", "balanced"),
+                "positions": pos, "saved": get_user_saved_signals(uid), "history": uu.get("trade_history", [])[-15:]}
+
+    if act == "toggle" and d.get("key") in NOTIFY_NAMES:
+        k = d["key"]
+        new = not uu.get(f"notify_{k}", True)
+        set_user_field(uid, **{f"notify_{k}": new})
+        return {"msg": f"{NOTIFY_NAMES[k]}: {'вкл' if new else 'выкл'}"}
+
+    if act == "set_deposit":
+        v = float(d.get("value", 0))
+        if v <= 0:
+            return {"error": "Депозит должен быть больше 0"}
+        set_user_field(uid, deposit=v)
+        await _tell(uid, f"💰 <b>Депозит обновлён из приложения:</b> ${v:g}")
+        return {"msg": "Депозит сохранён"}
+
+    if act == "set_risk":
+        v = float(d.get("value", 0))
+        if not 0.1 <= v <= 10:
+            return {"error": "Риск от 0.1 до 10%"}
+        set_user_field(uid, risk_pct=v)
+        await _tell(uid, f"📉 <b>Риск на сделку:</b> {v:g}%")
+        return {"msg": "Риск сохранён"}
+
+    if act == "set_mode" and d.get("value") in MODE_NAMES:
+        m = d["value"]
+        set_user_field(uid, trade_mode=m, conf_final={"aggressive": 60, "balanced": 66, "conservative": 80}[m])
+        await _tell(uid, f"⚙️ <b>Режим торговли:</b> {MODE_NAMES[m]}")
+        return {"msg": "Режим обновлён"}
+
+    if act == "fav_add" and coin:
+        res = get_user_res(uid, coin)
+        if not res or res.get("price_only"):
+            return {"error": "Сначала откройте анализ монеты"}
+        await asyncio.to_thread(add_user_saved_signal, uid, coin, render_caption(res, uid), res)
+        await _tell(uid, f"⭐ <b>{coin}</b> сохранён в избранное.", kb_nav([[InlineKeyboardButton(text="📈 Анализ", callback_data=f"c:{coin}")]], back=False))
+        return {"msg": f"{coin} сохранён"}
+
+    if act == "fav_del" and coin:
+        await asyncio.to_thread(del_user_saved_signal, uid, coin)
+        return {"msg": "Удалено"}
+
+    if act == "pos_enter" and coin:
+        res = get_user_res(uid, coin)
+        if not res or res.get("price_only"):
+            return {"error": "Данные устарели, обновите анализ"}
+        for oc, od in get_user_open_positions(uid).items():
+            if oc != coin and od.get("side") == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
+                return {"error": f"Уже открыт {od['side']} по {oc}: {coin} сильно коррелирует"}
+        set_user_open_position(uid, coin, {
+            "side": res["side"], "entry_price": res["entry"], "created_at": time.time(), "entered_at": time.time(),
+            "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
+            "risk_pct": get_user_risk_settings(uid)["risk_pct"], "notified_close": False, "notified_tp": False,
+            "waiting_entry": True})
+        with STATE_LOCK:
+            th = STATE["users"].setdefault(str(uid), {"active": True}).setdefault("trade_history", [])
+            th.append({"coin": coin, "side": res["side"], "entry": res["entry"], "tp1": res["tps"][0], "tp2": res["tps"][1],
+                       "tp3": res["tps"][2], "sl1": res["sls"][0], "entered_at": time.time()})
+            STATE["users"][str(uid)]["trade_history"] = th[-50:]
+        state_touch()
+        await asyncio.to_thread(add_user_saved_signal, uid, coin, render_caption(res, uid), res)
+        await _tell(uid, f"⏳ <b>Лимитный ордер выставлен</b>\n\nМонета: <b>{coin}</b> · {res['side']}\nЖдём откат к: <code>{fmt(res['entry'])}</code>\n\n"
+                         f"<i>Бот сообщит, когда ордер сработает, и будет вести сделку: безубыток, TP1-3, трейлинг.</i>",
+                    kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]], back=False))
+        return {"msg": "Ордер выставлен, ждём вход"}
+
+    if act == "pos_close" and coin:
+        set_user_open_position(uid, coin, None)
+        hist = load_signal_history()
+        for x in hist:
+            if x["coin"] == coin and x.get("status") in ("active", "in_trade"):
+                x["status"] = "closed_manual"
+        save_signal_history(hist)
+        await _tell(uid, f"❌ Позиция <b>{coin}</b> закрыта вручную.")
+        return {"msg": "Позиция закрыта"}
+
+    if act == "alert_add" and coin:
+        price = float(d.get("price", 0))
+        if price <= 0:
+            return {"error": "Неверная цена"}
+        cur = await get_simple_price(coin)
+        op = d.get("op") or (">" if cur is None or price >= cur else "<")
+        with STATE_LOCK:
+            lst = STATE["users"].setdefault(str(uid), {"active": True}).setdefault("price_alerts", [])
+            if len(lst) >= 20:
+                return {"error": "Максимум 20 алертов"}
+            lst.append({"coin": coin, "op": op, "price": price})
+        state_touch()
+        await _tell(uid, f"🔔 <b>Алерт создан:</b> {coin} {op} <code>{fmt(price)}</code>")
+        return {"msg": "Алерт создан"}
+
+    if act == "alert_del":
+        with STATE_LOCK:
+            lst = STATE["users"].get(str(uid), {}).get("price_alerts", [])
+            i = int(d.get("idx", -1))
+            if 0 <= i < len(lst):
+                lst.pop(i)
+        state_touch()
+        return {"msg": "Удалено"}
+
+    if act == "webhook":
+        url = str(d.get("url", "")).strip()
+        if url and not url.startswith("http"):
+            return {"error": "Ссылка должна начинаться с http"}
+        set_user_field(uid, webhook_url=url)
+        return {"msg": "Вебхук сохранён" if url else "Вебхук отключён"}
+
+    if act == "csv":
+        await bot.send_document(uid, BufferedInputFile(generate_csv_history(), "signals_history.csv"), caption="📊 История сигналов (CSV)")
+        return {"msg": "Отправил файл в чат"}
+
+    return {"error": "Неизвестное действие"}
+
+
+# =====================================================================
+# ИЗМЕНЕНИЯ В СУЩЕСТВУЮЩЕМ КОДЕ (3 правки)
+# =====================================================================
+# 1) В get_main_keyboard(): ПЕРВОЙ строкой списка inline_keyboard добавьте кнопку приложения:
+#        *([[B(text="🚀  Открыть IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL))]] if WEBAPP_URL else []),
+#    (WEBAPP_URL объявлена выше этого блока, поэтому блок нужно вставить ДО get_main_keyboard
+#     либо перенести две строки с WEBAPP_URL и импортом WebAppInfo в начало файла.)
+#
+# 2) В main(), сразу после `news_lock, scan_lock = ...` добавьте:
+#        global MAIN_LOOP
+#        MAIN_LOOP = asyncio.get_running_loop()
+#
+# 3) В main(), в блоке try рядом с set_my_commands, добавьте:
+#        if WEBAPP_URL:
+#            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL)))
+
 
 # =====================================================================
 # ЗАПУСК
