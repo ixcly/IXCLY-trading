@@ -1732,6 +1732,13 @@ def run_backtest_rows(rows):
 
 
 async def get_backtest(coin):
+    # Если кэш разросся до 200 монет — очищаем его, чтобы не жрал память
+    if len(bt_cache) > 200:
+        bt_cache.clear()
+        
+    c = bt_cache.get(coin)
+    if c and time.time() - c[0] < 6 * 3600:
+        return c[1]
     c = bt_cache.get(coin)
     if c and time.time() - c[0] < 6 * 3600:
         return c[1]
