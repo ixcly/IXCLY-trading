@@ -2746,7 +2746,7 @@ async def scan_once(send=True):
                 signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
                 new_items.append(r)
                 
-                hist.append({"ts": now, "expire_ts": now + 48 * 3600, "coin": r["coin"], "side": r["side"], "type": r["type"],
+                hist.append({"ts": now, "expire_ts": now + 6 * 3600, "coin": r["coin"], "side": r["side"], "type": r["type"],
                              "strength": r["strength"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1],
                              "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
                              "max_tp_hit": 0, "hit_sl": 0, "text": r["text"]})
