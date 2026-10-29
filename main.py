@@ -2922,17 +2922,17 @@ async def scan_once(send=True):
             used_groups = set()
             for r in final:
                 key = f"{r['coin']}:{r['side']}"
-            if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
-                                    if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
+                if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
                     continue
+                if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
+                    continue
+                
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
-            if grp is not None:
-            if (grp, r["side"]) in used_groups:
+                if grp is not None:
+                    if (grp, r["side"]) in used_groups:
                         continue
                     used_groups.add((grp, r["side"]))
 
-                    continue
-                
                 signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
                 new_items.append(r)
                 
