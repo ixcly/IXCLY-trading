@@ -3332,6 +3332,7 @@ def get_portfolio_keyboard():
         [B(text="💰  Изменить депозит",   callback_data="set_deposit")],
         [B(text="⚙️  Режим торговли",     callback_data="set_mode")],
         [B(text="🤖  Автоторговля",       callback_data="autotrade_menu")],
+        [B(text="📜  История моих входов", callback_data="trade_history")],  # <-- Новая кнопка
         [B(text="⬅  Назад в меню",        callback_data="menu")],
     ])
 
