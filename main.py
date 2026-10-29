@@ -2764,11 +2764,20 @@ async def scan_once(send=True):
                              
             if new_items:  # Если есть новые сигналы, сохраняем и рассылаем
                 save_signal_history(hist)
-                text, kb = signals_overview()
-                sent, *_ = await broadcast({"text": f"🆕 <b>Новых сигналов: {len(new_items)}</b>\n\n" + text, "kb": kb,
-                                            "nav": [("signals",)]})
                 stats["signals"] += len(new_items)
+                
+                # Рассылаем КАЖДЫЙ сигнал отдельным сообщением, чтобы они копились как пуши
                 for r in new_items:
+                    kb = coin_keyboard(r["coin"])
+                    
+                    for cid in list(active_chats):
+                        try:
+                            # Отправляем через _send_new, чтобы не затирать другие сообщения
+                            await _send_new(cid, r["text"], kb, r.get("img"))
+                            await asyncio.sleep(0.05) # Задержка, чтобы не получить бан от Telegram
+                        except Exception as e:
+                            log.info(f"Ошибка отправки сигнала {cid}: {e}")
+                            
                     asyncio.create_task(send_webhook_all({"event": "new_signal", "coin": r["coin"], "side": r["side"], "entry": r["entry"],
                                                           "tp1": r["tps"][0], "sl1": r["sls"][0]}))
                     asyncio.create_task(auto_trade_for_users(r))
