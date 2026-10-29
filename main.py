@@ -3054,23 +3054,60 @@ async def check_position(user_id, coin, pos):
 
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
-    
-    # Инициализация флагов для старых позиций, если их нет
+
+    # === 1. ПРОВЕРКА ОЖИДАНИЯ ВХОДА ===
+    if pos.get("waiting_entry"):
+        # Проверяем, коснулась ли цена нашего лимита
+        hit_entry = (sign * (price - entry)) <= 0
+        
+        if hit_entry:
+            # Цена коснулась! Активируем сделку
+            pos["waiting_entry"] = False
+            pos["entered_at"] = time.time()
+            set_user_open_position(user_id, coin, pos)
+            
+            text = (f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\n"
+                    f"Направление: <b>{side}</b>\n"
+                    f"Цена входа: <code>{fmt(entry)}</code>\n"
+                    f"Сейчас: <code>{fmt(price)}</code>\n\n"
+                    f"🚀 <b>Сделка активирована!</b> Теперь бот следит за тейк-профитами и стоп-лоссом.")
+            kb = kb_nav([
+                [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+                [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+            ], back=False)
+            try:
+                await _send_new(user_id, text, kb, None)
+            except Exception:
+                pass
+            return # Выходим, чтобы не проверять TP/SL в ту же секунду
+        else:
+            # Проверка, если лимитка висит уже больше 24 часов
+            if time.time() - pos.get("created_at", time.time()) > 24 * 3600:
+                set_user_open_position(user_id, coin, None)
+                text = (f"⌛ <b>Ордер отменен: {coin}</b>\n\n"
+                        f"Цена так и не дошла до уровня входа <code>{fmt(entry)}</code> за 24 часа.\n"
+                        f"Лимитная заявка снята.")
+                kb = kb_nav(back=False)
+                try:
+                    await _send_new(user_id, text, kb, None)
+                except Exception:
+                    pass
+            return # Пока ждем, дальше код не выполняем
+
+    # === 2. СДЕЛКА АКТИВНА, ПРОВЕРКА TP/SL ===
     if "hit_tp1" not in pos: pos["hit_tp1"] = False
     if "hit_tp2" not in pos: pos["hit_tp2"] = False
     if "hit_tp3" not in pos: pos["hit_tp3"] = False
     
-    # Считаем PnL ДО экстренного алерта
     pnl = sign * (price - entry) / entry * 100
 
-    # === СРОЧНЫЙ АЛЕРТ (Экстренная ситуация) ===
+    # Срочный алерт
     if pnl <= -5.0 and not pos.get("notified_urgent"):
         text = (f"🚨 <b>СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ ПО {coin}!</b>\n\n"
                 f"Направление: <b>{side}</b>\n"
-                f"Вход: <code>{fmt(entry)}</code>\n"
-                f"Сейчас: <code>{fmt(price)}</code>\n"
+                f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
                 f"Убыток: <b>{pnl:+.2f}%</b>\n\n"
-                f"⚠️ Цена резко идет против вашей позиции! Рекомендуем срочно проверить график и принять решение о закрытии.")
+                f"⚠️ Цена резко идет против вашей позиции!")
         kb = kb_nav([
             [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
             [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
@@ -3078,17 +3115,14 @@ async def check_position(user_id, coin, pos):
         ], back=False)
         try:
             await _send_new(user_id, text, kb, None)
-            pos["notified_urgent"] = True # Чтобы не спамить каждые 5 минут
+            pos["notified_urgent"] = True
             set_user_open_position(user_id, coin, pos)
         except Exception:
             pass
-    # ==========================================
     
-    # Текущие уровни
     tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
     current_sl = pos["sl1"]
     
-    # Проверяем, что достигнуто
     hit_tp1 = sign * (price - tp1) >= 0
     hit_tp2 = sign * (price - tp2) >= 0
     hit_tp3 = sign * (price - tp3) >= 0
@@ -3096,35 +3130,33 @@ async def check_position(user_id, coin, pos):
     
     reason, urgency = None, "info"
     
-    # === ЛОГИКА СРАБАТЫВАНИЯ ===
     if hit_sl:
         if current_sl == entry:
-            reason, urgency = "🛑 Сработал стоп-лосс в **безубытке** (Entry). Позиция закрыта без убытка.", "danger"
+            reason, urgency = "🛑 Сработал стоп-лосс в **безубытке** (Entry).", "danger"
         elif current_sl == tp1:
-            reason, urgency = "🛑 Сработал стоп-лосс на уровне **TP1**. Вы забрали часть профита, остальное закрыто.", "danger"
+            reason, urgency = "🛑 Сработал стоп-лосс на уровне **TP1**.", "danger"
         else:
             reason, urgency = "🛑 Сработал стоп-лосс. Позиция закрыта в убыток.", "danger"
         pos["notified_close"] = True
         
     elif hit_tp3 and not pos["hit_tp3"]:
-        reason, urgency = "✅ Достигнут **TP3**! Закрываем оставшиеся **20%**.\n🎉 Сделка успешно завершена!", "success"
+        reason, urgency = "✅ Достигнут **TP3**! Закрываем оставшиеся **20%**.", "success"
         pos["hit_tp3"] = True
         pos["notified_close"] = True
         
     elif hit_tp2 and not pos["hit_tp2"]:
-        reason, urgency = "✅ Достигнут **TP2**! Закрываем еще **30%**.\n🛡 Стоп переносим на уровень TP1.", "success"
+        reason, urgency = "✅ Достигнут **TP2**! Закрываем **30%**. Стоп на TP1.", "success"
         pos["hit_tp2"] = True
-        pos["sl1"] = tp1 # Трейлинг стоп на TP1
+        pos["sl1"] = tp1
         
     elif hit_tp1 and not pos["hit_tp1"]:
-        reason, urgency = "✅ Достигнут **TP1**! Закрываем **50%**.\n🛡 Стоп переносим в безубыток (Entry).", "success"
+        reason, urgency = "✅ Достигнут **TP1**! Закрываем **50%**. Стоп в безубыток.", "success"
         pos["hit_tp1"] = True
-        pos["sl1"] = entry # Перевод в безубыток
+        pos["sl1"] = entry
 
     if not reason:
         return
 
-    # Формируем сообщение
     text = (f"{'🛑' if urgency == 'danger' else '✅'} <b>Обновление по {coin}</b>\n\n"
             f"Направление: <b>{side}</b>\n"
             f"Вход: <code>{fmt(entry)}</code>\n"
