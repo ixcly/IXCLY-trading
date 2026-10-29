@@ -2935,7 +2935,7 @@ async def anomaly_scan_once():
                 f"Оборот за минуту: <b>${qv:,.0f}</b> (×{ratio:.0f} к среднему)\n"
                 f"Цена за минуту: <b>{chg:+.2f}%</b> {'🟢' if chg >= 0 else '🔴'}\n\n"
                 f"Крупные игроки резко входят или выходят. Часто это предшествует импульсу: проверьте график.")
-        await broadcast({"text": text, "kb": kb, "clean": False})
+        await broadcast({"text": text, "kb": kb, "clean": False}, notif_type="anomalies")
 
 
 async def anomaly_scanner_loop():
