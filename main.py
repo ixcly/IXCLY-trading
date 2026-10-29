@@ -1504,6 +1504,57 @@ async def notify_admin(text):
         try: await admin_bot.send_message(aid, text, parse_mode="HTML", disable_web_page_preview=True)
         except Exception: pass
 
+async def telegram_backup(reason="auto"):
+    global backup_dirty, last_backup_ts
+    if not admin_bot or not ADMIN_IDS: return False
+    data = (await asyncio.to_thread(flush_state)).encode("utf-8")
+    ok = False
+    caption = f"💾 БЭКАП · юзеров {len(STATE['users'])} · сигналов {len(STATE['signal_history'])} · {reason} · {datetime.now().strftime('%d.%m %H:%M')}"
+    for aid in ADMIN_IDS:
+        try:
+            msg = await admin_bot.send_document(aid, BufferedInputFile(data, "bot_state.json"), caption=caption, disable_notification=True)
+            try:
+                await admin_bot.unpin_all_chat_messages(aid)
+                await admin_bot.pin_chat_message(aid, msg.message_id, disable_notification=True)
+            except Exception: pass
+            old = last_backup_msg.get(aid)
+            if old:
+                try: await admin_bot.delete_message(aid, old)
+                except Exception: pass
+            last_backup_msg[aid] = msg.message_id
+            ok = True
+        except Exception as e:
+            log.warning(f"Бэкап админу {aid} не отправлен: {e}")
+    if ok: backup_dirty, last_backup_ts = False, time.time()
+    return ok
+
+async def telegram_restore():
+    if not admin_bot or not ADMIN_IDS: return 0
+    for aid in ADMIN_IDS:
+        try:
+            pm = getattr(await admin_bot.get_chat(aid), "pinned_message", None)
+            doc = getattr(pm, "document", None) if pm else None
+            if not doc or not (doc.file_name or "").endswith(".json"): continue
+            f = await admin_bot.get_file(doc.file_id)
+            data = json.loads((await admin_bot.download_file(f.file_path)).read().decode("utf-8"))
+            n = restore_state(data)
+            last_backup_msg[aid] = pm.message_id
+            if n: return n
+        except Exception as e:
+            log.warning(f"Восстановление из бэкапа не удалось: {e}")
+    return 0
+
+async def backup_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if backup_dirty and time.time() - last_backup_ts > 120:
+                await telegram_backup("авто")
+        except Exception as e:
+            log.warning(f"backup_loop: {e}")
+        next_timers["backup"] = time.time() + 30
+        await asyncio.sleep(30)
+
 # =====================================================================
 # TELEGRAM БОТ (ТОЛЬКО КНОПКА)
 # =====================================================================
