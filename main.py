@@ -2630,7 +2630,7 @@ async def analyze_coin(coin, uid=None, force=False):
             u = _users().get(str(uid), {})
             user_conf = float(u.get("conf_final", CONF_FINAL))
             
-        setup = evaluate_setup(coin, tf_data, ctx, funding, onchain_change=await get_onchain_context(), conf_threshold=user_conf)
+        setup = await evaluate_setup(coin, tf_data, ctx, funding, onchain_change=await get_onchain_context(), conf_threshold=user_conf)
         bt = await get_backtest(coin)
         res = await asyncio.wait_for(build_analysis(coin, tf_data, setup, bt, ctx, source), timeout=80)
         analysis_cache[coin] = (time.time(), 180, res)
