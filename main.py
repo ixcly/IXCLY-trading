@@ -3487,7 +3487,14 @@ async def screen_interesting(chat_id, uid, edit_msg):
         kb = kb_nav([[InlineKeyboardButton(text="🔄 Обновить", callback_data="interesting_menu")]])
         
     await present(chat_id, text, kb, edit_msg=edit_msg)
-
+def screen_sig_modes():
+    text = "⚙️ <b>Сигналы по типу торговли</b>\n\nВыберите режим для отображения сигналов с соответствующей минимальной уверенностью:"
+    rows = [
+        [InlineKeyboardButton(text="🟢 Агрессивный (от 60%)", callback_data="sig_list:mode:aggressive")],
+        [InlineKeyboardButton(text="🟡 Сбалансированный (от 66%)", callback_data="sig_list:mode:balanced")],
+        [InlineKeyboardButton(text="🔴 Консервативный (от 80%)", callback_data="sig_list:mode:conservative")]
+    ]
+    return text, kb_nav(rows)
 
 def screen_gstats():
     hist = load_signal_history()
