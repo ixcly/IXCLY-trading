@@ -2869,7 +2869,7 @@ async def scan_once(send=True):
 
         stage2 = []
 
-                async def s2(item):
+        async def s2(item):
             coin, tf2, _ = item
             if coin_recently_lost(coin):
                 return
@@ -2886,6 +2886,13 @@ async def scan_once(send=True):
                 if setup["valid"]:
                     stage2.append((coin, tf_data, setup))
 
+        # ВАЖНО: Добавлен вызов второго этапа (его не было)
+        await asyncio.gather(*[s2(i) for i in stage1])
+
+        # ВАЖНО: Добавлены недостающие переменные
+        bt_pass = 0
+        final = []
+        sem3 = asyncio.Semaphore(2)
 
         async def s3(item):
             nonlocal bt_pass
