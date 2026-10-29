@@ -3469,14 +3469,24 @@ async def screen_interesting(chat_id, uid, edit_msg):
         lose = sorted([x for x in movers if float(x["priceChangePercent"]) < 0], key=lambda x: float(x["priceChangePercent"]))[:20]
         rg = sorted(random.sample(gain, min(5, len(gain))), key=lambda x: -float(x["priceChangePercent"]))
         rl = sorted(random.sample(lose, min(5, len(lose))), key=lambda x: float(x["priceChangePercent"]))
+        
         text = "🧐 <b>Интересные за 24ч</b>\n\n🟢 <b>Топ роста:</b>\n"
         text += "".join(f"<code>{x['symbol'][:-4]}</code> +{float(x['priceChangePercent']):.1f}%\n" for x in rg)
         text += "\n🔴 <b>Топ падения:</b>\n"
         text += "".join(f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%\n" for x in rl)
+        
+        # Добавляем время обновления, чтобы было видно, что данные новые
+        now_msk = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M:%S')
+        text += f"\n\n🕒 <i>Обновлено: {now_msk} МСК</i>"
+        
+        kb = kb_nav([[InlineKeyboardButton(text="🔄 Обновить", callback_data="interesting_menu")]])
+        
     except Exception as e:
         log.info(f"interesting: {e}")
         text = "⚠ Биржа временно не отдаёт данные. Попробуйте позже."
-    await present(chat_id, text, kb_nav(), edit_msg=edit_msg)
+        kb = kb_nav([[InlineKeyboardButton(text="🔄 Обновить", callback_data="interesting_menu")]])
+        
+    await present(chat_id, text, kb, edit_msg=edit_msg)
 
 
 def screen_gstats():
