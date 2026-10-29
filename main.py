@@ -3274,7 +3274,10 @@ def screen_gstats():
         if f"{x['coin']}_{x['side']}" not in seen:
             seen.add(f"{x['coin']}_{x['side']}")
             uniq.append(x)
-    cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("active", "in_trade", "win", "loss", "missed", "expired")}
+            
+    active_cnt = len(get_active_signals())
+    cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("win", "loss", "missed", "expired")}
+    
     closed = cnt["win"] + cnt["loss"]
     wr = cnt["win"] / closed * 100 if closed else 0.0
     exp_r = (cnt["win"] * 1.5 - cnt["loss"]) / closed if closed else 0.0
@@ -3283,7 +3286,7 @@ def screen_gstats():
             f"🚫 Упущено: <b>{cnt['missed']}</b>\n\n<i>* Считается по свечам: вход лимиткой, TP1 засчитывается как победа "
             f"(после TP1 стоп переносится в безубыток).</i>")
     B = InlineKeyboardButton
-    rows = [[B(text=f"⏳ В работе ({cnt['active'] + cnt['in_trade']})", callback_data="stats_list:active:0"),
+    rows = [[B(text=f"⏳ В работе ({active_cnt})", callback_data="stats_list:active:0"),
              B(text=f"✅ Успешные ({cnt['win']})", callback_data="stats_list:win:0")],
             [B(text=f"🚫 Упущено ({cnt['missed']})", callback_data="stats_list:missed:0"),
              B(text=f"❌ Убыточные ({cnt['loss']})", callback_data="stats_list:loss:0")],
