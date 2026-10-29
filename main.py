@@ -2654,7 +2654,6 @@ async def get_scan_universe():
 
 
 def signals_overview():
-    # Заново берем актуальные сигналы из базы, чтобы цифры всегда были точными
     active_signals = get_active_signals()
     cnt = {t: sum(1 for x in active_signals if x.get("type") == t) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
     total_active = len(active_signals)
@@ -2665,6 +2664,7 @@ def signals_overview():
         [InlineKeyboardButton(text=f"⚡ Краткосрочный ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
         [InlineKeyboardButton(text=f"⏳ Среднесрочный ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрок")],
         [InlineKeyboardButton(text=f"🛡 Долгосрочный ({cnt['Долгосрочный']})", callback_data="sig_list:Долгосрок")],
+        [InlineKeyboardButton(text="⚙️ По типу торговли", callback_data="sig_modes")], # НОВАЯ КНОПКА
         [InlineKeyboardButton(text="🔄 Обновить меню", callback_data="last_signals")]
     ]
     return text, kb_nav(rows)
