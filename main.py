@@ -3672,9 +3672,6 @@ async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
     if kind == "sig_list":
         text, kb = screen_sig_list(screen[1])
         return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "portfolio":
-        text, kb = screen_portfolio(uid)
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
     if kind == "news":
         return await screen_news(chat_id, uid, edit_msg)
     if kind == "interesting":
@@ -3700,6 +3697,9 @@ async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
         return await present(chat_id, text + status, fav_view_keyboard(uid, screen[1]), edit_msg=edit_msg)
     if kind == "portfolio":
         text, kb = screen_portfolio(uid)
+        return await present(chat_id, text, kb, edit_msg=edit_msg)
+    if kind == "settings":
+        text, kb = screen_settings(uid)
         return await present(chat_id, text, kb, edit_msg=edit_msg)
     if kind == "pos_status":
         return await present(chat_id, await position_status_text(uid, screen[1]), kb_nav(), edit_msg=edit_msg)
