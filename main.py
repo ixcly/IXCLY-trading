@@ -1632,7 +1632,14 @@ def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=
                 strength -= 15
                 notes.append("Ложный пробой (тонкий объем) (−15)")
     # ================================
-    
+    # === ПРОВЕРКА СТЕН В СТАКАНЕ ===
+    # Проверяем только если сигнал в целом хороший, чтобы не спамить API
+    if not reject and strength >= conf_threshold - 5:
+        wall_warning = await check_order_book_walls(coin, info["price"], is_long)
+        if wall_warning:
+            strength -= 10
+            notes.append(f"🐋 Стакан: {wall_warning} (−10)")
+    # ================================
     nb = market_bias.get("bias", 0)
     news_status = "Нейтрально"
     if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
