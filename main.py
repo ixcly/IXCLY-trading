@@ -1625,6 +1625,27 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
         elif (not is_long) and funding < -0.0005:
             strength -= 5
             notes.append(f"перегрет шорт: funding {funding * 100:.3f}% (−5)")
+
+    # === АНАЛИЗ OPEN INTEREST (OI) ===
+    oi_change = await get_open_interest_change(coin)
+    
+    # Если цена летит, а открытый интерес падает — это закрытие позиций, тренд ненадежный.
+    # Если цена летит и OI растет — это новые деньги, тренд сильный.
+    
+    if is_long:
+        if oi_change > 2.0:
+            strength += 5
+            notes.append(f"OI растет (+{oi_change}%) — новые деньги в лонгах (+5)")
+        elif oi_change < -2.0:
+            strength -= 5
+            notes.append(f"OI падает ({oi_change}%) — закрытие лонгов, тренд слабый (−5)")
+    else: # Для шорта
+        if oi_change > 2.0:
+            strength += 5
+            notes.append(f"OI растет (+{oi_change}%) — новые деньги в шортах (+5)")
+        elif oi_change < -2.0:
+            strength -= 5
+            notes.append(f"OI падает ({oi_change}%) — закрытие шортов, возможен памп (−5)")
     if onchain_change < -2.0 and is_long:
         strength -= 10
         notes.append(f"отток TVL {onchain_change}% против лонга (−10)")
