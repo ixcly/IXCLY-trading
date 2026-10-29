@@ -4723,7 +4723,7 @@ async def main():
         asyncio.create_task(discover_models())
         background, pollers = [], []
 
-                background += [asyncio.create_task(c()) for c in (
+        background += [asyncio.create_task(c()) for c in (
             scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
             anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop,
             price_alerts_loop, memory_janitor_loop)]
