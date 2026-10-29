@@ -4075,8 +4075,8 @@ async def morning_briefing_loop():
             fng = ctx.get("fng")
             fng_txt = ctx.get("fng_txt", "")
             
-            hist = load_signal_history()
-            active_sigs = len({f"{x['coin']}_{x['side']}" for x in hist if x.get("status") in ("active", "in_trade")})
+            # Берем актуальные сигналы на момент утра
+            active_sigs = len(get_active_signals())
             
             gainers_txt = "нет данных"
             try:
