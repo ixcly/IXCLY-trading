@@ -1,5 +1,4 @@
 aiogram
-ccxt
 pandas
 pandas
 feedparser
