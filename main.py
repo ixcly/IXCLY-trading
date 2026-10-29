@@ -1566,9 +1566,12 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
     reject = ""
     if (p4 >= 50) != is_long or (p1d >= 50) != is_long:
         reject = "4h и 1d смотрят в разные стороны"
+        
+    # ИСПРАВЛЕНИЕ: Считаем agree ДО всех проверок
+    agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
+    
     if not reject and info["adx"] < 15:
         reject = f"Вялый рынок (ADX {info['adx']:.0f})"
-        agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
     if not reject and agree < min(3, len(tfs)):
         reject = f"Таймфреймы не согласны ({agree}/{len(tfs)})"
     if not reject and info["atr"] / info["price"] > 0.06:
