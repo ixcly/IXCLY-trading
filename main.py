@@ -3727,7 +3727,11 @@ async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
         text, kb = signals_overview()
         return await present(chat_id, text, kb, edit_msg=edit_msg)
     if kind == "sig_list":
-        text, kb = screen_sig_list(screen[1])
+        text, kb = screen_sig_list(uid, screen[1]) # Добавили uid
+        return await present(chat_id, text, kb, edit_msg=edit_msg)
+    if kind == "sig_modes":
+        text, kb = screen_sig_modes()
+        return await present(chat_id, text, kb, edit_msg=edit_msg)
         return await present(chat_id, text, kb, edit_msg=edit_msg)
     if kind == "news":
         return await screen_news(chat_id, uid, edit_msg)
