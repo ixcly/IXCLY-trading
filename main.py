@@ -1803,7 +1803,9 @@ async def get_backtest(coin):
 
 
 def bt_ok(bt):
-    return bool(bt) and bt["trades"] >= BT_MIN_TRADES and bt["avg_r"] >= BT_MIN_AVG_R and bt["winrate"] >= BT_MIN_WINRATE
+    return (bool(bt) and bt["trades"] >= BT_MIN_TRADES and bt["avg_r"] >= BT_MIN_AVG_R
+            and bt["winrate"] >= BT_MIN_WINRATE and bt["pf"] >= float(os.getenv("BT_MIN_PF", "1.15")))
+
 
 
 # =====================================================================
