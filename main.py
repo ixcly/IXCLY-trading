@@ -2780,15 +2780,10 @@ async def scan_once(send=True):
                     kb = coin_keyboard(r["coin"])
                     
                     for cid in list(active_chats):
+                        if not get_user_notif_settings(cid)["signals"]:
+                            continue
+                            
                         try:
-                            for r in new_items:
-                    kb = coin_keyboard(r["coin"])
-                    
-                    for cid in list(active_chats):
-                        if not get_user_notif_settings(cid)["signals"]: continue # НОВАЯ СТРОКА
-                        try:
-                            await _send_new(cid, r["text"], kb, r.get("img"))
-                            await asyncio.sleep(0.05)
                             # Отправляем через _send_new, чтобы не затирать другие сообщения
                             await _send_new(cid, r["text"], kb, r.get("img"))
                             await asyncio.sleep(0.05) # Задержка, чтобы не получить бан от Telegram
