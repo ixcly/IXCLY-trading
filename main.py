@@ -439,6 +439,15 @@ def user_counts():
     users = _users()
     return len(users), sum(1 for u in users.values() if isinstance(u, dict) and u.get("active", True))
 
+def get_user_notif_settings(user_id):
+    u = _users().get(str(user_id), {})
+    return {
+        "signals": u.get("notify_signals", True),
+        "news": u.get("notify_news", True),
+        "anomalies": u.get("notify_anomalies", True),
+        "pos_updates": u.get("notify_pos_updates", True),
+        "briefing": u.get("notify_briefing", True),
+    }
 
 def get_user_saved_signals(user_id):
     return list(_users().get(str(user_id), {}).get("saved_signals", []))
