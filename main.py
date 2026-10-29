@@ -3893,8 +3893,6 @@ async def cmd_api(m: types.Message):
                   "⚠ Права: только чтение и торговля, <b>БЕЗ вывода средств</b>. Включите IP-whitelist. Сообщение с ключами я сразу удалю.", kb_nav())
 
 
-
-@dp.message(Command("autotrade"))
 @dp.message(Command("autotrade"))
 async def cmd_autotrade(m: types.Message):
     await safe_delete(m)
