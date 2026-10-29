@@ -4059,10 +4059,9 @@ if admin_dp:
         if act == "stats":
             total, active = user_counts()
             up, ls = int(time.time() - stats["started"]), last_scan_info
-            await cb.message.answer(
-                f"📊 <b>Статистика</b>\n\nВерсия: {VERSION}\nЮзеров: {total} (активных {active})\nСигналов: {stats['signals']}\nНовостей: {stats['news_sent']}\n"
-                f"Аптайм: {up // 3600}ч {up % 3600 // 60}м · RAM пик {_rss_mb()} МБ\nВ бэкапе: сигналов {len(STATE['signal_history'])}, анализов {len(STATE['analysis_db'])}\n\n"
-                f"🔍 <b>Скан:</b> {ls['stage1']} → {ls['stage2']} → бэктест {ls['backtest_ok']} → итог {ls['final']} ({ls['secs']} с)", parse_mode="HTML")
+            await cb.message.answer("⏳ <b>Таймеры:</b>\n\n" + "\n".join(f"{n}: {ft(next_timers[k] - now)}" for n, k in (
+                ("🤖 Сканер", "scanner"), ("📈 Позиции (события)", "positions"), ("⏱ Обновления (20м)", "pos_updates"), 
+                ("📰 Новости", "news_watcher"), ("📊 Сигналы", "global_signals"), ("🚨 Аномалии", "anomaly"), ("💾 Бэкап", "backup"))), parse_mode="HTML")
         elif act == "users":
             lines = [f"👥 Пользователи ({len(_users())})\n"] + [
                 f"{'✅' if u.get('active', True) else '❌'} <code>{uid}</code> {html.escape(str(u.get('first_name') or u.get('username') or '—')[:18])}"
