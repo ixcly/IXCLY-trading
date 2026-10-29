@@ -2425,8 +2425,6 @@ async def check_news_conflicts_with_signals():
             pass
         await asyncio.sleep(0.05)
 
-                except Exception:
-                    pass
 
 
 # =====================================================================
