@@ -2734,19 +2734,24 @@ async def scan_once(send=True):
         if send and active_chats:
             now = time.time()
             hist = load_signal_history()
+            # Исключаем те, что уже в работе или недавно отправлялись
             busy = {f"{x['coin']}:{x['side']}" for x in hist if x.get("status") in ("active", "in_trade")}
             new_items = []
+            
             for r in final:
                 key = f"{r['coin']}:{r['side']}"
                 if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
                     continue
+                
                 signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
                 new_items.append(r)
+                
                 hist.append({"ts": now, "expire_ts": now + 48 * 3600, "coin": r["coin"], "side": r["side"], "type": r["type"],
                              "strength": r["strength"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1],
                              "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
                              "max_tp_hit": 0, "hit_sl": 0, "text": r["text"]})
-            if new_items:  # без новых сигналов никого не беспокоим
+                             
+            if new_items:  # Если есть новые сигналы, сохраняем и рассылаем
                 save_signal_history(hist)
                 text, kb = signals_overview()
                 sent, *_ = await broadcast({"text": f"🆕 <b>Новых сигналов: {len(new_items)}</b>\n\n" + text, "kb": kb,
