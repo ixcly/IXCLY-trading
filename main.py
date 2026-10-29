@@ -2997,8 +2997,11 @@ async def send_position_update(uid, coin, pos):
             f"Текущий PnL: <b>{pnl:+.2f}%</b>\n\n"
             f"💡 <b>План:</b> {advice}")
     
-    kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-                 [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
+    kb = kb_nav([
+        [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+        [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
+        [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+    ], back=False)
     
     try:
         # Отправляем как новое сообщение, чтобы оно не перезатирало другие
