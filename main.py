@@ -5191,6 +5191,7 @@ async def main():
 
     background, pollers = [], []
     try:
+        # --- БЛОК ИНИЦИАЛИЗАЦИИ ---
         for tg_bot, key in ((bot, "main_bot"), (admin_bot, "admin_bot")):
             if tg_bot:
                 try:
@@ -5207,43 +5208,46 @@ async def main():
             log.info(f"Mini App: {WEBAPP_URL}")
         else:
             log.warning("WEBAPP_URL не задан: кнопка Mini App не появится")
+
+        if POLL_START_DELAY > 0:
+            log.info(f"Ждём {POLL_START_DELAY} с, пока остановится предыдущий экземпляр…")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
+            except asyncio.TimeoutError:
+                pass
+        if stop.is_set():
+            return
+
+        # --- БЛОК ЗАПУСКА ---
+        restored = await telegram_restore()
+        if restored:
+            log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
+        load_active_chats()
+        gc.freeze()
+        asyncio.create_task(discover_models())
+        
+        background, pollers = [], []
+
+        background += [asyncio.create_task(c()) for c in (
+            scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
+            anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop,
+            price_alerts_loop, memory_janitor_loop)]
+
+        background.append(asyncio.create_task(update_market_bias()))
+
+        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
+        if admin_bot and admin_dp:
+            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
+        
+        log.info(f"🚀 IXCLY PRO v{VERSION} запущен")
+        waiter = asyncio.create_task(stop.wait())
+        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
+        waiter.cancel()
+        
     except Exception as e:
-        log.warning(f"Инициализация бота: {e}")
-
-    if POLL_START_DELAY > 0:
-        log.info(f"Ждём {POLL_START_DELAY} с, пока остановится предыдущий экземпляр…")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
-        except asyncio.TimeoutError:
-            pass
-    if stop.is_set():
-        return
-
-    restored = await telegram_restore()
-    if restored:
-        log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
-    load_active_chats()
-    gc.freeze()
-    asyncio.create_task(discover_models())
-    background, pollers = [], []
-
-    background += [asyncio.create_task(c()) for c in (
-        scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
-        anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop,
-        price_alerts_loop, memory_janitor_loop)]
-
-    background.append(asyncio.create_task(update_market_bias()))
-
-    pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
-    if admin_bot and admin_dp:
-        pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
-    log.info(f"🚀 IXCLY PRO v{VERSION} запущен")
-    waiter = asyncio.create_task(stop.wait())
-    await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
-    waiter.cancel()
-    
-    # Этот блок finally должен быть на уровне try, а не внутри него!
-    finally:
+        log.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
+        
+    finally: # <--- ТЕПЕРЬ ОН НА ОДНОМ УРОВНЕ С TRY
         log.info("Останавливаю бота…")
         for t in pollers:
             t.cancel()
@@ -5256,7 +5260,6 @@ async def main():
             t.cancel()
         await asyncio.gather(*background, return_exceptions=True)
         
-        # Правильное закрытие сессий в самом конце
         for tg_bot in (bot, admin_bot):
             if tg_bot:
                 try:
