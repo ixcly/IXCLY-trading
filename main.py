@@ -3343,7 +3343,8 @@ def coin_keyboard(coin, view="main"):
     if view == "main":
         rows = [[B(text="🔄 Обновить", callback_data=f"r:{coin}"), B(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}")],
                 [B(text="📋 Детали", callback_data=f"view:details:{coin}")],
-                [B(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")]]
+                [B(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")],
+                [B(text="🗑 Скрыть сообщение", callback_data="del_msg")]] # Добавили кнопку скрытия
     else:
         rows = [[B(text="⬅ К сигналу", callback_data=f"view:main:{coin}")]]
     return kb_nav(rows)
