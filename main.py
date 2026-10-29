@@ -3633,19 +3633,62 @@ async def backup_loop():
 # =====================================================================
 # КЛАВИАТУРЫ
 # =====================================================================
-def get_main_keyboard():
+def signals_for(uid, category="Все"):
+    items = get_active_signals()
+    if category == "Все":
+        mode = _users().get(str(uid), {}).get("trade_mode", "balanced")
+        return [x for x in items if x.get("type") in MODE_TYPES.get(mode, MODE_TYPES["balanced"])]
+    if category.startswith("mode:"):
+        return [x for x in items if x.get("type") in MODE_TYPES.get(category[5:], ())]
+    return [x for x in items if x.get("type") == category]
+
+
+def get_main_keyboard(uid=None):
     B = InlineKeyboardButton
+    n_sig = len(signals_for(uid)) if uid else len(get_active_signals())
+    n_fav = len(get_user_saved_signals(uid)) if uid else 0
+    n_pos = len(get_user_open_positions(uid)) if uid else 0
+    cnt = lambda n: f" ({n})" if n else ""
     rows = []
     if WEBAPP_URL:
         rows.append([B(text="🚀  Открыть IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL))])
     rows += [
         [B(text="📰  Новости", callback_data="news_menu"), B(text="🧐  Графики", callback_data="interesting_menu")],
-        [B(text="🔥  Последние сигналы", callback_data="last_signals"), B(text="📊  Статистика", callback_data="global_stats")],
-        [B(text="⭐  Избранное", callback_data="sig:menu"), B(text="💼  Мой Портфель", callback_data="portfolio")],
+        [B(text=f"🔥  Сигналы{cnt(n_sig)}", callback_data="last_signals"), B(text="📊  Статистика", callback_data="global_stats")],
+        [B(text=f"⭐  Избранное{cnt(n_fav)}", callback_data="sig:menu"), B(text=f"💼  Портфель{cnt(n_pos)}", callback_data="portfolio")],
         [B(text="⚙️ Настройки", callback_data="settings_menu"), B(text="📥  Экспорт CSV", callback_data="export_csv")],
         [B(text="🔍  Поиск монеты", callback_data="search")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def signals_overview(uid=None):
+    cnt = {t: len(signals_for(uid, t)) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
+    text = f"🔥 <b>Актуальные сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(shorten(market_bias.get('impact', 'Нейтральный фон'), 500))}\n\nВыберите категорию:"
+    rows = [
+        [InlineKeyboardButton(text=f"📋 Все сигналы ({len(signals_for(uid))})", callback_data="sig_list:Все")],
+        [InlineKeyboardButton(text=f"⚡ Краткосрочные ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
+        [InlineKeyboardButton(text=f"⏳ Среднесрочные ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрочный")],
+        [InlineKeyboardButton(text=f"🛡 Долгосрочные ({cnt['Долгосрочный']})", callback_data="sig_list:Долгосрочный")],
+        [InlineKeyboardButton(text="⚙️ По типу торговли", callback_data="sig_modes")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="last_signals")],
+    ]
+    return text, kb_nav(rows)
+
+
+def screen_sig_list(uid, category):
+    active = signals_for(uid, category)
+    title = {"Все": "Все сигналы (по вашему режиму)"}.get(category) or (
+        f"Режим: {MODE_NAMES.get(category[5:], category[5:])}" if category.startswith("mode:") else f"Сигналы: {category}")
+    if not active:
+        return f"📋 <b>{title}</b>\n\n<i>Сейчас сигналов в этой категории нет.</i>", kb_nav()
+    rows = []
+    for x in active[:20]:
+        c_type = {"Краткосрочный": "⚡", "Среднесрочный": "⏳"}.get(x.get("type"), "🛡")
+        rows.append([InlineKeyboardButton(text=f"{'🟢' if x['side'] == 'LONG' else '🔴'} {x['coin']} · {c_type} {x.get('strength', 0)}%",
+                                          callback_data=f"c:{x['coin']}")])
+    return f"📋 <b>{title}</b> ({len(active)})\n\nВыберите монету:", kb_nav(rows)
+
 
 
 
