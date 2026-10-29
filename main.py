@@ -4257,8 +4257,8 @@ async def main():
         background, pollers = [], []
 
         background += [asyncio.create_task(c()) for c in (
-            scanner_loop, position_monitor_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
-            anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop)] # <-- Добавили сюда
+            scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
+            anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop)]
         background.append(asyncio.create_task(update_market_bias()))
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
