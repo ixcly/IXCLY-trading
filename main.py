@@ -2944,6 +2944,85 @@ async def scanner_loop():
         next_timers["scanner"] = time.time() + SCAN_INTERVAL
         await asyncio.sleep(SCAN_INTERVAL)
 
+async def send_position_update(uid, coin, pos):
+    """Анализирует открытую позицию и присылает отчет раз в 20 минут."""
+    if pos.get("notified_close"):
+        return
+        
+    price = await get_simple_price(coin)
+    if not price:
+        return
+        
+    entry = pos["entry_price"]
+    side = pos["side"]
+    sign = 1 if side == "LONG" else -1
+    pnl = sign * (price - entry) / entry * 100
+    
+    # Получаем свежие данные по тренду (1h и 4h)
+    try:
+        tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
+        trend_1h_long = tf_data["1h"]["long_prob"] >= 50
+        trend_4h_long = tf_data["4h"]["long_prob"] >= 50
+    except Exception:
+        trend_1h_long = True if side == "LONG" else False
+        trend_4h_long = True if side == "LONG" else False
+
+    advice = ""
+    urgency = "info"
+    
+    # 1. Проверка на смену тренда (План поменялся)
+    is_trend_against = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
+    is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
+    
+    if pos.get("hit_tp1") and is_global_against:
+        advice = "⚠️ <b>Глобальный тренд развернулся.</b> Рекомендуем закрыть остаток позиции, чтобы не отдать профит."
+        urgency = "danger"
+    elif is_trend_against and pnl < 0:
+        advice = "🚨 <b>Тренд на 1h пошел против вас, а PnL в минусе.</b> Рекомендуем сократить позицию или подтянуть стоп."
+        urgency = "danger"
+    # 2. Логика по достигнутым целям
+    elif pos.get("hit_tp2"):
+        advice = "🔥 <b>TP2 взят!</b> Осталось 20% позиции. Держим до TP3 с трейлингом."
+    elif pos.get("hit_tp1"):
+        advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Можно спокойно держать остаток до TP2."
+    elif (sign * (price - pos["tp1"]) >= -0.005 * entry):
+        advice = "🎯 <b>Цена очень близко к TP1.</b> Приготовьтесь фиксировать 50%."
+    elif pnl < -3.0:
+        advice = "🛑 Цена идет против вас. Будьте готовы к срабатыванию стопа."
+    else:
+        advice = "⏳ Тренд в силе. Просто держим позицию по плану."
+
+    text = (f"📊 <b>Обновление сделки: {coin} ({side})</b>\n\n"
+            f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
+            f"Текущий PnL: <b>{pnl:+.2f}%</b>\n\n"
+            f"💡 <b>План:</b> {advice}")
+    
+    kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+                 [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
+    
+    try:
+        # Отправляем как новое сообщение, чтобы оно не перезатирало другие
+        await _send_new(uid, text, kb, None)
+    except Exception as e:
+        log.info(f"Ошибка отправки обновления по {coin}: {e}")
+
+
+async def position_update_loop():
+    """Цикл отправки статусов по открытым сделкам каждые 20 минут."""
+    await asyncio.sleep(120) # Небольшая пауза при старте бота
+    while True:
+        try:
+            for uid_str, u in list(_users().items()):
+                for coin, pos in list((u.get("open_positions") or {}).items()):
+                    try:
+                        await send_position_update(int(uid_str), coin, pos)
+                    except Exception as e:
+                        log.info(f"update_position {coin}: {e}")
+                    await asyncio.sleep(0.5) # Защита от спама API биржи
+        except Exception as e:
+            log.error(f"pos update loop: {e}")
+        next_timers["pos_updates"] = time.time() + (20 * 60)
+        await asyncio.sleep(20 * 60)
 
 # ---------------- ручные позиции пользователей ----------------
 async def position_monitor_loop():
