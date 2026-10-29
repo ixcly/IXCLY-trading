@@ -3649,6 +3649,10 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
         if data == "del_msg":
             await safe_answer(cb, "Удалено")
             return await safe_delete(msg)
+            if data == "trade_history":
+            await safe_answer(cb)
+            text, kb = screen_trade_history(uid)
+            return await present(chat_id, text, kb, edit_msg=msg)
         if data == "set_deposit":
             await safe_answer(cb)
             await state.set_state(PortfolioStates.waiting_for_deposit)
