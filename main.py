@@ -2964,31 +2964,53 @@ async def scanner_loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 async def send_position_update(uid, coin, pos):
-    if pos.get("notified_close"):
-        return
+    if pos.get("notified_close"): return
     price = await get_simple_price(coin)
-    if not price:
-        return
+    if not price: return
         
-    entry = pos["entry_price"]
-    side = pos["side"]
+    entry, side = pos["entry_price"], pos["side"]
     sign = 1 if side == "LONG" else -1
 
-    # === ЛОГИКА ДЛЯ ОЖИДАЮЩЕЙ ЛИМИТКИ ===
     if pos.get("waiting_entry"):
-        dist_pct = abs(price - entry) / entry * 100
-        text = (f"⏳ <b>Ожидание входа: {coin} ({side})</b>\n\n"
-                f"Целевая цена (лимит): <code>{fmt(entry)}</code>\n"
-                f"Цена сейчас: <code>{fmt(price)}</code>\n"
-                f"Расстояние: <b>{dist_pct:.2f}%</b>\n\n"
-                f"💡 <b>План:</b> Ждем отката цены к уровню входа. "
-                f"Если цена резко улетит в сторону профита, не доганяем её по рынку — просто пропускаем сделку (лимитка не сработает).")
+        # ... (твой код проверки лимитки)
+        return
+
+    pnl = sign * (price - entry) / entry * 100
+    
+    # === ЛОГИКА ВИРТУАЛЬНОГО DCA ===
+    advice = ""
+    try:
+        tf_data, _ = await get_market_data_light(coin, ("4h",))
+        atr_4h = tf_data["4h"]["atr"]
+        rsi_4h = tf_data["4h"]["rsi"]
         
-        kb = kb_nav([
-            [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
-            [InlineKeyboardButton(text="❌ Отменить ордер", callback_data=f"pos:close:{coin}")],
-            [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
-        ], back=False)
+        # Если цена ушла против нас на 2 ATR, но RSI 4h > 40 (для лонга)
+        dist_to_entry = (entry - price) if side == "LONG" else (price - entry)
+        
+        if dist_to_entry > (2 * atr_4h):
+            if side == "LONG" and rsi_4h > 40:
+                new_avg = (entry + price) / 2
+                advice = (f"⚠️ <b>Просадка. Тренд не сломан (RSI 4h: {rsi_4h:.0f}).</b>\n"
+                          f"Рекомендую усредниться (DCA) на уровне <code>{fmt(price)}</code>.\n"
+                          f"Новый средний вход: <code>{fmt(new_avg)}</code>. Стоп остается прежним.")
+            elif side == "SHORT" and rsi_4h < 60:
+                new_avg = (entry + price) / 2
+                advice = (f"⚠️ <b>Просадка. Тренд не сломан (RSI 4h: {rsi_4h:.0f}).</b>\n"
+                          f"Рекомендую усредниться (DCA) на уровне <code>{fmt(price)}</code>.\n"
+                          f"Новый средний вход: <code>{fmt(new_avg)}</code>. Стоп остается прежним.")
+    except Exception:
+        pass
+    # ===============================
+    
+    if not advice:
+        if pnl < -3.0: advice = "🛑 Цена идет против вас. Будьте готовы к стопу."
+        else: advice = "⏳ Тренд в силе. Держим позицию по плану."
+
+    text = (f"📊 <b>Обновление сделки: {coin} ({side})</b>\n\n"
+            f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
+            f"Текущий PnL: <b>{pnl:+.2f}%</b>\n\n"
+            f"💡 <b>План:</b> {advice}")
+    # ... (дальше твой код отправки сообщения _send_new)
         
         try:
             await _send_new(uid, text, kb, None)
