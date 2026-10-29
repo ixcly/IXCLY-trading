@@ -2421,8 +2421,6 @@ async def check_news_conflicts_with_signals():
                      [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
         try:
             await _send_new(int(uid_str), text, kb, None)
-        except Exception:
-            pass
         await asyncio.sleep(0.05)
 
 
