@@ -2298,7 +2298,27 @@ async def news_watcher_loop():
         await asyncio.sleep(600)
 
 # --- ДОБАВИТЬ ЭТУ НОВУЮ ФУНКЦИЮ ПЕРЕД news_watcher_loop ---
-
+async def check_news_conflicts_with_signals():
+    """Если вышла новость, проверяем активные сделки и пишем юзерам, если тренд по новости против них"""
+    if market_bias.get("bias", 0) == 0: return
+    
+    news_bias = market_bias["bias"]
+    for uid_str, u in list(_users().items()):
+        for coin, pos in (u.get("open_positions") or {}).items():
+            if pos.get("waiting_entry"): continue # Пропускаем лимитки
+            
+            is_against = (news_bias == 1 and pos["side"] == "SHORT") or (news_bias == -1 and pos["side"] == "LONG")
+            if is_against:
+                text = (f"🚨 <b>Срочная новость против вашей позиции!</b>\n\n"
+                        f"Монета: <b>{coin}</b> ({pos['side']})\n"
+                        f"Новость: {html.escape(shorten(market_bias['title_ru'], 100))}\n"
+                        f"Фон: <b>{'Бычий 🟢' if news_bias == 1 else 'Медвежий 🔴'}</b>\n\n"
+                        f"⚠️ Рекомендуем подтянуть стоп-лосс или закрыть позицию.")
+                kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]], back=False)
+                try:
+                    await _send_new(int(uid_str), text, kb, None)
+                except Exception:
+                    pass
 
 
 # =====================================================================
