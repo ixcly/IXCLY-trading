@@ -3386,128 +3386,130 @@ async def check_position(user_id, coin, pos):
 
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
+    pnl = sign * (price - entry) / entry * 100
 
-    # === 1. ПРОВЕРКА ОЖИДАНИЯ ВХОДА ===
+    # === 1. ПРОВЕРКА ОЖИДАНИЯ ВХОДА (Лимитка) ===
     if pos.get("waiting_entry"):
-        # Проверяем, коснулась ли цена нашего лимита
         hit_entry = (sign * (price - entry)) <= 0
-        
         if hit_entry:
-            # Цена коснулась! Активируем сделку
             pos["waiting_entry"] = False
             pos["entered_at"] = time.time()
             set_user_open_position(user_id, coin, pos)
-            
             text = (f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\n"
                     f"Направление: <b>{side}</b>\n"
                     f"Цена входа: <code>{fmt(entry)}</code>\n"
-                    f"Сейчас: <code>{fmt(price)}</code>\n\n"
-                    f"🚀 <b>Сделка активирована!</b> Теперь бот следит за тейк-профитами и стоп-лоссом.")
-            kb = kb_nav([
-                [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-                [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
-            ], back=False)
-            try:
-                await _send_new(user_id, text, kb, None)
-            except Exception:
-                pass
-            return # Выходим, чтобы не проверять TP/SL в ту же секунду
-        else:
-            # Проверка, если лимитка висит уже больше 24 часов
-            if time.time() - pos.get("created_at", time.time()) > 24 * 3600:
-                set_user_open_position(user_id, coin, None)
-                text = (f"⌛ <b>Ордер отменен: {coin}</b>\n\n"
-                        f"Цена так и не дошла до уровня входа <code>{fmt(entry)}</code> за 24 часа.\n"
-                        f"Лимитная заявка снята.")
-                kb = kb_nav(back=False)
-                try:
-                    await _send_new(user_id, text, kb, None)
-                except Exception:
-                    pass
-            return # Пока ждем, дальше код не выполняем
+                    f"🚀 <b>Сделка активирована!</b> Бот начинает полное сопровождение.")
+            kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]], back=False)
+            try: await _send_new(user_id, text, kb, None)
+            except Exception: pass
+            return
+        elif time.time() - pos.get("created_at", time.time()) > 24 * 3600:
+            set_user_open_position(user_id, coin, None)
+            try: await _send_new(user_id, f"⌛ <b>Ордер отменен: {coin}</b>\nЦена не дошла до входа за 24 часа.", kb_nav(back=False), None)
+            except Exception: pass
+        return
 
-    # === 2. СДЕЛКА АКТИВНА, ПРОВЕРКА TP/SL ===
+    # === 2. ПОЛНОЕ СОПРОВОЖДЕНИЕ (Защита и Трейлинг) ===
     if "hit_tp1" not in pos: pos["hit_tp1"] = False
     if "hit_tp2" not in pos: pos["hit_tp2"] = False
     if "hit_tp3" not in pos: pos["hit_tp3"] = False
-    
-    pnl = sign * (price - entry) / entry * 100
 
-    # Срочный алерт
-    if pnl <= -5.0 and not pos.get("notified_urgent"):
-        text = (f"🚨 <b>СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ ПО {coin}!</b>\n\n"
-                f"Направление: <b>{side}</b>\n"
-                f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
-                f"Убыток: <b>{pnl:+.2f}%</b>\n\n"
-                f"⚠️ Цена резко идет против вашей позиции!")
-        kb = kb_nav([
-            [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
-            [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
-            [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
-        ], back=False)
-        try:
-            await _send_new(user_id, text, kb, None)
-            pos["notified_urgent"] = True
-            set_user_open_position(user_id, coin, pos)
-        except Exception:
-            pass
-    
-    tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
     current_sl = pos["sl1"]
-    
+
+    # --- А) Защита прибыли до TP1 (Безубыток) ---
+    if not pos["hit_tp1"] and pnl >= 1.5 and current_sl != entry:
+        pos["sl1"] = entry
+        set_user_open_position(user_id, coin, pos)
+        await _send_new(user_id, f"🛡 <b>Защита прибыли: {coin}</b>\n\nЦена ушла в плюс на <b>{pnl:.2f}%</b>.\nСтоп-лосс передвинут в безубыток (Entry). Теперь вы не потеряете деньги.", kb_nav(back=False), None)
+        current_sl = entry
+
+    # --- Б) Динамический трейлинг после TP1 ---
+    # Если TP1 взят, стоп идет за ценой на расстоянии 1.5% (или можно использовать ATR)
+    if pos["hit_tp1"] and not pos["hit_tp3"]:
+        # Для лонга подтягиваем стоп вверх
+        if side == "LONG":
+            new_sl = price * 0.985  # Стоп на 1.5% ниже текущей цены
+            if new_sl > current_sl and new_sl > entry:
+                pos["sl1"] = new_sl
+                set_user_open_position(user_id, coin, pos)
+                current_sl = new_sl
+        # Для шорта подтягиваем стоп вниз
+        elif side == "SHORT":
+            new_sl = price * 1.015  # Стоп на 1.5% выше текущей цены
+            if new_sl < current_sl and new_sl < entry:
+                pos["sl1"] = new_sl
+                set_user_open_position(user_id, coin, pos)
+                current_sl = new_sl
+
+    # --- В) Срочный алерт при резком минусе ---
+    if pnl <= -5.0 and not pos.get("notified_urgent"):
+        text = f"🚨 <b>СРОЧНО! {coin} идет против вас!</b>\nУбыток: <b>{pnl:+.2f}%</b>. Будьте готовы к стопу."
+        await _send_new(user_id, text, kb_nav(back=False), None)
+        pos["notified_urgent"] = True
+        set_user_open_position(user_id, coin, pos)
+
+    # --- Г) Проверка целей и стопов ---
+    tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
     hit_tp1 = sign * (price - tp1) >= 0
     hit_tp2 = sign * (price - tp2) >= 0
     hit_tp3 = sign * (price - tp3) >= 0
     hit_sl = sign * (price - current_sl) <= 0
-    
+
     reason, urgency = None, "info"
-    
+
     if hit_sl:
-        if current_sl == entry:
-            reason, urgency = "🛑 Сработал стоп-лосс в **безубытке** (Entry).", "danger"
-        elif current_sl == tp1:
-            reason, urgency = "🛑 Сработал стоп-лосс на уровне **TP1**.", "danger"
+        if current_sl >= (entry if side == "LONG" else entry):
+            reason, urgency = f"🛑 Сработал Трейлинг-стоп на уровне <code>{fmt(current_sl)}</code>. Вы зафиксировали профит!", "success"
         else:
-            reason, urgency = "🛑 Сработал стоп-лосс. Позиция закрыта в убыток.", "danger"
+            reason, urgency = "🛑 Сработал стоп-лосс. Позиция закрыта.", "danger"
         pos["notified_close"] = True
-        
+
     elif hit_tp3 and not pos["hit_tp3"]:
-        reason, urgency = "✅ Достигнут **TP3**! Закрываем оставшиеся **20%**.", "success"
+        reason, urgency = "🏆 Достигнут <b>TP3</b>! Забираем весь профит. Сделка полностью закрыта.", "success"
         pos["hit_tp3"] = True
         pos["notified_close"] = True
-        
+
     elif hit_tp2 and not pos["hit_tp2"]:
-        reason, urgency = "✅ Достигнут **TP2**! Закрываем **30%**. Стоп на TP1.", "success"
+        reason, urgency = "✅ Достигнут <b>TP2</b>! Фиксируем 30%. Стоп подтягивается.", "success"
         pos["hit_tp2"] = True
-        pos["sl1"] = tp1
-        
+        # Можно ужесточить стоп при взятии TP2
+        pos["sl1"] = tp1 if side == "LONG" else tp1 
+        set_user_open_position(user_id, coin, pos)
+
     elif hit_tp1 and not pos["hit_tp1"]:
-        reason, urgency = "✅ Достигнут **TP1**! Закрываем **50%**. Стоп в безубыток.", "success"
+        reason, urgency = "✅ Достигнут <b>TP1</b>! Фиксируем 50%. Стоп переведен в безубыток. Включаю трейлинг.", "success"
         pos["hit_tp1"] = True
         pos["sl1"] = entry
+        set_user_open_position(user_id, coin, pos)
 
-    if not reason:
-        return
-
-    text = (f"{'🛑' if urgency == 'danger' else '✅'} <b>Обновление по {coin}</b>\n\n"
-            f"Направление: <b>{side}</b>\n"
-            f"Вход: <code>{fmt(entry)}</code>\n"
-            f"Сейчас: <code>{fmt(price)}</code>\n"
-            f"PnL: <b>{pnl:+.2f}%</b>\n\n"
-            f"{reason}")
+    # --- Д) Экстренное закрытие при смене тренда (если дошли до TP2) ---
+    if pos.get("hit_tp2") and not pos.get("notified_close"):
+        try:
+            tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
+            trend_1h_long = tf_data["1h"]["long_prob"] >= 50
+            trend_4h_long = tf_data["4h"]["long_prob"] >= 50
+            is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
             
-    kb = kb_nav([
-        [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-        [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
-        [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
-    ], back=False)
-    try:
-        await present(user_id, text, kb)
-        nav_reset(user_id)
-    except Exception:
-        pass
-        
-    set_user_open_position(user_id, coin, pos)
+            if is_global_against:
+                reason, urgency = "⚠️ <b>Глобальный тренд развернулся!</b> Бот рекомендует закрыть остаток позиции прямо сейчас, чтобы не отдать прибыль.", "danger"
+                pos["notified_close"] = True
+        except Exception:
+            pass
+
+    # Отправка сообщения, если есть причина
+    if reason:
+        text = (f"{'🏆' if urgency == 'success' else '🛑'} <b>Сопровождение: {coin} ({side})</b>\n\n"
+                f"Вход: <code>{fmt(entry)}</code> | Сейчас: <code>{fmt(price)}</code>\n"
+                f"PnL: <b>{pnl:+.2f}%</b>\n\n{reason}")
+        kb = kb_nav([
+            [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+            [InlineKeyboardButton(text="❌ Закрыть остаток", callback_data=f"pos:close:{coin}")]
+        ], back=False)
+        try:
+            await _send_new(user_id, text, kb, None)
+        except Exception:
+            pass
+        set_user_open_position(user_id, coin, pos)
 
 
 # =====================================================================
