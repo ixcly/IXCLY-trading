@@ -3647,6 +3647,8 @@ def screen_settings(uid):
             "Вы можете отключить типы сообщений, которые вам не нужны. Бот перестанет присылать их лично вам.\n\n"
             "🟢 <i>Включено</i> | 🔴 <i>Выключено</i>")
     return text, kb_nav(rows)
+
+def screen_trade_history(uid):
     u = _users().get(str(uid), {})
     th = u.get("trade_history", [])
     if not th:
