@@ -3414,7 +3414,6 @@ async def check_position(user_id, coin, pos):
     if "hit_tp3" not in pos: pos["hit_tp3"] = False
 
     current_sl = pos["sl1"]
-
     pos["peak_pnl"] = max(pos.get("peak_pnl", 0.0), pnl)
 
     # --- А) Защита прибыли до TP1 (Безубыток) ---
@@ -5172,9 +5171,7 @@ async def invalidate_flipped_signals():
                         pass
     if changed:
         save_signal_history(hist)
-
-
-
+      
 async def main():
     global http, news_lock, scan_lock, MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
@@ -5194,60 +5191,58 @@ async def main():
 
     background, pollers = [], []
     try:
-            for tg_bot, key in ((bot, "main_bot"), (admin_bot, "admin_bot")):
-                if tg_bot:
-                    try:
-                        runtime[key] = f"@{(await tg_bot.get_me()).username}"
-                    except Exception as e:
-                        log.error(f"get_me ({key}): {e}")
+        for tg_bot, key in ((bot, "main_bot"), (admin_bot, "admin_bot")):
+            if tg_bot:
+                try:
+                    runtime[key] = f"@{(await tg_bot.get_me()).username}"
+                except Exception as e:
+                    log.error(f"get_me ({key}): {e}")
 
-            await bot.delete_webhook(drop_pending_updates=True)
-            if admin_bot:
-                await admin_bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню")])
-            if WEBAPP_URL:
-                await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL)))
-                log.info(f"Mini App: {WEBAPP_URL}")
-            else:
-                log.warning("WEBAPP_URL не задан: кнопка Mini App не появится")
-        except Exception as e:
-            log.warning(f"Инициализация бота: {e}")
+        await bot.delete_webhook(drop_pending_updates=True)
+        if admin_bot:
+            await admin_bot.delete_webhook(drop_pending_updates=True)
+        await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню")])
+        if WEBAPP_URL:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL)))
+            log.info(f"Mini App: {WEBAPP_URL}")
+        else:
+            log.warning("WEBAPP_URL не задан: кнопка Mini App не появится")
+    except Exception as e:
+        log.warning(f"Инициализация бота: {e}")
 
-
-        except Exception:
+    if POLL_START_DELAY > 0:
+        log.info(f"Ждём {POLL_START_DELAY} с, пока остановится предыдущий экземпляр…")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
+        except asyncio.TimeoutError:
             pass
+    if stop.is_set():
+        return
 
-        if POLL_START_DELAY > 0:
-            log.info(f"Ждём {POLL_START_DELAY} с, пока остановится предыдущий экземпляр…")
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=POLL_START_DELAY)
-            except asyncio.TimeoutError:
-                pass
-        if stop.is_set():
-            return
+    restored = await telegram_restore()
+    if restored:
+        log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
+    load_active_chats()
+    gc.freeze()
+    asyncio.create_task(discover_models())
+    background, pollers = [], []
 
-        restored = await telegram_restore()
-        if restored:
-            log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
-        load_active_chats()
-        gc.freeze()  # <--- ВОТ СЮДА, МЕЖДУ load_active_chats() и asyncio.create_task
-        asyncio.create_task(discover_models())
-        background, pollers = [], []
+    background += [asyncio.create_task(c()) for c in (
+        scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
+        anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop,
+        price_alerts_loop, memory_janitor_loop)]
 
-        background += [asyncio.create_task(c()) for c in (
-            scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
-            anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop,
-            price_alerts_loop, memory_janitor_loop)]
+    background.append(asyncio.create_task(update_market_bias()))
 
-        background.append(asyncio.create_task(update_market_bias()))
-
-        pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
-        if admin_bot and admin_dp:
-            pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
-        log.info(f"🚀 IXCLY PRO v{VERSION} запущен")
-        waiter = asyncio.create_task(stop.wait())
-        await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
-        waiter.cancel()
+    pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
+    if admin_bot and admin_dp:
+        pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
+    log.info(f"🚀 IXCLY PRO v{VERSION} запущен")
+    waiter = asyncio.create_task(stop.wait())
+    await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
+    waiter.cancel()
+    
+    # Этот блок finally должен быть на уровне try, а не внутри него!
     finally:
         log.info("Останавливаю бота…")
         for t in pollers:
@@ -5260,17 +5255,13 @@ async def main():
         for t in background:
             t.cancel()
         await asyncio.gather(*background, return_exceptions=True)
+        
+        # Правильное закрытие сессий в самом конце
         for tg_bot in (bot, admin_bot):
             if tg_bot:
-        try:
+                try:
                     await tg_bot.session.close()
                 except Exception:
                     pass
         await http.close()
 
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Бот остановлен")
