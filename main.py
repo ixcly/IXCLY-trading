@@ -3993,15 +3993,6 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             await safe_answer(cb, "⛔ Временно недоступно", show_alert=True)
             await present(chat_id, "⛔ <b>Автоторговля временно недоступна.</b>\n\nПриносим извинения за неудобства. Бот продолжает работать в режиме ручных сигналов и аналитики.", kb_nav(), edit_msg=msg)
             return
-                exch = (u.get("exchange") or "—").title()
-                return await present(chat_id,
-                    f"🤖 <b>Автоторговля включена</b>\n\n"
-                    f"Биржа: <b>{exch}</b>\n"
-                    f"Бот будет выставлять реальные лимитные ордера и стоп-лоссы "
-                    f"при появлении новых сигналов.\n\n"
-                    f"⚠ Ключи должны иметь права <b>только на торговлю</b>, без вывода средств.",
-                    kb, edit_msg=msg)
-            return await _show_exchange_menu(chat_id, msg)
 
         if data == "autotrade_menu_sel":
             await safe_answer(cb)
