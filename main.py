@@ -2628,13 +2628,9 @@ async def get_scan_universe():
 
 
 def signals_overview():
-    hist = load_signal_history()
-    active = {}
-    for x in sorted(hist, key=lambda k: k.get("ts", 0), reverse=True):
-        if x.get("status") in ("active", "in_trade"):
-            active.setdefault(f"{x['coin']}_{x['side']}", x)
-            
-    cnt = {t: sum(1 for x in active.values() if x.get("type") == t) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
+    active_signals = get_active_signals()
+    cnt = {t: sum(1 for x in active_signals if x.get("type") == t) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
+    
     text = f"🔥 <b>Актуальные сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(shorten(market_bias.get('impact', 'Нейтральный фон'), 500))}\n\nВыберите категорию:"
     rows = [[InlineKeyboardButton(text=f"⚡ Краткосрочный ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
             [InlineKeyboardButton(text=f"⏳ Среднесрочный ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрок")],
