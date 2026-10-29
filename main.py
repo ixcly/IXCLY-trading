@@ -3313,12 +3313,18 @@ def screen_gstats():
 
 def screen_stats_list(list_type, page, per=10):
     titles = {"active": "⏳ В работе", "win": "✅ Успешные", "missed": "🚫 Упущенные", "loss": "❌ Убыточные", "expired": "⌛ По времени"}
-    want = ("active", "in_trade") if list_type == "active" else (list_type,)
-    items, seen = [], set()
-    for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
-        if x.get("status") in want and f"{x['coin']}_{x['side']}" not in seen:
-            seen.add(f"{x['coin']}_{x['side']}")
-            items.append(x)
+    
+    # ИСПРАВЛЕНИЕ: Для "В работе" берем только реально актуальные сигналы (до 12 часов)
+    if list_type == "active":
+        items = get_active_signals()
+    else:
+        want = (list_type,)
+        items, seen = [], set()
+        for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
+            if x.get("status") in want and f"{x['coin']}_{x['side']}" not in seen:
+                seen.add(f"{x['coin']}_{x['side']}")
+                items.append(x)
+                
     pages = (len(items) + per - 1) // per or 1
     page = max(0, min(page, pages - 1))
     B = InlineKeyboardButton
