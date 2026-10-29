@@ -5279,7 +5279,7 @@ async def main():
                 except Exception:
                     pass
         await http.close()
-        if __name__ == "__main__":
+    if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
