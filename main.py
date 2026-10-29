@@ -4099,14 +4099,20 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             return await show_screen(chat_id, uid, ("fav_del",), msg)
         if data.startswith("pos:enter:"):
             coin = data.split(":")[2]
+            res = get_user_res(uid, coin) # ... (твой код получения res)
             
-            res = get_user_res(uid, coin)
-            if not res or res.get("price_only"):
-                await safe_answer(cb, "⏳ Анализирую монету...")
-                res, err = await analyze_coin(coin, uid=uid)
-                
-            if not res or res.get("price_only"):
-                return await safe_answer(cb, "Не удалось получить уровни", True)
+            # === ПРОВЕРКА КОРРЕЛЯЦИИ ===
+            open_positions = get_user_open_positions(uid)
+            for op_coin, op_data in open_positions.items():
+                if op_coin == coin: continue
+                if op_data.get("side") == res["side"]:
+                    for group in CORRELATION_GROUPS:
+                        if op_coin in group and coin in group:
+                            await safe_answer(cb, f"⚠️ У вас уже открыт {op_data['side']} по {op_coin}. {coin} сильно коррелирует с ним!", show_alert=True)
+                            return # Блокируем вход
+            # =============================
+            
+            # ... (дальше твой код set_user_open_position)
                 
             set_user_open_position(uid, coin, {
                 "side": res["side"], 
