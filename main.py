@@ -2871,6 +2871,40 @@ async def btc_shock():
     except Exception:
         return False
 
+async def check_macro_calendar():
+    """
+    Проверяет экономический календарь на наличие важных новостей (ФРС, инфляция, безработица).
+    Если новость выходит в ближайшие 30 минут или вышла 30 минут назад — возвращает True.
+    """
+    try:
+        # Бесплатный JSON-фид экономического календаря
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                return False
+            events = await r.json(content_type=None)
+            
+        now = datetime.now(timezone.utc)
+        
+        for event in events:
+            # Нас интересуют только новости с ВЫСОКИМ влиянием (High) по доллару США (USD)
+            if event.get("impact") == "High" and event.get("country") == "USD":
+                # Парсим время новости
+                event_time = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
+                
+                # Считаем разницу во времени в секундах
+                diff = (event_time - now).total_seconds()
+                
+                # Если новость выходит в ближайшие 30 минут (1800 сек) 
+                # ИЛИ вышла 30 минут назад (-1800 сек)
+                if -1800 < diff < 1800:
+                    log.warning(f"⚠️ Найдена макро-новость: {event['title']}")
+                    return True
+    except Exception as e:
+        log.warning(f"Ошибка проверки календаря: {e}")
+        
+    return False
+
 
 async def scan_once(send=True):
     if scan_lock.locked():
