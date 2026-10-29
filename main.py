@@ -5128,14 +5128,19 @@ async def main():
                     runtime[key] = f"@{(await tg_bot.get_me()).username}"
                 except Exception as e:
                     log.error(f"get_me ({key}): {e}")
-        try:
+             try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            if admin_bot:
                 await admin_bot.delete_webhook(drop_pending_updates=True)
-                        await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню")])
+            await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню")])
             if WEBAPP_URL:
                 await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL)))
                 log.info(f"Mini App: {WEBAPP_URL}")
             else:
                 log.warning("WEBAPP_URL не задан: кнопка Mini App не появится")
+        except Exception as e:
+            log.warning(f"Инициализация бота: {e}")
+
 
         except Exception:
             pass
