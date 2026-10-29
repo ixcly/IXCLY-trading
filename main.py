@@ -3052,25 +3052,6 @@ async def check_position(user_id, coin, pos):
     if not price:
         return
 
-    # === СРОЧНЫЙ АЛЕРТ (Экстренная ситуация) ===
-    # Если цена резко полетела против нас (например, убыток больше 5%)
-    if pnl <= -5.0 and not pos.get("notified_urgent"):
-        text = (f"🚨 <b>СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ ПО {coin}!</b>\n\n"
-                f"Направление: <b>{side}</b>\n"
-                f"Вход: <code>{fmt(entry)}</code>\n"
-                f"Сейчас: <code>{fmt(price)}</code>\n"
-                f"Убыток: <b>{pnl:+.2f}%</b>\n\n"
-                f"⚠️ Цена резко идет против вашей позиции! Рекомендуем срочно проверить график и принять решение о закрытии.")
-        kb = kb_nav([[InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
-                     [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
-        try:
-            await _send_new(user_id, text, kb, None)
-            pos["notified_urgent"] = True # Чтобы не спамить каждые 5 минут
-            set_user_open_position(user_id, coin, pos)
-        except Exception:
-            pass
-    # ==========================================
-        
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
     
@@ -3078,6 +3059,30 @@ async def check_position(user_id, coin, pos):
     if "hit_tp1" not in pos: pos["hit_tp1"] = False
     if "hit_tp2" not in pos: pos["hit_tp2"] = False
     if "hit_tp3" not in pos: pos["hit_tp3"] = False
+    
+    # Считаем PnL ДО экстренного алерта
+    pnl = sign * (price - entry) / entry * 100
+
+    # === СРОЧНЫЙ АЛЕРТ (Экстренная ситуация) ===
+    if pnl <= -5.0 and not pos.get("notified_urgent"):
+        text = (f"🚨 <b>СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ ПО {coin}!</b>\n\n"
+                f"Направление: <b>{side}</b>\n"
+                f"Вход: <code>{fmt(entry)}</code>\n"
+                f"Сейчас: <code>{fmt(price)}</code>\n"
+                f"Убыток: <b>{pnl:+.2f}%</b>\n\n"
+                f"⚠️ Цена резко идет против вашей позиции! Рекомендуем срочно проверить график и принять решение о закрытии.")
+        kb = kb_nav([
+            [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
+            [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
+            [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+        ], back=False)
+        try:
+            await _send_new(user_id, text, kb, None)
+            pos["notified_urgent"] = True # Чтобы не спамить каждые 5 минут
+            set_user_open_position(user_id, coin, pos)
+        except Exception:
+            pass
+    # ==========================================
     
     # Текущие уровни
     tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
@@ -3089,7 +3094,6 @@ async def check_position(user_id, coin, pos):
     hit_tp3 = sign * (price - tp3) >= 0
     hit_sl = sign * (price - current_sl) <= 0
     
-    pnl = sign * (price - entry) / entry * 100
     reason, urgency = None, "info"
     
     # === ЛОГИКА СРАБАТЫВАНИЯ ===
@@ -3128,8 +3132,11 @@ async def check_position(user_id, coin, pos):
             f"PnL: <b>{pnl:+.2f}%</b>\n\n"
             f"{reason}")
             
-    kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-                 [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
+    kb = kb_nav([
+        [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+        [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")],
+        [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+    ], back=False)
     try:
         await present(user_id, text, kb)
         nav_reset(user_id)
