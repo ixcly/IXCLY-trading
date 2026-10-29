@@ -3575,7 +3575,20 @@ def screen_portfolio(uid):
             f"<i>Выберите, что изменить:</i>")
     return text, get_portfolio_keyboard()
 
-def screen_trade_history(uid):
+def screen_settings(uid):
+    s = get_user_notif_settings(uid)
+    B = InlineKeyboardButton
+    rows = [
+        [B(text=f"Сигналы (сетапы): {'🟢 ВКЛ' if s['signals'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:signals")],
+        [B(text=f"Новости: {'🟢 ВКЛ' if s['news'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:news")],
+        [B(text=f"Аномалии объема: {'🟢 ВКЛ' if s['anomalies'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:anomalies")],
+        [B(text=f"Отчеты по 20 мин: {'🟢 ВКЛ' if s['pos_updates'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:pos_updates")],
+        [B(text=f"Утренний брифинг: {'🟢 ВКЛ' if s['briefing'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:briefing")],
+    ]
+    text = ("⚙️ <b>Настройки уведомлений</b>\n\n"
+            "Вы можете отключить типы сообщений, которые вам не нужны. Бот перестанет присылать их лично вам.\n\n"
+            "🟢 <i>Включено</i> | 🔴 <i>Выключено</i>")
+    return text, kb_nav(rows)
     u = _users().get(str(uid), {})
     th = u.get("trade_history", [])
     if not th:
