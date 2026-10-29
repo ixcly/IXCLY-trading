@@ -2801,22 +2801,7 @@ async def scan_once(send=True):
 
 
 async def auto_trade_for_users(r):
-    return  # ВРЕМЕННО ОТКЛЮЧЕНО
-    for uid, u in list(_users().items()):
-        if not u.get("auto_trade_enabled"):
-            continue
-        # ... дальше идет старый код ...
-    for uid, u in list(_users().items()):
-        if not u.get("auto_trade_enabled"):
-            continue
-        s = get_user_risk_settings(uid)
-        if calculate_portfolio_risk(uid) + s["risk_pct"] > s["max_open_risk"]:
-            continue
-        ok, info = await execute_auto_trade(int(uid), r["coin"], r["is_long"], r["entry"], r["sls"][0], r["tps"][0])
-        try:
-            await bot.send_message(int(uid), f"{'🤖 Автоторговля' if ok else '⚠ Автоторговля не сработала'}: {r['coin']} — {html.escape(info)}", parse_mode="HTML")
-        except Exception:
-            pass
+    return  # ВРЕМЕННО ОТКЛЮЧЕНО (биржа не поддерживается)
 
 
 def simulate_signal(x, rows, now=None):
