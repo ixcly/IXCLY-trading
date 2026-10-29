@@ -1544,7 +1544,7 @@ async def get_open_interest(coin):
     except Exception:
         return None
 
-def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
+async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
     """Итоговая оценка: мульти-ТФ + фильтры (BTC, F&G, funding, on-chain, новости). valid=True только если прошли гейты."""
     out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрок",
            "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": []}
