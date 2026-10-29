@@ -2801,6 +2801,11 @@ async def scan_once(send=True):
 
 
 async def auto_trade_for_users(r):
+    return  # ВРЕМЕННО ОТКЛЮЧЕНО
+    for uid, u in list(_users().items()):
+        if not u.get("auto_trade_enabled"):
+            continue
+        # ... дальше идет старый код ...
     for uid, u in list(_users().items()):
         if not u.get("auto_trade_enabled"):
             continue
