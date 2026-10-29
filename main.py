@@ -4338,7 +4338,7 @@ async def morning_briefing_loop():
             )
             
             kb = kb_nav([[InlineKeyboardButton(text="🔥 Сигналы", callback_data="last_signals")]], back=False)
-            await broadcast({"text": text, "kb": kb, "nav": [("menu",)]}, only_ids=active_chats)
+            await broadcast({"text": text, "kb": kb, "nav": [("menu",)]}, only_ids=active_chats, notif_type="briefing")
         except Exception as e:
             log.error(f"Ошибка утреннего брифинга: {e}")
             
