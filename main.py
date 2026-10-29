@@ -5271,11 +5271,9 @@ async def main():
                     await tg_bot.session.close()
                 except Exception:
                     pass
-
-await http.close()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Бот остановлен")
+                    await http.close()
+                    if __name__ == "__main__":
+                        try:
+                            asyncio.run(main())
+                        except (KeyboardInterrupt, SystemExit):
+                            log.info("Бот остановлен")
