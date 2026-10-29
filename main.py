@@ -2945,10 +2945,8 @@ async def scanner_loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 async def send_position_update(uid, coin, pos):
-    """Анализирует открытую позицию и присылает отчет раз в 20 минут."""
     if pos.get("notified_close"):
         return
-        
     price = await get_simple_price(coin)
     if not price:
         return
@@ -2956,9 +2954,32 @@ async def send_position_update(uid, coin, pos):
     entry = pos["entry_price"]
     side = pos["side"]
     sign = 1 if side == "LONG" else -1
+
+    # === ЛОГИКА ДЛЯ ОЖИДАЮЩЕЙ ЛИМИТКИ ===
+    if pos.get("waiting_entry"):
+        dist_pct = abs(price - entry) / entry * 100
+        text = (f"⏳ <b>Ожидание входа: {coin} ({side})</b>\n\n"
+                f"Целевая цена (лимит): <code>{fmt(entry)}</code>\n"
+                f"Цена сейчас: <code>{fmt(price)}</code>\n"
+                f"Расстояние: <b>{dist_pct:.2f}%</b>\n\n"
+                f"💡 <b>План:</b> Ждем отката цены к уровню входа. "
+                f"Если цена резко улетит в сторону профита, не доганяем её по рынку — просто пропускаем сделку (лимитка не сработает).")
+        
+        kb = kb_nav([
+            [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
+            [InlineKeyboardButton(text="❌ Отменить ордер", callback_data=f"pos:close:{coin}")],
+            [InlineKeyboardButton(text="🗑 Скрыть сообщение", callback_data="del_msg")]
+        ], back=False)
+        
+        try:
+            await _send_new(uid, text, kb, None)
+        except Exception as e:
+            log.info(f"Ошибка отправки ожидания по {coin}: {e}")
+        return # Выходим, так как PnL еще нет
+
+    # === ОБЫЧНАЯ ЛОГИКА ДЛЯ АКТИВНОЙ СДЕЛКИ ===
     pnl = sign * (price - entry) / entry * 100
     
-    # Получаем свежие данные по тренду (1h и 4h)
     try:
         tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
         trend_1h_long = tf_data["1h"]["long_prob"] >= 50
@@ -2970,27 +2991,23 @@ async def send_position_update(uid, coin, pos):
     advice = ""
     urgency = "info"
     
-    # 1. Проверка на смену тренда (План поменялся)
     is_trend_against = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
     is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
     
     if pos.get("hit_tp1") and is_global_against:
-        advice = "⚠️ <b>Глобальный тренд развернулся.</b> Рекомендуем закрыть остаток позиции, чтобы не отдать профит."
+        advice = "⚠️ <b>Глобальный тренд развернулся.</b> Рекомендуем закрыть остаток позиции."
         urgency = "danger"
     elif is_trend_against and pnl < 0:
-        advice = "🚨 <b>Тренд на 1h пошел против вас, а PnL в минусе.</b> Рекомендуем сократить позицию или подтянуть стоп."
+        advice = "🚨 <b>Тренд на 1h против вас, PnL в минусе.</b> Сократите позицию или подтяните стоп."
         urgency = "danger"
-    # 2. Логика по достигнутым целям
     elif pos.get("hit_tp2"):
-        advice = "🔥 <b>TP2 взят!</b> Осталось 20% позиции. Держим до TP3 с трейлингом."
+        advice = "🔥 <b>TP2 взят!</b> Держим оставшиеся 20% до TP3."
     elif pos.get("hit_tp1"):
-        advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Можно спокойно держать остаток до TP2."
-    elif (sign * (price - pos["tp1"]) >= -0.005 * entry):
-        advice = "🎯 <b>Цена очень близко к TP1.</b> Приготовьтесь фиксировать 50%."
+        advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Держим дальше."
     elif pnl < -3.0:
-        advice = "🛑 Цена идет против вас. Будьте готовы к срабатыванию стопа."
+        advice = "🛑 Цена идет против вас. Будьте готовы к стопу."
     else:
-        advice = "⏳ Тренд в силе. Просто держим позицию по плану."
+        advice = "⏳ Тренд в силе. Держим позицию по плану."
 
     text = (f"📊 <b>Обновление сделки: {coin} ({side})</b>\n\n"
             f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
@@ -3004,7 +3021,6 @@ async def send_position_update(uid, coin, pos):
     ], back=False)
     
     try:
-        # Отправляем как новое сообщение, чтобы оно не перезатирало другие
         await _send_new(uid, text, kb, None)
     except Exception as e:
         log.info(f"Ошибка отправки обновления по {coin}: {e}")
