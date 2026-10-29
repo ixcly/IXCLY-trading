@@ -3328,13 +3328,23 @@ def screen_stats_list(list_type, page, per=10):
 
 
 def screen_sig_list(category):
-    active = [x for x in get_active_signals() if x.get("type") == category]
+    if category == "Все":
+        active = get_active_signals()
+    else:
+        active = [x for x in get_active_signals() if x.get("type") == category]
     
     if not active:
         return f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас активных сигналов в этой категории нет.</i>", kb_nav()
         
-    rows = [[InlineKeyboardButton(text=f"{'🟢' if x['side'] == 'LONG' else '🔴'} {x['coin']} · {x.get('strength', '')}%",
-                                  callback_data=f"c:{x['coin']}")] for x in active[:10]]
+    rows = []
+    for x in active[:20]: # Показываем до 20 монет
+        icon = "🟢" if x['side'] == 'LONG' else "🔴"
+        c_type = "⚡" if x['type'] == "Краткосрочный" else "⏳" if x['type'] == "Среднесрочный" else "🛡"
+        rows.append([InlineKeyboardButton(
+            text=f"{icon} {x['coin']} · {c_type} {x.get('strength', 0)}%", 
+            callback_data=f"c:{x['coin']}"
+        )])
+        
     return f"📋 <b>Сигналы: {category}</b>\n\nВыберите монету:", kb_nav(rows)
 
 
