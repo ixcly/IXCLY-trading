@@ -3313,20 +3313,8 @@ def screen_stats_list(list_type, page, per=10):
 
 
 def screen_sig_list(category):
-    active, seen = [], set()
-    now = time.time()
+    active = [x for x in get_active_signals() if x.get("type") == category]
     
-    for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
-        # Проверяем статус, категорию и уникальность
-        if x.get("status") in ("active", "in_trade") and x.get("type") == category and f"{x['coin']}_{x['side']}" not in seen:
-            
-            # ФИЛЬТР: если сигнал ждет входа уже больше 12 часов, скрываем его из списка
-            if x.get("status") == "active" and (now - x.get("ts", 0) > 12 * 3600):
-                continue
-                
-            seen.add(f"{x['coin']}_{x['side']}")
-            active.append(x)
-            
     if not active:
         return f"📋 <b>Сигналы: {category}</b>\n\n<i>Сейчас активных сигналов в этой категории нет.</i>", kb_nav()
         
