@@ -3498,6 +3498,33 @@ async def check_position(user_id, coin, pos):
         except Exception:
             pass
 
+
+        # --- Е) Предупреждение: пора закрывать (разворот или отдача прибыли) ---
+    if not reason and not pos.get("notified_close") and time.time() - pos.get("last_warn", 0) > 3600 \
+            and get_user_notif_settings(user_id)["signals"]:
+        warn = None
+        try:
+            tfw, _ = await get_market_data_light(coin, ("15m", "1h"))
+            against = lambda k: (100 - tfw[k]["long_prob"]) if side == "LONG" else tfw[k]["long_prob"]
+            if against("1h") >= 60 and against("15m") >= 58:
+                warn = "Рынок разворачивается против вашей сделки (1h и 15m). Цель маловероятна."
+        except Exception:
+            pass
+        if not warn and pos["peak_pnl"] >= 1.0 and pnl <= pos["peak_pnl"] * 0.5 and not pos["hit_tp1"]:
+            warn = f"Вы отдали больше половины прибыли (пик {pos['peak_pnl']:+.1f}%, сейчас {pnl:+.1f}%)."
+        if warn:
+            pos["last_warn"] = time.time()
+            set_user_open_position(user_id, coin, pos)
+            kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
+                         [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
+            try:
+                await _send_new(user_id, f"⚠️ <b>Рекомендую закрыть: {coin} ({side})</b>\n\n{warn}\n"
+                                         f"Сейчас: <code>{fmt(price)}</code> · PnL <b>{pnl:+.2f}%</b>\n\n"
+                                         f"<i>Лучше выйти вручную, чем ждать стопа.</i>", kb, None)
+            except Exception:
+                pass
+
+
     # Отправка сообщения, если есть причина
     if reason:
         text = (f"{'🏆' if urgency == 'success' else '🛑'} <b>Сопровождение: {coin} ({side})</b>\n\n"
