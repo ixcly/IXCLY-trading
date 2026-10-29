@@ -4589,6 +4589,46 @@ async def heartbeat_loop():
         log.info("♥ аптайм %d мин, пик RAM %s МБ, получателей %d, сигналов в истории %d",
                  (time.time() - stats["started"]) // 60, _rss_mb(), len(active_chats), len(STATE["signal_history"]))
 
+def _release_memory():
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)  # возвращает память системе (Linux/Render)
+    except Exception:
+        pass
+
+
+async def memory_janitor_loop():
+    await asyncio.sleep(300)
+    while True:
+        try:
+            now = time.time()
+            for uid in list(user_res):
+                d = user_res[uid]
+                for c in [c for c, (ts, _) in d.items() if now - ts > 1800]:
+                    d.pop(c, None)
+                if not d:
+                    user_res.pop(uid, None)
+            for c in [c for c, v in analysis_cache.items() if now - v[0] > max(v[1], 600)]:
+                analysis_cache.pop(c, None)
+            for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600)):
+                for k in [k for k, v in store.items() if now - v[0] > ttl]:
+                    store.pop(k, None)
+            for store in (scan_skip, exchange_bans, BAD_MODELS):
+                for k in [k for k, t in store.items() if t < now]:
+                    store.pop(k, None)
+            for store, ttl in ((signal_sent_at, 2 * 86400), (anomaly_sent_at, 86400)):
+                for k in [k for k, t in store.items() if now - t > ttl]:
+                    store.pop(k, None)
+            if len(fetch_errors) > 100: fetch_errors.clear()
+            if len(nav_stack) > 1000: nav_stack.clear()
+            if len(preferred_source) > 600: preferred_source.clear()
+            await asyncio.to_thread(_release_memory)
+        except Exception as e:
+            log.warning(f"janitor: {e}")
+        await asyncio.sleep(600)
+
+
 async def main():
     global http, news_lock, scan_lock
     keep_alive()
