@@ -3905,21 +3905,10 @@ async def cmd_api(m: types.Message):
 
 
 @dp.message(Command("autotrade"))
+@dp.message(Command("autotrade"))
 async def cmd_autotrade(m: types.Message):
     await safe_delete(m)
-    arg = (m.text.split() + [""])[1].lower()
-    if arg == "on":
-        if not get_user_api_keys(m.from_user.id)[0]:
-            text = "❌ Сначала добавьте ключи: /api"
-        else:
-            set_user_field(m.from_user.id, auto_trade_enabled=True)
-            text = "🤖 Автоторговля <b>включена</b>: на новые сигналы будут ставиться лимитка и стоп. Используйте малые суммы!"
-    elif arg == "off":
-        set_user_field(m.from_user.id, auto_trade_enabled=False)
-        text = "🤖 Автоторговля <b>выключена</b>."
-    else:
-        text = "Формат: <code>/autotrade on</code> или <code>/autotrade off</code>"
-    await present(m.chat.id, text, kb_nav())
+    await present(m.chat.id, "⛔ <b>Автоторговля временно недоступна.</b>\n\nПриносим извинения за неудобства. Вы можете продолжать пользоваться ручными сигналами и анализом.", kb_nav())
 
 
 @dp.message(Command("webhook"))
