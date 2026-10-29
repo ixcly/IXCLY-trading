@@ -4587,35 +4587,6 @@ async def heartbeat_loop():
         log.info("♥ аптайм %d мин, пик RAM %s МБ, получателей %d, сигналов в истории %d",
                  (time.time() - stats["started"]) // 60, _rss_mb(), len(active_chats), len(STATE["signal_history"]))
 
-async def morning_briefing_loop():
-    await asyncio.sleep(15)
-    while True:
-        now_utc = datetime.now(timezone.utc)
-        msk_now = now_utc.astimezone(timezone(timedelta(hours=3)))
-        
-        # Брифинг в 9:00 МСК
-        target = msk_now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if msk_now >= target:
-            target += timedelta(days=1)
-            
-        sleep_secs = (target - msk_now).total_seconds()
-        await asyncio.sleep(sleep_secs)
-        
-        try:
-            ctx = await get_context(force=True)
-            active_sigs = len(get_active_signals())
-            
-            text = (
-                f"☀️ <b>Доброе утро!</b>\n\n"
-                f"🌍 <b>BTC:</b> {ctx.get('btc_txt', 'нет данных')}\n"
-                f"😨 <b>F&G:</b> {ctx.get('fng', '—')} ({ctx.get('fng_txt', '')})\n"
-                f"🔥 <b>Активных сигналов:</b> {active_sigs}\n"
-            )
-            kb = kb_nav([[InlineKeyboardButton(text="🔥 Сигналы", callback_data="last_signals")]], back=False)
-            await broadcast({"text": text, "kb": kb, "nav": [("menu",)]}, only_ids=active_chats, notif_type="briefing")
-        except Exception as e:
-            log.error(f"Ошибка брифинга: {e}")
-
 async def main():
     global http, news_lock, scan_lock
     keep_alive()
