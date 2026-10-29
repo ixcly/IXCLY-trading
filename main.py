@@ -3058,6 +3058,7 @@ async def position_update_loop():
     while True:
         try:
             for uid_str, u in list(_users().items()):
+                if not get_user_notif_settings(uid_str)["pos_updates"]: continue # НОВАЯ СТРОКА
                 for coin, pos in list((u.get("open_positions") or {}).items()):
                     try:
                         await send_position_update(int(uid_str), coin, pos)
