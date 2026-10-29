@@ -4728,6 +4728,33 @@ async def invalidate_flipped_signals():
     if changed:
         save_signal_history(hist)
 
+async def invalidate_flipped_signals():
+    hist = load_signal_history()
+    changed = False
+    for x in hist:
+        if x.get("status") != "active":
+            continue
+        try:
+            tf2, _ = await get_market_data_light(x["coin"], ("4h", "1d"))
+        except Exception:
+            continue
+        p = (tf2["4h"]["long_prob"] + tf2["1d"]["long_prob"]) / 2
+        if (x["side"] == "LONG" and p < 47) or (x["side"] == "SHORT" and p > 53):
+            x["status"], changed = "cancelled", True
+            for uid_str, u in list(_users().items()):
+                pos = (u.get("open_positions") or {}).get(x["coin"])
+                if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
+                    set_user_open_position(int(uid_str), x["coin"], None)
+                    try:
+                        await _send_new(int(uid_str),
+                                        f"🚫 <b>Идея отменена: {x['coin']} ({x['side']})</b>\n\nРынок развернулся до входа. "
+                                        f"Лимитный ордер снят, не входите.", kb_nav(back=False), None)
+                    except Exception:
+                        pass
+    if changed:
+        save_signal_history(hist)
+
+
 
 async def main():
     global http, news_lock, scan_lock
