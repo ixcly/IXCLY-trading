@@ -3693,9 +3693,18 @@ async def position_status_text(uid, coin):
         
     entry = pos["entry_price"]
     side = pos["side"]
+
+    if pos.get("waiting_entry"):
+        dist = abs(price - entry) / entry * 100
+        return (f"⏳ <b>Ожидание входа: {coin}</b>\n\n"
+                f"Направление: <b>{side}</b>\n"
+                f"Целевой лимит: <code>{fmt(entry)}</code>\n"
+                f"Цена сейчас: <code>{fmt(price)}</code>\n"
+                f"Расстояние: <b>{dist:.2f}%</b>\n\n"
+                f"<i>Сделка еще не открыта. Бот ждет касания цены входа.</i>")
+
     pnl = (price - entry) / entry * 100 * (1 if side == "LONG" else -1)
     
-    # Проверяем, какие цели уже достигнуты
     t1 = "✅ " if pos.get("hit_tp1") else "⏳ "
     t2 = "✅ " if pos.get("hit_tp2") else "⏳ "
     t3 = "✅ " if pos.get("hit_tp3") else "⏳ "
