@@ -4129,20 +4129,9 @@ async def main():
         if restored:
             log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
         load_active_chats()
-        restored = await telegram_restore()
-        if restored:
-            log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
-        
-        load_active_chats()
-        
-        gc.freeze() # <--- ВСТАВИТЬ СЮДА (замораживаем сборщик мусора)
-        
+        gc.freeze()  # <--- ВОТ СЮДА, МЕЖДУ load_active_chats() и asyncio.create_task
         asyncio.create_task(discover_models())
-
-        background += [asyncio.create_task(c()) for c in (
-            scanner_loop, position_monitor_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
-            anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop)]
-        asyncio.create_task(discover_models())
+        background, pollers = [], []
 
         background += [asyncio.create_task(c()) for c in (
             scanner_loop, position_monitor_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
