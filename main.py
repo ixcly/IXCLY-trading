@@ -2373,6 +2373,26 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
         vh = (vol_bottom - vol_top) * (df["volume"].iloc[i] / vmax)
         color = (0, 120, 60) if df["close"].iloc[i] >= df["open"].iloc[i] else (140, 40, 40)
         draw.rectangle([x - cwid / 2, vol_bottom - vh, x + cwid / 2, vol_bottom], fill=color)
+        # === АВТО-УРОВНИ ФИБОНАЧЧИ ===
+    recent_df = df.tail(50) # Берем последние 50 свечей для поиска импульса
+    swing_high = recent_df["high"].max()
+    swing_low = recent_df["low"].min()
+    diff = swing_high - swing_low
+
+    if diff > 0:
+        fib_levels = {
+            "0.236": swing_high - diff * 0.236,
+            "0.382": swing_high - diff * 0.382,
+            "0.500": swing_high - diff * 0.500,
+            "0.618": swing_high - diff * 0.618,
+            "0.786": swing_high - diff * 0.786,
+        }
+        for lbl, lvl in fib_levels.items():
+            yy = y(lvl)
+            # Рисуем тонкую темную линию
+            draw.line([(pad_l, yy), (w - pad_r, yy)], fill=(80, 80, 110), width=1)
+            draw.text((pad_l + 4, yy - 14), f"Fib {lbl}", fill=(120, 120, 160), font=font)
+    # ==============================
     for lvl_p, lbl in ((info["sr"].get("support"), "SUP"), (info["sr"].get("resistance"), "RES")):
         if lvl_p:
             for xx in range(pad_l, w - pad_r, 10):
