@@ -146,6 +146,12 @@ def keep_alive():
 # =====================================================================
 # НАСТРОЙКИ
 # =====================================================================
+try:
+    FONT_MAIN = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
+    FONT_BOLD = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+except Exception:
+    FONT_MAIN = FONT_BOLD = ImageFont.load_default()
+
 def clean_key(k):
     return k.strip().strip('"').strip("'") if k else None
 
