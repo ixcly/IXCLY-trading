@@ -3672,6 +3672,9 @@ async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
     if kind == "sig_list":
         text, kb = screen_sig_list(screen[1])
         return await present(chat_id, text, kb, edit_msg=edit_msg)
+    if kind == "portfolio":
+        text, kb = screen_portfolio(uid)
+        return await present(chat_id, text, kb, edit_msg=edit_msg)
     if kind == "news":
         return await screen_news(chat_id, uid, edit_msg)
     if kind == "interesting":
