@@ -1076,8 +1076,9 @@ def add_indicators(df):
     raw = tp * v
     pos_f, neg_f = raw.where(tp > tp.shift(), 0.0), raw.where(tp < tp.shift(), 0.0)
     df["mfi"] = (100 - 100 / (1 + pos_f.rolling(14).sum() / neg_f.rolling(14).sum().replace(0, np.nan))).fillna(50)
-    mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-    df["cci"] = ((tp - tp.rolling(20).mean()) / (0.015 * mad.replace(0, np.nan))).fillna(0)
+    # Оптимизация: используем std() вместо медленного apply()
+    std_dev = tp.rolling(20).std().replace(0, np.nan)
+    df["cci"] = ((tp - tp.rolling(20).mean()) / (0.015 * std_dev)).fillna(0)
     hh, ll = h.rolling(14).max(), l.rolling(14).min()
     df["wr"] = (-100 * (hh - c) / (hh - ll).replace(0, np.nan)).fillna(-50)
 
