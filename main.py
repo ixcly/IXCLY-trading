@@ -3635,13 +3635,18 @@ async def backup_loop():
 # =====================================================================
 def get_main_keyboard():
     B = InlineKeyboardButton
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = []
+    if WEBAPP_URL:
+        rows.append([B(text="🚀  Открыть IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL))])
+    rows += [
         [B(text="📰  Новости", callback_data="news_menu"), B(text="🧐  Графики", callback_data="interesting_menu")],
         [B(text="🔥  Последние сигналы", callback_data="last_signals"), B(text="📊  Статистика", callback_data="global_stats")],
         [B(text="⭐  Избранное", callback_data="sig:menu"), B(text="💼  Мой Портфель", callback_data="portfolio")],
         [B(text="⚙️ Настройки", callback_data="settings_menu"), B(text="📥  Экспорт CSV", callback_data="export_csv")],
         [B(text="🔍  Поиск монеты", callback_data="search")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def coin_grid(coins, cb_prefix, page, per=8, page_cb="search_page"):
