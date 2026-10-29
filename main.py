@@ -5172,9 +5172,20 @@ async def invalidate_flipped_signals():
     if changed:
         save_signal_history(hist)
       
+def keep_alive():
+    global _web_started
+    if not _web_started:
+        _web_started = True
+        log.info("🌐 Попытка запуска Flask...")
+        Thread(target=_run_web, daemon=True).start()
+
+# ... (остальной код)
+
 async def main():
     global http, news_lock, scan_lock, MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
+    
+    # Запускаем Flask СРАЗУ, до всех await
     keep_alive()
 
     news_lock, scan_lock = asyncio.Lock(), asyncio.Lock()
@@ -5216,6 +5227,7 @@ async def main():
             except asyncio.TimeoutError:
                 pass
         if stop.is_set():
+            log.warning("⚠️ Получен сигнал остановки во время ожидания. Завершаю работу.")
             return
 
         # --- БЛОК ЗАПУСКА ---
@@ -5239,7 +5251,7 @@ async def main():
         if admin_bot and admin_dp:
             pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
         
-        log.info(f"🚀 IXCLY PRO v{VERSION} запущен")
+        log.info(f"🚀 IXCLY PRO v{VERSION} запущен и ожидает сигналы")
         waiter = asyncio.create_task(stop.wait())
         await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
         waiter.cancel()
@@ -5247,7 +5259,7 @@ async def main():
     except Exception as e:
         log.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
         
-    finally: # <--- ТЕПЕРЬ ОН НА ОДНОМ УРОВНЕ С TRY
+    finally:
         log.info("Останавливаю бота…")
         for t in pollers:
             t.cancel()
