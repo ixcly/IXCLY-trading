@@ -4413,7 +4413,7 @@ if admin_dp:
                 pass
             return
         await safe_answer(cb, "⏳ Выполняю…")
-                if act == "stats":
+        if act == "stats":
             total, active = user_counts()
             up, ls = int(time.time() - stats["started"]), last_scan_info
             await cb.message.answer(
