@@ -3215,9 +3215,14 @@ async def check_position(user_id, coin, pos):
 # =====================================================================
 # РАССЫЛКА
 # =====================================================================
-async def broadcast(payload, only_ids=None):
-    """payload: text, photo(bytes|None), kb, nav(список экранов для «Назад»), clean(True: заменить прошлые сообщения)."""
+async def broadcast(payload, only_ids=None, notif_type=None):
+    """payload: text, photo(bytes|None), kb, nav, clean"""
     targets = list(only_ids) if only_ids else list(active_chats)
+    
+    # ФИЛЬТРАЦИЯ: не отправляем сообщение тем, кто отключил этот тип
+    if notif_type:
+        targets = [cid for cid in targets if get_user_notif_settings(cid).get(notif_type, True)]
+        
     sent = failed = 0
     dead = []
     for cid in targets:
