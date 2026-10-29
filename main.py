@@ -3821,6 +3821,14 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
         if data.startswith("pos:close:"):
             coin = data.split(":")[2]
             set_user_open_position(uid, coin, None)
+            
+            # Убираем сигнал из глобальной истории, чтобы он не висел в "В работе"
+            hist = load_signal_history()
+            for x in hist:
+                if x["coin"] == coin and x.get("status") in ("active", "in_trade"):
+                    x["status"] = "closed_manual"
+            save_signal_history(hist)
+            
             await safe_answer(cb, "❌ Позиция закрыта")
             return await show_screen(chat_id, uid, nav_stack.get(uid, [("menu",)])[-1], msg)
         if data.startswith("pos:status:"):
