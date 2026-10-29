@@ -4395,12 +4395,14 @@ if admin_dp:
                 pass
             return
         await safe_answer(cb, "⏳ Выполняю…")
-        if act == "stats":
+                if act == "stats":
             total, active = user_counts()
             up, ls = int(time.time() - stats["started"]), last_scan_info
-            await cb.message.answer("⏳ <b>Таймеры:</b>\n\n" + "\n".join(f"{n}: {ft(next_timers[k] - now)}" for n, k in (
-                ("🤖 Сканер", "scanner"), ("📈 Позиции (события)", "positions"), ("⏱ Обновления (20м)", "pos_updates"), 
-                ("📰 Новости", "news_watcher"), ("📊 Сигналы", "global_signals"), ("🚨 Аномалии", "anomaly"), ("💾 Бэкап", "backup"))), parse_mode="HTML")
+            await cb.message.answer(
+                f"📊 <b>Статистика</b>\nПользователей: {total} (активных {active})\n"
+                f"Аптайм: {up // 3600} ч {up % 3600 // 60} мин\nСигналов: {stats['signals']} · Новостей: {stats['news_sent']}\n"
+                f"Последний скан: {ls['stage1']} → {ls['stage2']} → {ls['final']}", parse_mode="HTML")
+
         elif act == "users":
             lines = [f"👥 Пользователи ({len(_users())})\n"] + [
                 f"{'✅' if u.get('active', True) else '❌'} <code>{uid}</code> {html.escape(str(u.get('first_name') or u.get('username') or '—')[:18])}"
