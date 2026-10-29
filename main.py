@@ -3048,6 +3048,25 @@ async def check_position(user_id, coin, pos):
     price = await get_simple_price(coin)
     if not price:
         return
+
+    # === СРОЧНЫЙ АЛЕРТ (Экстренная ситуация) ===
+    # Если цена резко полетела против нас (например, убыток больше 5%)
+    if pnl <= -5.0 and not pos.get("notified_urgent"):
+        text = (f"🚨 <b>СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ ПО {coin}!</b>\n\n"
+                f"Направление: <b>{side}</b>\n"
+                f"Вход: <code>{fmt(entry)}</code>\n"
+                f"Сейчас: <code>{fmt(price)}</code>\n"
+                f"Убыток: <b>{pnl:+.2f}%</b>\n\n"
+                f"⚠️ Цена резко идет против вашей позиции! Рекомендуем срочно проверить график и принять решение о закрытии.")
+        kb = kb_nav([[InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
+                     [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
+        try:
+            await _send_new(user_id, text, kb, None)
+            pos["notified_urgent"] = True # Чтобы не спамить каждые 5 минут
+            set_user_open_position(user_id, coin, pos)
+        except Exception:
+            pass
+    # ==========================================
         
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
