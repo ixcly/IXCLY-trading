@@ -4010,11 +4010,6 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
             await safe_answer(cb, "⛔ Временно недоступно", show_alert=True)
             await present(chat_id, "⛔ <b>Автоторговля временно недоступна.</b>\n\nПриносим извинения за неудобства. Бот продолжает работать в режиме ручных сигналов и аналитики.", kb_nav(), edit_msg=msg)
             return
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔴 Выключить автоторговлю",  callback_data="at:off")],
-                    [InlineKeyboardButton(text="🔄 Сменить биржу / ключи",   callback_data="autotrade_menu_sel")],
-                    [InlineKeyboardButton(text="⬅ Назад в портфель",          callback_data="portfolio")],
-                ])
                 exch = (u.get("exchange") or "—").title()
                 return await present(chat_id,
                     f"🤖 <b>Автоторговля включена</b>\n\n"
