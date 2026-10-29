@@ -2260,8 +2260,16 @@ async def news_watcher_loop():
                 elif link != last_news_link:
                     last_news_link = link
                     state_touch(False)
+                    
+                    # 1. Обновляем новостной фон
+                    await update_market_bias(force=True)
+                    
+                    # 2. НОВАЯ ФУНКЦИЯ: Проверяем активные сигналы и позиции на конфликт с новостями
+                    await check_news_conflicts_with_signals()
+                    
+                    # 3. Рассылаем саму новость
                     if bot_flags["news_enabled"] and active_chats:
-                        text, img_url = await prepare_news(force=True)
+                        text, img_url = await prepare_news()
                         if text:
                             img = await download_bytes(img_url) if img_url else None
                             kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]], back=False)
@@ -2271,6 +2279,43 @@ async def news_watcher_loop():
             log.warning(f"news_watcher: {e}")
         next_timers["news_watcher"] = time.time() + 600
         await asyncio.sleep(600)
+
+# --- ДОБАВИТЬ ЭТУ НОВУЮ ФУНКЦИЮ ПЕРЕД news_watcher_loop ---
+async def check_news_conflicts_with_signals():
+    """Если новости резко поменялись, ищем активные сигналы, которые они ломают, и предупреждаем юзеров."""
+    bias = market_bias.get("bias", 0)
+    if bias == 0:
+        return  # Нейтральный фон не вызывает паники
+
+    # Берем все уникальные активные сигналы
+    active_sigs = get_active_signals()
+    conflicting_coins = set()
+    
+    for sig in active_sigs:
+        # Если новости МЕДВЕЖЬИ (bias == -1), а у нас LONG, или наоборот
+        if (bias == -1 and sig["side"] == "LONG") or (bias == 1 and sig["side"] == "SHORT"):
+            conflicting_coins.add(sig["coin"])
+
+    if not conflicting_coins:
+        return
+
+    # Ищем пользователей, у которых есть открытые позиции по этим монетам
+    for uid_str, u in list(_users().items()):
+        uid = int(uid_str)
+        open_pos = u.get("open_positions", {})
+        
+        for coin, pos in open_pos.items():
+            if coin in conflicting_coins and not pos.get("notified_close"):
+                # Проверяем, совпадает ли направление позиции пользователя с конфликтом
+                if (bias == -1 and pos["side"] == "LONG") or (bias == 1 and pos["side"] == "SHORT"):
+                    text = (f"⚠️ <b>Внимание! Новостной фон ухудшился!</b>\n\n"
+                            f"По монете <b>{coin}</b> вышла новость, которая противоречит вашей позиции <b>{pos['side']}</b>.\n"
+                            f"📰 <i>{html.escape(shorten(market_bias.get('title_ru', ''), 100))}</i>\n\n"
+                            f"Рекомендуем подтянуть стоп-лосс или закрыть часть позиции, чтобы защитить депозит.")
+                    try:
+                        await present(uid, text, kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]]))
+                    except Exception:
+                        pass
 
 
 # =====================================================================
