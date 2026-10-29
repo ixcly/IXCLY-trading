@@ -3335,7 +3335,7 @@ def get_main_keyboard():
         [B(text="📰  Новости", callback_data="news_menu"), B(text="🧐  Графики", callback_data="interesting_menu")],
         [B(text="🔥  Последние сигналы", callback_data="last_signals"), B(text="📊  Статистика", callback_data="global_stats")],
         [B(text="⭐  Избранное", callback_data="sig:menu"), B(text="💼  Мой Портфель", callback_data="portfolio")],
-        [B(text="📥  Экспорт CSV", callback_data="export_csv")],
+        [B(text="⚙️ Настройки", callback_data="settings_menu"), B(text="📥  Экспорт CSV", callback_data="export_csv")],
         [B(text="🔍  Поиск монеты", callback_data="search")],
     ])
 
