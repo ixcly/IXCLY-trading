@@ -1434,26 +1434,6 @@ async def get_simple_price(coin):
 _funding_cache = {}
 
 
-async def check_order_book_walls(coin, current_price, is_long):
-    """Лимитные стены в стакане фьючерсов Binance (> $500k в пределах 2% от цены)."""
-    try:
-        j = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol": f"{coin}USDT", "limit": 50}, timeout=5)
-        if not j or "bids" not in j or "asks" not in j:
-            return None
-        bids = [(float(p), float(q)) for p, q in j["bids"]]
-        asks = [(float(p), float(q)) for p, q in j["asks"]]
-        max_bid_wall = max((p * q for p, q in bids if current_price * 0.98 <= p <= current_price), default=0)
-        max_ask_wall = max((p * q for p, q in asks if current_price <= p <= current_price * 1.02), default=0)
-        wall_size = 500_000
-        if is_long and max_ask_wall > wall_size:
-            return f"Стена на продажу (${max_ask_wall/1000:.0f}K) прямо над ценой. Риск отскока."
-        if not is_long and max_bid_wall > wall_size:
-            return f"Стена на покупку (${max_bid_wall/1000:.0f}K) прямо под ценой. Риск отскока."
-    except Exception as e:
-        log.info(f"Ошибка стакана {coin}: {e}")
-    return None
-
-
 async def get_funding(coin):
     c = _funding_cache.get(coin)
     if c and time.time() - c[0] < 600:
@@ -1468,23 +1448,6 @@ async def get_funding(coin):
             continue
     _funding_cache[coin] = (time.time(), val)
     return val
-
-
-async def get_open_interest_change(coin):
-    """Изменение Open Interest за последние 15 минут, %."""
-    try:
-        async with http.get("https://fapi.binance.com/futures/data/openInterestHist",
-                            params={"symbol": f"{coin}USDT", "period": "15m", "limit": 2}, timeout=aiohttp.ClientTimeout(total=5)) as r:
-            if r.status != 200:
-                return 0.0
-            data = await r.json(content_type=None)
-            if len(data) < 2:
-                return 0.0
-            oi_old, oi_new = float(data[0]["sumOpenInterest"]), float(data[1]["sumOpenInterest"])
-            return round((oi_new - oi_old) / oi_old * 100, 2)
-    except Exception as e:
-        log.info(f"Ошибка OI {coin}: {e}")
-        return 0.0
 
 
 _ctx_cache = {"ts": 0.0, "data": {}}
@@ -1746,41 +1709,6 @@ async def ask_ai_named(prompt, timeout=20, validate=None, free_timeout=30):
 _ai_cache = {}
 
 
-def _parse_analyst(text):
-    try:
-        d = json.loads(re.search(r"\{.*\}", text or "", re.S).group(0))
-        verdict, comment = str(d.get("verdict", "")).upper().strip(), str(d.get("comment", "")).strip()
-        if verdict in ("ENTER", "WAIT") and has_cyr(comment, 15):
-            return {"verdict": verdict, "risk": str(d.get("risk", "средний")).strip()[:20], "comment": shorten(comment, 320)}
-    except Exception:
-        pass
-    return None
-
-
-async def ai_analyst(coin, setup, bt, ctx, entry, tps, sls, tf_data):
-    """Вето-слой: ИИ оценивает идею (ENTER/WAIT) и пишет комментарий."""
-    key = (coin, setup["is_long"])
-    c = _ai_cache.get(key)
-    if c and time.time() - c[0] < 1200:
-        return c[1]
-    tfp = ", ".join(f"{t} {setup['tf_probs'][t]:.0f}%" for t in ("1d", "4h", "1h", "15m") if t in setup["tf_probs"])
-    bt_txt = f"{bt['trades']} сделок, TP1 {bt['winrate']}%, ср. R {bt['avg_r']:+.2f}, PF {bt['pf']}" if bt else "нет данных"
-    prompt = f"""Ты опытный крипто-трейдер и риск-менеджер. Оцени идею и дай вердикт.
-Монета: {coin}. Направление: {'LONG' if setup['is_long'] else 'SHORT'}. Тип: {setup['type']}. Уверенность модели: {setup['strength']}%.
-Шанс лонга по ТФ: {tfp}. Режим 4h: {tf_data['4h']['regime']} (ADX {tf_data['4h']['adx']:.0f}).
-Причины: {'; '.join(setup['reasons']) or 'нет'}. Свечи: {'; '.join(setup['patterns']) or 'нет'}.
-Бэктест 4h: {bt_txt}. Новости: {setup['news_status']}. BTC {ctx.get('btc_txt')}, Fear&Greed {ctx.get('fng')}.
-Поправки: {'; '.join(setup['notes']) or 'нет'}. Вход {fmt(entry)}, TP1 {fmt(tps[0])}, SL {fmt(sls[0])}.
-ENTER только если идея качественная, при сомнениях WAIT.
-Верни СТРОГО JSON без markdown: {{"verdict":"ENTER или WAIT","risk":"низкий или средний или высокий","comment":"1-2 предложения по-русски: главный довод и главный риск"}}"""
-    text, engine = await ask_ai_named(prompt, validate=lambda t: _parse_analyst(t) is not None, timeout=22, free_timeout=25)
-    res = _parse_analyst(text) if text else None
-    if res:
-        res["engine"] = engine
-    _ai_cache[key] = (time.time(), res)
-    return res
-
-
 # =====================================================================
 # НОВОСТИ
 # =====================================================================
@@ -2015,124 +1943,6 @@ def collect_reasons(tf_data, is_long, tfs=("1d", "4h", "1h"), limit=5):
 def pattern_lines(tf_data):
     return [f"{tf}: {', '.join(p[0] for p in tf_data[tf]['patterns'][:3])}"
             for tf in ("1d", "4h", "1h") if tf in tf_data and tf_data[tf]["patterns"]]
-
-
-async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
-    """Мульти-ТФ оценка + фильтры. valid=True только если прошли все гейты."""
-    out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрочный",
-           "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": [], "fake_breakout": False}
-    tfs = [t for t in TF_WEIGHTS if t in tf_data]
-    if "4h" not in tf_data or "1d" not in tf_data:
-        out["reject"] = "Недостаточно данных по таймфреймам"
-        return out
-    wp = sum(TF_WEIGHTS[t] * tf_data[t]["long_prob"] for t in tfs) / sum(TF_WEIGHTS[t] for t in tfs)
-    is_long = wp >= 50
-    side = 1 if is_long else -1
-    strength = max(wp, 100 - wp)
-    notes = []
-
-    def cs(p):
-        return p if is_long else 100 - p
-
-    p4, p1d = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
-    info = tf_data["4h"]
-    reject = ""
-    if (p4 >= 50) != is_long or (p1d >= 50) != is_long:
-        reject = "4h и 1d смотрят в разные стороны"
-    agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
-    if not reject and info["adx"] < 15:
-        reject = f"Вялый рынок (ADX {info['adx']:.0f})"
-    if not reject and agree < min(3, len(tfs)):
-        reject = f"Таймфреймы не согласны ({agree}/{len(tfs)})"
-    if not reject and info["atr"] / info["price"] > 0.06:
-        reject = "Слишком высокая волатильность (ATR > 6%)"
-
-    if "1h" in tf_data and (tf_data["1h"]["long_prob"] >= 50) != is_long and tf_data["1h"]["confidence"] >= 65:
-        strength -= 8
-        notes.append("1h против направления (−8)")
-    if is_long and (info["rsi"] > 75 or info["price"] - info["ema20"] > 2.5 * info["atr"]):
-        strength -= 8
-        notes.append("цена перегрета, риск погони (−8)")
-    if (not is_long) and (info["rsi"] < 25 or info["ema20"] - info["price"] > 2.5 * info["atr"]):
-        strength -= 8
-        notes.append("цена перепродана, риск погони (−8)")
-    if coin != "BTC" and ctx.get("btc_dir", 0) != 0:
-        if ctx["btc_dir"] == side:
-            strength += 3
-            notes.append("BTC в ту же сторону (+3)")
-        else:
-            pen = 10 if ctx.get("btc_conf", 50) >= 65 else 5
-            strength -= pen
-            notes.append(f"BTC против направления (−{pen})")
-    fng = ctx.get("fng")
-    if fng is not None and ((fng >= 80 and is_long) or (fng <= 20 and not is_long)):
-        strength -= 4
-        notes.append(f"экстремальный {'страх' if fng <= 20 else 'жадность'} {fng} (−4)")
-    if funding is not None:
-        if is_long and funding > 0.0005:
-            strength -= 5
-            notes.append(f"перегрет лонг: funding {funding * 100:.3f}% (−5)")
-        elif (not is_long) and funding < -0.0005:
-            strength -= 5
-            notes.append(f"перегрет шорт: funding {funding * 100:.3f}% (−5)")
-
-    oi_change = await get_open_interest_change(coin)
-    if oi_change > 2.0:
-        strength += 5
-        notes.append(f"OI растет (+{oi_change}%) — новые деньги (+5)")
-    elif oi_change < -2.0:
-        strength -= 5
-        notes.append(f"OI падает ({oi_change}%) — закрытие позиций (−5)")
-    if onchain_change < -2.0 and is_long:
-        strength -= 10
-        notes.append(f"отток TVL {onchain_change}% против лонга (−10)")
-    elif onchain_change > 2.0 and not is_long:
-        strength -= 10
-        notes.append(f"приток TVL {onchain_change}% против шорта (−10)")
-
-    now_msk = datetime.now(timezone(timedelta(hours=3)))
-    is_night = now_msk.hour < 8 or now_msk.hour >= 22
-    if is_night or now_msk.weekday() >= 5:
-        strength -= 7
-        notes.append(f"{'Ночь' if is_night else 'Выходные'}: низкая ликвидность (−7)")
-
-    df_info = info.get("df")
-    if df_info is not None and len(df_info) > 0:
-        last_candle = df_info.iloc[-1]
-        if (last_candle["brk_up"] or last_candle["brk_dn"]) and last_candle["rel_vol"] < 0.8:
-            out["fake_breakout"] = True
-            strength -= 15
-            notes.append("Ложный пробой (тонкий объем) (−15)")
-
-    if not reject and strength >= conf_threshold - 5:
-        wall_warning = await check_order_book_walls(coin, info["price"], is_long)
-        if wall_warning:
-            strength -= 10
-            notes.append(f"🐋 Стакан: {wall_warning} (−10)")
-
-    nb = market_bias.get("bias", 0)
-    news_status = "Нейтрально"
-    if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
-        word = "бычий" if nb == 1 else "медвежий"
-        if nb == side:
-            strength += 7
-            news_status = f"✅ Подтверждают ({word} фон)"
-        else:
-            strength -= 20
-            news_status = f"❌ Противоречат ({word} фон)"
-
-    strength = max(0.0, min(100.0, strength))
-    if not reject and strength < conf_threshold:
-        reject = f"Уверенность {strength:.0f}% ниже порога {conf_threshold:.0f}%"
-
-    p15, p1h = tf_data.get("15m", {}).get("long_prob", 50), tf_data.get("1h", {}).get("long_prob", 50)
-    fast = "15m" in tf_data and "1h" in tf_data and cs(p15) >= 58 and cs(p1h) >= 56
-    long_term = cs(p1d) >= 64 and cs(p4) >= 60
-    out.update(valid=not reject, reject=reject, notes=notes, is_long=is_long, strength=round(strength, 1),
-               type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный",
-               news_status=news_status, wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
-               reasons=collect_reasons(tf_data, is_long), patterns=pattern_lines(tf_data))
-    return out
 
 
 def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=None, resistance=None):
@@ -2395,6 +2205,399 @@ def render_caption(res, uid=None):
         parts.append((4, f"💬 {html.escape(shorten(res['comment'], 170))}"))
     parts.append((8, "⚠ <i>Не фин. рекомендация</i>"))
     return fit_caption(parts, 1000)
+
+
+# =====================================================================
+# ФИЛЬТРЫ РЫНКА v2: OI+цена, ложные пробои и сбор ликвидности, стакан,
+# сжатие, сессии, обвал BTC, история funding, Chandelier, ИИ по сырым данным
+# =====================================================================
+OI_TXT = {
+    "new_longs": "рост OI и цены: открываются новые лонги",
+    "new_shorts": "рост OI при падении цены: открываются новые шорты",
+    "short_cover": "OI падает при росте цены: шорты закрываются, импульс слабее",
+    "long_liq": "OI падает при падении цены: лонги закрываются",
+}
+OI_DELTA = {  # (LONG, SHORT)
+    "new_longs": (6, -6), "new_shorts": (-6, 6), "short_cover": (-3, -5), "long_liq": (-5, 3),
+}
+
+
+async def oi_price_state(coin):
+    """Матрица OI + цена за текущие 15 минут: понимаем, кто открывает позиции."""
+    try:
+        async with http.get("https://fapi.binance.com/futures/data/openInterestHist",
+                            params={"symbol": f"{coin}USDT", "period": "15m", "limit": 2},
+                            timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status != 200:
+                return None, 0.0, 0.0
+            data = await r.json(content_type=None)
+        if len(data) < 2:
+            return None, 0.0, 0.0
+        oi_old, oi_new = float(data[0]["sumOpenInterest"]), float(data[1]["sumOpenInterest"])
+        oi_pct = (oi_new - oi_old) / oi_old * 100 if oi_old else 0.0
+        kl = await http_json("https://fapi.binance.com/fapi/v1/klines",
+                             params={"symbol": f"{coin}USDT", "interval": "15m", "limit": 1}, timeout=5)
+        o, c = float(kl[-1][1]), float(kl[-1][4])
+        p_pct = (c - o) / o * 100 if o else 0.0
+    except Exception as e:
+        log.info(f"OI {coin}: {e}")
+        return None, 0.0, 0.0
+    if oi_pct > 0.5 and p_pct > 0.2:
+        st = "new_longs"
+    elif oi_pct > 0.5 and p_pct < -0.2:
+        st = "new_shorts"
+    elif oi_pct < -0.5 and p_pct > 0.2:
+        st = "short_cover"
+    elif oi_pct < -0.5 and p_pct < -0.2:
+        st = "long_liq"
+    else:
+        st = None
+    return st, round(oi_pct, 2), round(p_pct, 2)
+
+
+async def order_book_imbalance(coin, price):
+    """Перевес сил в стакане: доля бидов в ±2% от цены, ближние уровни весят больше (меньше спуфинга)."""
+    try:
+        j = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol": f"{coin}USDT", "limit": 100}, timeout=5)
+    except Exception as e:
+        log.info(f"Стакан {coin}: {e}")
+        return None
+    def w(p):
+        return max(0.2, 1 - abs(p - price) / price / 0.02)
+    bids = sum(float(p) * float(q) * w(float(p)) for p, q in j.get("bids", []) if float(p) >= price * 0.98)
+    asks = sum(float(p) * float(q) * w(float(p)) for p, q in j.get("asks", []) if float(p) <= price * 1.02)
+    tot = bids + asks
+    return round(bids / tot, 3) if tot else None
+
+
+async def funding_trend(coin):
+    """История funding (последние 4 периода, от старых к новым)."""
+    for cand in SYMBOL_ALIASES.get(coin, [coin]):
+        try:
+            j = await http_json("https://api.bybit.com/v5/market/funding/history",
+                                params={"category": "linear", "symbol": f"{cand}USDT", "limit": 4}, timeout=5)
+            rates = [float(x["fundingRate"]) for x in j["result"]["list"]][::-1]
+            if len(rates) >= 3:
+                return rates
+        except Exception:
+            continue
+    return []
+
+
+_btc_move = {"ts": 0.0, "pct": 0.0}
+
+
+async def btc_move_15m():
+    """Изменение BTC за последние 15 минут (5-минутные свечи), кэш 60 секунд."""
+    if time.time() - _btc_move["ts"] < 60:
+        return _btc_move["pct"]
+    pct = 0.0
+    try:
+        kl = await http_json("https://data-api.binance.vision/api/v3/klines",
+                             params={"symbol": "BTCUSDT", "interval": "5m", "limit": 4}, timeout=5)
+        pct = (float(kl[-1][4]) - float(kl[-3][1])) / float(kl[-3][1]) * 100
+    except Exception as e:
+        log.info(f"BTC 15m: {e}")
+    _btc_move.update(ts=time.time(), pct=round(pct, 2))
+    return _btc_move["pct"]
+
+
+def detect_traps(df, lookback=20):
+    """Ложные пробои и сбор ликвидности по последней ЗАКРЫТОЙ свече относительно диапазона lookback."""
+    if df is None or len(df) < lookback + 2:
+        return {}
+    last = df.iloc[-1]
+    prev = df.iloc[-lookback - 1:-1]
+    hi_lvl, lo_lvl = float(prev["high"].max()), float(prev["low"].min())
+    rng = float(last["high"] - last["low"])
+    if rng <= 0:
+        return {}
+    body = abs(float(last["close"] - last["open"]))
+    upper = float(last["high"] - max(last["open"], last["close"]))
+    lower = float(min(last["open"], last["close"]) - last["low"])
+    rv = float(last.get("rel_vol", 1.0))
+    out = {"levels": (round(hi_lvl, 6), round(lo_lvl, 6)), "body_ratio": round(body / rng, 2), "rel_vol": round(rv, 2)}
+    eps = max(body, rng * 0.05)
+    # ложный пробой: фитиль за уровнем, тело вернулось внутрь диапазона на большом объёме
+    if last["high"] > hi_lvl and last["close"] < hi_lvl and rv >= 1.3:
+        out["fake_up"] = True
+    if last["low"] < lo_lvl and last["close"] > lo_lvl and rv >= 1.3:
+        out["fake_dn"] = True
+    # сбор ликвидности: длинный фитиль за уровнем, закрытие обратно (без требования объёма)
+    if last["low"] < lo_lvl and last["close"] > lo_lvl and lower >= 2 * eps and upper <= body + eps:
+        out["sweep_dn"] = True
+    if last["high"] > hi_lvl and last["close"] < hi_lvl and upper >= 2 * eps and lower <= body + eps:
+        out["sweep_up"] = True
+    return out
+
+
+def session_info(now_msk):
+    """Сессии по МСК: (название, поправка к уверенности)."""
+    h, wd = now_msk.hour, now_msk.weekday()
+    if wd >= 5:
+        return "выходные", -4
+    if h < 3:
+        return "ночь (тонкий стакан)", -6
+    if h < 10:
+        return "Азия", -2
+    if h < 16:
+        return "Европа", 1
+    return "Европа + США", 2
+
+
+async def chandelier_stop(coin, is_long):
+    """Chandelier Exit: максимум (минимум) 22 часовых свечей минус (плюс) 3 ATR."""
+    rows = await fetch_history(coin, "1h", 60, min_rows=30)
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
+    prev = df["close"].shift()
+    tr = pd.concat([df["high"] - df["low"], (df["high"] - prev).abs(), (df["low"] - prev).abs()], axis=1).max(axis=1)
+    atr = float(tr.rolling(22).mean().iloc[-1])
+    if not atr or atr != atr:
+        return None
+    if is_long:
+        return float(df["high"].tail(22).max() - 3 * atr)
+    return float(df["low"].tail(22).min() + 3 * atr)
+
+
+async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
+    """Мульти-ТФ оценка и фильтры v2. valid=True только если прошли все гейты."""
+    out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрочный",
+           "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": [],
+           "fake_breakout": False, "extras": {}}
+    tfs = [t for t in TF_WEIGHTS if t in tf_data]
+    if "4h" not in tf_data or "1d" not in tf_data:
+        out["reject"] = "Недостаточно данных по таймфреймам"
+        return out
+    wp = sum(TF_WEIGHTS[t] * tf_data[t]["long_prob"] for t in tfs) / sum(TF_WEIGHTS[t] for t in tfs)
+    is_long = wp >= 50
+    side = 1 if is_long else -1
+    strength = max(wp, 100 - wp)
+    notes, pos_reasons = [], []
+
+    def cs(p):
+        return p if is_long else 100 - p
+
+    p4, p1d = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
+    info = tf_data["4h"]
+    h1 = tf_data.get("1h")
+    reject = ""
+    if (p4 >= 50) != is_long or (p1d >= 50) != is_long:
+        reject = "4h и 1d смотрят в разные стороны"
+    agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
+    squeeze4 = bool(info.get("squeeze"))
+    atr_cap = 0.09 if squeeze4 else 0.06  # высокий ATR после сжатия — ещё не перегрев
+    if not reject and info["adx"] < 15:
+        reject = f"Вялый рынок (ADX {info['adx']:.0f})"
+    if not reject and agree < min(3, len(tfs)):
+        reject = f"Таймфреймы не согласны ({agree}/{len(tfs)})"
+    if not reject and info["atr"] / info["price"] > atr_cap:
+        reject = f"Слишком высокая волатильность (ATR > {atr_cap * 100:.0f}%)"
+
+    if h1 and (h1["long_prob"] >= 50) != is_long and h1["confidence"] >= 65:
+        strength -= 8
+        notes.append("1h против направления (−8)")
+    if is_long and (info["rsi"] > 75 or info["price"] - info["ema20"] > 2.5 * info["atr"]):
+        strength -= 8
+        notes.append("цена перегрета, риск погони (−8)")
+    if (not is_long) and (info["rsi"] < 25 or info["ema20"] - info["price"] > 2.5 * info["atr"]):
+        strength -= 8
+        notes.append("цена перепродана, риск погони (−8)")
+
+    if coin != "BTC" and ctx.get("btc_dir", 0) != 0:
+        if ctx["btc_dir"] == side:
+            strength += 3
+            notes.append("BTC в ту же сторону (+3)")
+        else:
+            pen = 10 if ctx.get("btc_conf", 50) >= 65 else 5
+            strength -= pen
+            notes.append(f"BTC против направления (−{pen})")
+
+    # Обвал / памп BTC прямо сейчас (flash crash): альты летят вместе с ним
+    btc15 = 0.0
+    if coin != "BTC":
+        btc15 = await btc_move_15m()
+        if is_long and btc15 <= -2.5:
+            reject = reject or f"BTC обвал {btc15:.1f}% за 15 минут: лонги запрещены"
+        elif (not is_long) and btc15 >= 2.5:
+            reject = reject or f"BTC памп +{btc15:.1f}% за 15 минут: шорты запрещены"
+        elif (is_long and btc15 <= -1.5) or ((not is_long) and btc15 >= 1.5):
+            strength -= 5
+            notes.append(f"BTC резко против за 15 мин ({btc15:+.1f}%) (−5)")
+
+    fng = ctx.get("fng")
+    if fng is not None and ((fng >= 80 and is_long) or (fng <= 20 and not is_long)):
+        strength -= 4
+        notes.append(f"экстремальный {'страх' if fng <= 20 else 'жадность'} {fng} (−4)")
+
+    # История funding: тренд за 3 периода важнее одного значения
+    fr = await funding_trend(coin)
+    if fr:
+        rising = fr[-1] > fr[-2] > fr[-3]
+        falling = fr[-1] < fr[-2] < fr[-3]
+        if is_long:
+            if rising and fr[-1] > 0.0003:
+                strength -= 6
+                notes.append(f"funding растёт 3 периода подряд ({fr[-1] * 100:.3f}%): пузырь лонгов (−6)")
+            elif falling and fr[-1] < -0.0002:
+                strength += 4
+                pos_reasons.append("Funding уходит в минус: паника, шорты переплачивают")
+        else:
+            if rising and fr[-1] > 0.0003:
+                strength += 4
+                pos_reasons.append("Funding растёт: лонги переплачивают, перегрев лонгов")
+            elif falling and fr[-1] < -0.0002:
+                strength -= 6
+                notes.append("funding 3 периода в минус: шорты переполнены, риск выкупа (−6)")
+
+    # Матрица OI + цена
+    oi_state, oi_pct, p_pct = await oi_price_state(coin)
+    if oi_state:
+        d = OI_DELTA[oi_state][0 if is_long else 1]
+        strength += d
+        notes.append(f"OI+цена: {OI_TXT[oi_state]} ({d:+d})")
+        if d > 0:
+            pos_reasons.append(OI_TXT[oi_state])
+
+    # Стакан: перевес сил (вместо одиночной «стены»)
+    imb = None
+    if not reject and strength >= conf_threshold - 8:
+        imb = await order_book_imbalance(coin, info["price"])
+    if imb is not None:
+        if (is_long and imb < 0.40) or ((not is_long) and imb > 0.60):
+            strength -= 5
+            notes.append(f"стакан: перевес {'продавцов' if is_long else 'покупателей'} ({imb:.0%}) (−5)")
+        elif (is_long and imb > 0.60) or ((not is_long) and imb < 0.40):
+            strength += 4
+            pos_reasons.append(f"Стакан: перевес {'покупателей' if is_long else 'продавцов'} {max(imb, 1 - imb):.0%}")
+
+    if onchain_change < -2.0 and is_long:
+        strength -= 10
+        notes.append(f"отток TVL {onchain_change}% против лонга (−10)")
+    elif onchain_change > 2.0 and not is_long:
+        strength -= 10
+        notes.append(f"приток TVL {onchain_change}% против шорта (−10)")
+
+    # Сессии по МСК вместо одного штрафа за ночь
+    sess_name, sess_adj = session_info(datetime.now(timezone(timedelta(hours=3))))
+    if sess_adj:
+        strength += sess_adj
+        notes.append(f"сессия: {sess_name} ({sess_adj:+d})")
+    h1df = h1.get("df") if h1 else None
+    if sess_name == "Азия" and h1df is not None and (h1df.iloc[-1]["brk_up"] or h1df.iloc[-1]["brk_dn"]):
+        strength -= 3
+        notes.append("Азия + пробой: такие пробои часто ложные (−3)")
+
+    # Ложные пробои и сбор ликвидности (1h, а если нет — 4h)
+    tdf = h1df if h1df is not None else info.get("df")
+    traps = detect_traps(tdf) if tdf is not None else {}
+    lv_hi, lv_lo = traps.get("levels", (0, 0))
+    if traps.get("fake_up"):
+        if is_long:
+            strength -= 15
+            notes.append(f"ложный пробой вверх у {lv_hi}: объём и тело не удержали уровень (−15)")
+        else:
+            strength += 5
+            pos_reasons.append(f"Ложный пробой вверх у {lv_hi}: покупатели не удержали уровень")
+    if traps.get("fake_dn"):
+        if not is_long:
+            strength -= 15
+            notes.append(f"ложный пробой вниз у {lv_lo}: объём и тело не удержали уровень (−15)")
+        else:
+            strength += 5
+            pos_reasons.append(f"Ложный пробой вниз у {lv_lo}: продавцы не удержали уровень")
+    if traps.get("sweep_dn"):
+        if is_long:
+            strength += 8
+            pos_reasons.append(f"Сбор ликвидности ниже {lv_lo} и выкуп: стопы розницы собраны")
+        else:
+            strength -= 4
+            notes.append("сбор ликвидности вниз: против шорта (−4)")
+    if traps.get("sweep_up"):
+        if not is_long:
+            strength += 8
+            pos_reasons.append(f"Сбор ликвидности выше {lv_hi} и продажа: стопы лонгов собраны")
+        else:
+            strength -= 4
+            notes.append("сбор ликвидности вверх: против лонга (−4)")
+    out["fake_breakout"] = bool(traps.get("fake_up") or traps.get("fake_dn"))
+
+    # Сжатие Боллинджера: импульс близко, направление по EMA 4h
+    if squeeze4 and (info["ema20"] > info["ema50"]) == is_long:
+        strength += 4
+        pos_reasons.append("Сжатие Боллинджера на 4h: импульс близко, направление совпадает с EMA")
+
+    nb = market_bias.get("bias", 0)
+    news_status = "Нейтрально"
+    if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
+        word = "бычий" if nb == 1 else "медвежий"
+        if nb == side:
+            strength += 7
+            news_status = f"✅ Подтверждают ({word} фон)"
+        else:
+            strength -= 20
+            news_status = f"❌ Противоречат ({word} фон)"
+
+    strength = max(0.0, min(100.0, strength))
+    if not reject and strength < conf_threshold:
+        reject = f"Уверенность {strength:.0f}% ниже порога {conf_threshold:.0f}%"
+
+    p15 = tf_data.get("15m", {}).get("long_prob", 50)
+    p1h = h1["long_prob"] if h1 else 50
+    fast = "15m" in tf_data and h1 is not None and cs(p15) >= 58 and cs(p1h) >= 56
+    long_term = cs(p1d) >= 64 and cs(p4) >= 60
+    reasons = (pos_reasons + collect_reasons(tf_data, is_long))[:6]
+    out.update(
+        valid=not reject, reject=reject, notes=notes, is_long=is_long, strength=round(strength, 1),
+        type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный",
+        news_status=news_status, wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
+        reasons=reasons, patterns=pattern_lines(tf_data),
+        extras={"oi": oi_state, "oi_pct": oi_pct, "price_pct": p_pct, "imbalance": imb, "funding": fr[-1] if fr else None,
+                "btc15": btc15, "session": sess_name, "traps": {k: v for k, v in traps.items() if k != "levels"}})
+    return out
+
+
+def _parse_analyst(text):
+    try:
+        d = json.loads(re.search(r"\{.*\}", text or "", re.S).group(0))
+        verdict, comment = str(d.get("verdict", "")).upper().strip(), str(d.get("comment", "")).strip()
+        div = str(d.get("divergence", "none")).lower().strip()
+        if verdict in ("ENTER", "WAIT") and has_cyr(comment, 15):
+            return {"verdict": verdict, "risk": str(d.get("risk", "средний")).strip()[:20],
+                    "divergence": div if div in ("bull", "bear") else "none", "comment": shorten(comment, 320)}
+    except Exception:
+        pass
+    return None
+
+
+async def ai_analyst(coin, setup, bt, ctx, entry, tps, sls, tf_data):
+    """ИИ видит сырые OHLCV и RSI последних 30 свечей 4h: сам ищет дивергенции, вердикт ENTER/WAIT."""
+    key = (coin, setup["is_long"])
+    c = _ai_cache.get(key)
+    if c and time.time() - c[0] < 1200:
+        return c[1]
+    df = tf_data["4h"]["df"].tail(30)
+    block = "\n".join(f"{r.open:.6g} {r.high:.6g} {r.low:.6g} {r.close:.6g} v{r.volume:.0f} rsi{r.rsi:.0f}" for r in df.itertuples())
+    bt_txt = f"{bt['trades']} сделок, TP1 {bt['winrate']}%, ср. R {bt['avg_r']:+.2f}, PF {bt['pf']}" if bt else "нет данных"
+    prompt = f"""Ты крипто-трейдер. Проверь идею по СЫРЫМ данным 4h (последние 30 свечей, колонки: open high low close volume RSI).
+{block}
+
+Монета {coin}, направление {'LONG' if setup['is_long'] else 'SHORT'}, Conf {setup['strength']}%.
+Вход {fmt(entry)}, TP1 {fmt(tps[0])}, стоп {fmt(sls[0])}. Бэктест 4h: {bt_txt}.
+Выводы модели: {'; '.join(setup['reasons']) or 'нет'}. Фильтры: {'; '.join(setup['notes']) or 'нет'}.
+Задачи: 1) есть ли дивергенция цены и RSI (новый максимум/минимум цены без подтверждения RSI)? 2) не прошёл ли уже большую часть движения? 3) решение.
+Используй ТОЛЬКО цены из данных, не придумывай уровни.
+Верни СТРОГО JSON без markdown: {{"verdict":"ENTER или WAIT","risk":"низкий или средний или высокий","divergence":"bull или bear или none","comment":"1-2 предложения по-русски"}}"""
+    text, engine = await ask_ai_named(prompt, validate=lambda t: _parse_analyst(t) is not None, timeout=22, free_timeout=25)
+    res = _parse_analyst(text) if text else None
+    if res:
+        res["engine"] = engine
+        if res["divergence"] != "none":
+            res["comment"] = shorten(f"Дивергенция {'бычья' if res['divergence'] == 'bull' else 'медвежья'} по RSI. {res['comment']}", 320)
+    _ai_cache[key] = (time.time(), res)
+    return res
+
 
 
 async def build_analysis(coin, tf_data, setup, bt, ctx, source):
@@ -3080,11 +3283,13 @@ async def check_position(user_id, coin, pos):
         await _tell(user_id, f"🛡 <b>Безубыток: {coin}</b>\nЦена в плюсе на {pnl:.2f}%. Стоп перенесён на вход.")
 
     if pos["hit_tp1"] and not pos["hit_tp3"]:
-        new_sl = price * 0.985 if side == "LONG" else price * 1.015
-        better = new_sl > current_sl if side == "LONG" else new_sl < current_sl
-        if better and (new_sl > entry if side == "LONG" else new_sl < entry):
-            pos["sl1"] = current_sl = new_sl
-            set_user_open_position(user_id, coin, pos)
+        ch = await chandelier_stop(coin, side == "LONG")
+        if ch:
+            new_sl = max(ch, entry) if side == "LONG" else min(ch, entry)
+            better = new_sl > current_sl if side == "LONG" else new_sl < current_sl
+            if better:
+                pos["sl1"] = current_sl = new_sl
+                set_user_open_position(user_id, coin, pos)
 
     if pnl <= -5.0 and not pos.get("notified_urgent"):
         pos["notified_urgent"] = True
@@ -4648,5 +4853,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        log.info("Бот остановлен")
         log.info("Бот остановлен")
