@@ -2958,7 +2958,7 @@ async def scan_once(send=True):
             
         # --- НОВАЯ ПРОВЕРКА: МАКРО-НОВОСТИ ФРС ---
         if await check_macro_calendar():
-            set_blackout(3600) # Ставим паузу на 1 час
+            set_blackout(1800) # Ставим паузу на 1 час
             await notify_admin("🏦 <b>Макро-новость (ФРС/CPI)!</b>\nСканер на паузе 1 час во избежание проскальзываний.")
             return []
         # ------------------------------------------
@@ -2991,6 +2991,12 @@ async def scan_once(send=True):
         ctx = await get_context(force=True)
         onchain = await get_onchain_context()
         universe = await get_scan_universe()
+        scan_conf = min([CONF_FINAL] + [float(u.get("conf_final", CONF_FINAL)) for u in _users().values()
+        if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)])
+        rej = {}
+        def _rej(k):
+            rej[k] = rej.get(k, 0) + 1
+
         sem = asyncio.Semaphore(2)
 
         stage1 = []
@@ -3014,12 +3020,18 @@ async def scan_once(send=True):
         await asyncio.gather(*[s1(c) for c in universe])
         stage1 = sorted(stage1, key=lambda x: x[2], reverse=True)[:30]
 
-        stage2 = []
+                stage2 = []
+        scan_conf = min([CONF_FINAL] + [float(u.get("conf_final", CONF_FINAL)) for u in _users().values()
+                                        if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)])
+        rej = {}
 
-        # ИСПРАВЛЕНИЕ 1: Выровнен отступ для async def s2
+        def _rej(k):
+            rej[k] = rej.get(k, 0) + 1
+
         async def s2(item):
             coin, tf2, _ = item
             if coin_recently_lost(coin):
+                _rej("недавний убыток по монете")
                 return
             async with sem:
                 tf_data = dict(tf2)
@@ -3029,15 +3041,14 @@ async def scan_once(send=True):
                 except Exception:
                     pass
                 setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True,
-                                             onchain_change=onchain, conf_threshold=CONF_FINAL + adaptive_conf_bonus())
-
+                                             onchain_change=onchain, conf_threshold=scan_conf + adaptive_conf_bonus())
                 if setup["valid"]:
                     stage2.append((coin, tf_data, setup))
+                else:
+                    _rej(setup["reject"][:28])
 
-        # ВАЖНО: Вызов второго этапа (его не было)
         await asyncio.gather(*[s2(i) for i in stage1])
 
-        # ВАЖНО: Добавлены недостающие переменные
         bt_pass = 0
         final = []
         sem3 = asyncio.Semaphore(2)
@@ -3048,6 +3059,7 @@ async def scan_once(send=True):
             async with sem3:
                 bt = await get_backtest(coin)
                 if bt is not None and bt["trades"] >= BT_MIN_TRADES and not bt_ok(bt):
+                    _rej("бэктест слабый")
                     return
                 bt_pass += 1
                 try:
@@ -3059,8 +3071,18 @@ async def scan_once(send=True):
                     final.append(res)
                     analysis_cache[coin] = (time.time(), 1200, res)
                     save_analysis_db(coin, res)
+                else:
+                    _rej("ИИ: ЖДАТЬ")
 
         await asyncio.gather(*[s3(i) for i in stage2])
+
+
+        # ВАЖНО: Добавлены недостающие переменные
+        bt_pass = 0
+        final = []
+        sem3 = asyncio.Semaphore(2)
+
+        
         final.sort(key=lambda r: r["strength"], reverse=True)
         last_scan_info.update(ts=int(time.time()), stage1=len(stage1), stage2=len(stage2), backtest_ok=bt_pass,
                               final=len(final), secs=int(time.time() - t0))
