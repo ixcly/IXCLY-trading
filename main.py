@@ -2735,7 +2735,7 @@ async def scan_once(send=True):
                         "strength": r["strength"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1],
                         "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
                         "max_tp_hit": 0, "hit_sl": 0, "price": r["price"], "sent_to": [], "is_long": r["is_long"],
-                        "tf_probs": r.get("tf_probs") or {}, "text": r["text"]}
+                        "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "reasons": [re.sub(r"\s*\(.*\)$", "", s) for s in r.get("reasons", [])][:6], "hour": datetime.now(timezone(timedelta(hours=3))).hour, "daily": False, "mfe": 0.0, "mae": 0.0}
                 hist.append(item)
                 new_items.append((item, r))
             if new_items:
@@ -2750,29 +2750,6 @@ async def scan_once(send=True):
                                f"🧾 Отсев: {top or '—'}")
         gc.collect()
         return final
-
-
-async def deliver_new_signal(item, r):
-    """Рассылка сигнала тем, кто включил уведомления и чей порог ниже силы сигнала."""
-    kb = signal_keyboard(item["coin"])
-    for cid in signal_recipients(item["coin"], item["side"]):
-        u = _users().get(str(cid), {})
-        if r["strength"] < float(u.get("conf_final", CONF_FINAL)):
-            continue
-        try:
-            await _send_new(cid, r["text"], kb, r.get("img"))
-            item["sent_to"].append(cid)
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            log.info(f"Ошибка отправки сигнала {cid}: {e}")
-    state_touch()
-    asyncio.create_task(send_webhook_all({"event": "new_signal", "coin": item["coin"], "side": item["side"],
-                                          "entry": item["entry"], "tp1": item["tp1"], "sl1": item["sl1"]}))
-
-
-def signal_keyboard(coin):
-    rows = [[InlineKeyboardButton(text="📈 Открыть в приложении", web_app=WebAppInfo(url=webapp_link(coin)))]] if WEBAPP_URL else []
-    return InlineKeyboardMarkup(inline_keyboard=rows + [[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]])
 
 
 def webapp_link(coin=None, tab=None):
@@ -2833,22 +2810,6 @@ async def notify_signal_holders(coin, side, text, kb=None, extra_uids=()):
             await asyncio.sleep(0.05)
         except Exception as e:
             log.info(f"notify {uid}: {e}")
-
-
-async def invalidate_signal(x, reason):
-    """Сигнал больше не ликвиден: убираем из списков и сообщаем тем, кто его получал."""
-    x["status"] = "cancelled"
-    x["cancel_reason"] = reason
-    text = (f"🚫 <b>Сигнал снят: {x['coin']} ({x['side']})</b>\n\n{reason}\n"
-            f"Вход был: <code>{fmt(x['entry'])}</code>. Не входите по этой идее.")
-    await notify_signal_holders(x["coin"], x["side"], text,
-                                kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(x["coin"])))]]) if WEBAPP_URL else None,
-                                extra_uids=x.get("sent_to", []))
-    # Лимитка, которая ещё не исполнена, снимается у пользователей
-    for uid, u in list(_users().items()):
-        pos = (u.get("open_positions") or {}).get(x["coin"])
-        if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
-            set_user_open_position(int(uid), x["coin"], None)
 
 
 def live_check_signal(x, live):
@@ -2922,39 +2883,6 @@ async def live_monitor_loop():
             log.error(f"live_monitor: {e}", exc_info=True)
         next_timers["global_signals"] = time.time() + 60
         await asyncio.sleep(60)
-
-
-async def global_signal_monitor_loop():
-    """Итоги сигналов по свечам: win/loss, webhook, уведомление владельцам."""
-    await asyncio.sleep(120)
-    while True:
-        try:
-            hist = load_signal_history()
-            changed = False
-            rows_cache = {}
-            for x in hist:
-                if x.get("status") not in ("active", "in_trade"):
-                    continue
-                coin = x["coin"]
-                if coin not in rows_cache:
-                    rows_cache[coin] = await fetch_history(coin, "15m", 400, min_rows=40)
-                    await asyncio.sleep(0.2)
-                rows = rows_cache[coin]
-                if not rows:
-                    continue
-                status, max_tp, hit_sl = simulate_signal(x, rows)
-                if (status, max_tp, hit_sl) != (x["status"], x.get("max_tp_hit", 0), x.get("hit_sl", 0)):
-                    prev = x["status"]
-                    x.update(status=status, max_tp_hit=max_tp, hit_sl=hit_sl)
-                    changed = True
-                    if status in ("win", "loss") and prev != status:
-                        await notify_admin(f"📊 <b>{coin} {x['side']}:</b> {'✅ WIN' if status == 'win' else '❌ LOSS'} (TP: {max_tp})")
-                        asyncio.create_task(send_webhook_all({"event": f"closed_{status}", "coin": coin, "side": x["side"]}))
-            if changed:
-                save_signal_history(hist)
-        except Exception as e:
-            log.error(f"global_signal_monitor: {e}")
-        await asyncio.sleep(300)
 
 
 async def scanner_loop():
@@ -3476,7 +3404,7 @@ async def anomaly_scan_once():
                 f"Цена за минуту: <b>{chg:+.2f}%</b>")
         for cid in list(active_chats):
             if get_user_notif_settings(cid)["anomalies"]:
-                await _tell(cid, text, signal_keyboard(coin))
+                await _tell(cid, text, webapp_kb(coin))
 
 
 async def anomaly_scanner_loop():
@@ -3781,6 +3709,550 @@ async def cmd_start(m: types.Message, state: FSMContext):
     await bot.send_message(m.chat.id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
 
 
+from PIL import ImageFilter, ImageChops
+
+# =====================================================================
+# КАРТОЧКИ СИГНАЛОВ (PNG в стиле «КОЛЛ ДНЯ»)
+# =====================================================================
+GOLD = (250, 190, 40)
+
+
+def _pfmt(v):
+    v = float(v)
+    if abs(v) >= 1000:
+        return f"{v:,.0f}".replace(",", " ")
+    return fmt(v)
+TEXT_GREY = (130, 137, 165)
+
+
+def _font(size, bold=False):
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans%s.ttf" % ("-Bold" if bold else ""), size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _tw(draw, text, font):
+    try:
+        return draw.textlength(text, font=font)
+    except Exception:
+        return font.getsize(text)[0]
+
+
+def _fit(draw, text, font, maxw):
+    t = text
+    while t and _tw(draw, t, font) > maxw:
+        t = t[:-2]
+    return t if t == text else (t.rstrip() + "…")
+
+
+def _dash(d, x0, x1, y, color, w=2, dash=14, gap=10):
+    x = x0
+    while x < x1:
+        d.line((x, y, min(x + dash, x1), y), fill=color, width=w)
+        x += dash + gap
+
+
+def _closes_plot(d, closes, box, levels):
+    """Линия цены и уровни. levels: [(значение, подпись, цвет, пунктир)]."""
+    x0, y0, x1, y1 = box
+    vals = list(closes) + [v for v, *_ in levels]
+    vmin, vmax = min(vals) * 0.998, max(vals) * 1.002
+    rng = (vmax - vmin) or 1.0
+
+    def ym(v):
+        return y1 - (v - vmin) / rng * (y1 - y0)
+
+    if len(closes) >= 2:
+        n = len(closes)
+        pts = [(x0 + i * (x1 - x0) / (n - 1), ym(v)) for i, v in enumerate(closes)]
+        d.polygon(pts + [(x1, y1), (x0, y1)], fill=(22, 27, 52))
+        d.line(pts, fill=(96, 136, 255), width=4)
+        lx, ly = pts[-1]
+    else:
+        lx, ly = x1, ym(levels[0][0])
+    font = _font(23, True)
+    for v, label, color, dashed in levels:
+        y = ym(v)
+        if dashed:
+            _dash(d, x0, x1, y, color)
+        else:
+            d.line((x0, y, x1, y), fill=color, width=3)
+        tw = _tw(d, f"{label} {_pfmt(v)}", font)
+        d.rounded_rectangle((x1 + 22, y - 19, x1 + 22 + tw + 22, y + 19), radius=18, fill=color)
+        d.text((x1 + 33, y - 15), f"{label} {_pfmt(v)}", fill=(10, 11, 18), font=font)
+    return lx, ly, ym
+
+
+def render_signal_card(x, closes, price, title="СИГНАЛ"):
+    """Карточка: заголовок, цена входа, график с уровнями, почему, «Ошибаюсь, если», футер."""
+    W, H = 1024, 1280
+    long = x["is_long"]
+    accent = (45, 226, 198) if long else (255, 90, 110)
+    img = Image.new("RGB", (W, H), (10, 11, 18))
+    glow = Image.new("RGB", (W, H), (0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    gd.ellipse((520, -260, 1320, 520), fill=(12, 70, 62) if long else (70, 16, 30))
+    glow = glow.filter(ImageFilter.GaussianBlur(120))
+    img = ImageChops.add(img, glow)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 8), fill=GOLD)
+
+    msk = datetime.now(timezone(timedelta(hours=3)))
+    f_badge, f_small, f_head = _font(30, True), _font(28), _font(64, True)
+    bw = _tw(d, f"{title} · {x['coin']}", f_badge) + 52
+    d.rounded_rectangle((58, 50, 58 + bw, 110), radius=30, outline=GOLD, width=3)
+    d.text((84, 62), f"{title} · {x['coin']}", fill=GOLD, font=f_badge)
+    dt = msk.strftime("%d.%m · %H:%M")
+    d.text((966 - _tw(d, dt, f_small), 66), dt, fill=TEXT_GREY, font=f_small)
+
+    d.text((58, 150), f"{x['coin']} {'пойдёт вверх' if long else 'пойдёт вниз'}", fill=(245, 247, 255), font=f_head)
+    d.text((58, 232), _pfmt(x["entry"]), fill=accent, font=_font(150, True))
+    d.text((58, 404), f"{'лонг' if long else 'шорт'} лимит от {_pfmt(x['entry'])} · сейчас {_pfmt(price or x['entry'])}",
+           fill=TEXT_GREY, font=_font(30))
+
+    levels = [(x["entry"], "вход", accent, False), (x["tp1"], "цель", accent, True), (x["sl1"], "отмена", (150, 150, 165), True)]
+    lx, ly, ym = _closes_plot(d, closes or [], (58, 470, 680, 780), levels)
+    d.ellipse((lx - 9, ly - 9, lx + 9, ly + 9), fill=(255, 255, 255))
+    d.line((lx + 14, ly, 680, ym(x["tp1"])), fill=accent, width=3)
+
+    d.rounded_rectangle((58, 815, 966, 1050), radius=24, fill=(16, 19, 32), outline=(40, 46, 70), width=2)
+    d.text((88, 835), "ПОЧЕМУ", fill=TEXT_GREY, font=_font(22, True))
+    reasons = [re.sub(r"\s*\(.*\)$", "", r) for r in (x.get("reasons") or [])][:4] or ["Совпали тренд, импульс и объём на 4h/1d"]
+    f_r = _font(26)
+    for i, r in enumerate(reasons):
+        y = 878 + i * 42
+        d.ellipse((88, y, 120, y + 32), outline=GOLD, width=2)
+        d.text((97 if i < 9 else 92, y + 4), str(i + 1), fill=GOLD, font=_font(20, True))
+        d.text((140, y + 3), _fit(d, r, f_r, 966 - 140 - 36), fill=(235, 238, 250), font=f_r)
+
+    d.rounded_rectangle((58, 1075, 966, 1155), radius=24, fill=(30, 14, 20), outline=(120, 40, 60), width=2)
+    inv = f"Ошибаюсь, если {'уйдём ниже' if long else 'уйдём выше'} {_pfmt(x['sl1'])}"
+    d.text((88, 1095), inv, fill=(250, 240, 244), font=_font(34, True))
+
+    d.ellipse((58, 1190, 128, 1260), outline=GOLD, width=3)
+    d.text((76, 1207), "IX", fill=GOLD, font=_font(26, True))
+    d.text((150, 1204), "IXCLY PRO", fill=(245, 247, 255), font=_font(36, True))
+    foot = f"Conf {x['strength']}% · {x['type']}"
+    d.text((966 - _tw(d, foot, _font(26)), 1210), foot, fill=TEXT_GREY, font=_font(26))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+async def _closes(coin):
+    rows = await fetch_history(coin, "4h", 60, min_rows=20)
+    return [r[4] for r in rows][-60:] if rows else []
+
+
+def signal_caption(x, uid, title="СИГНАЛ"):
+    s = get_user_risk_settings(uid)
+    risk_usd = s["deposit"] * s["risk_pct"] / 100
+    dist = abs(x["entry"] - x["sl1"]) / x["entry"] * 100
+    pos = risk_usd / (dist / 100) if dist > 0 else 0
+    head = f"🔥 <b>{title}</b>\n" if title != "СИГНАЛ" else ""
+    e = "🟢" if x["is_long"] else "🔴"
+    return (f"{head}{e} <b>{x['side']} · {html.escape(x['coin'])}</b> · {x['type']} · Conf <b>{x['strength']}%</b>\n"
+            f"📥 Вход <b>лимит</b> <code>{fmt(x['entry'])}</code>\n"
+            f"🎯 TP1 <code>{fmt(x['tp1'])}</code> · TP2 <code>{fmt(x['tp2'])}</code> · TP3 <code>{fmt(x['tp3'])}</code>\n"
+            f"🛡 Отмена <code>{fmt(x['sl1'])}</code> (−{dist:.2f}%)\n"
+            f"💼 Для вашего депозита: позиция ~<b>${pos:,.0f}</b>, риск <b>${risk_usd:.0f}</b>\n"
+            f"<i>Не финансовая рекомендация. Вход только лимитом.</i>")
+
+
+def signal_keyboard(x):
+    s = "L" if x["is_long"] else "S"
+    rows = []
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton(text="📈 Открыть в приложении", web_app=WebAppInfo(url=webapp_link(x["coin"])))])
+    rows.append([InlineKeyboardButton(text="✅ Вошёл", callback_data=f"in:{s}:{x['coin']}"),
+                 InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sv:{s}:{x['coin']}")])
+    rows.append([InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def webapp_kb(coin):
+    rows = [[InlineKeyboardButton(text="📈 Открыть в приложении", web_app=WebAppInfo(url=webapp_link(coin)))]] if WEBAPP_URL else []
+    return InlineKeyboardMarkup(inline_keyboard=rows + [[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]])
+
+
+async def deliver_new_signal(item, r, title="СИГНАЛ"):
+    """Карточка сигнала (PNG) + персональная подпись каждому, кто включил сигналы и чей порог ниже силы."""
+    closes = await _closes(item["coin"])
+    card = await asyncio.to_thread(render_signal_card, item, closes, r.get("price") or item["entry"], title)
+    for cid in signal_recipients(item["coin"], item["side"]):
+        u = _users().get(str(cid), {})
+        if item["strength"] < float(u.get("conf_final", CONF_FINAL)):
+            continue
+        try:
+            await _send_new(cid, signal_caption(item, cid, title), signal_keyboard(item), card)
+            item["sent_to"].append(cid)
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            log.info(f"Ошибка отправки сигнала {cid}: {e}")
+    state_touch()
+    asyncio.create_task(send_webhook_all({"event": "new_signal", "coin": item["coin"], "side": item["side"],
+                                          "entry": item["entry"], "tp1": item["tp1"], "sl1": item["sl1"]}))
+
+
+def sig_as_res(x):
+    return {"side": x["side"], "is_long": x["is_long"], "entry": x["entry"], "coin": x["coin"],
+            "tps": [x["tp1"], x["tp2"], x["tp3"]], "sls": [x["sl1"], x.get("sl2", x["sl1"])], "price": x.get("live_price", x["entry"])}
+
+
+async def handle_signal_button(cb, data):
+    uid = cb.from_user.id
+    action, s, coin = data.split(":", 2)
+    side = "LONG" if s == "L" else "SHORT"
+    x = next((y for y in get_active_signals() if y["coin"] == coin and y["side"] == side), None)
+    if not x:
+        return await safe_answer(cb, "Сигнал уже неактуален", True)
+    res = sig_as_res(x)
+    if action == "in":
+        for oc, od in get_user_open_positions(uid).items():
+            if oc != coin and od["side"] == side and any(oc in g and coin in g for g in CORRELATION_GROUPS):
+                return await safe_answer(cb, f"Уже открыт {side} по {oc}: монеты коррелируют", True)
+        if not open_tracked_position(uid, coin, res):
+            return await safe_answer(cb, "Сделка по монете уже открыта")
+        await safe_answer(cb, "Лимит поставлен")
+        await _tell(uid, f"⏳ Сопровождение {coin} {side}: вход <code>{fmt(x['entry'])}</code>, TP1-3 и итог придут сюда.")
+    else:
+        await asyncio.to_thread(add_user_saved_signal, uid, coin, signal_caption(x, uid), res)
+        await safe_answer(cb, "Сохранено в избранное")
+
+
+# =====================================================================
+# РЕЗУЛЬТАТЫ СИГНАЛОВ: R, MFE/MAE, живые уведомления
+# =====================================================================
+R_BY_TP = {0: 0.0, 1: 0.75, 2: 1.8, 3: 2.3}  # TP1 1.5R (50%), TP2 2.5R (30%), TP3 4R (20%); остаток — по стопу
+
+
+def signal_r(status, max_tp):
+    if status == "loss":
+        return -1.0
+    if status == "win":
+        return R_BY_TP.get(max_tp, 0.75)
+    return 0.0
+
+
+def excursion(x, rows):
+    """Максимум в пользу и против входа, в единицах риска (R), с момента сигнала."""
+    risk = abs(x["entry"] - x["sl1"]) or 1e-9
+    t0 = x["ts"] * 1000
+    mfe = mae = 0.0
+    for ts, _o, h, l, _c, _v in rows:
+        if ts < t0:
+            continue
+        if x["is_long"]:
+            mfe = max(mfe, (h - x["entry"]) / risk)
+            mae = min(mae, (l - x["entry"]) / risk)
+        else:
+            mfe = max(mfe, (x["entry"] - l) / risk)
+            mae = min(mae, (x["entry"] - h) / risk)
+    return round(mfe, 2), round(mae, 2)
+
+
+async def notify_sig_result(x, status, max_tp):
+    r = x.get("r", 0.0)
+    head = f"{x['coin']} {x['side']}"
+    if status == "win":
+        text = f"✅ <b>{head}: {'TP3' if max_tp == 3 else 'TP2' if max_tp == 2 else 'TP1'} взят</b>\nРезультат: <b>{r:+.2f}R</b>"
+    elif status == "loss":
+        text = f"❌ <b>{head}: стоп</b>\nРезультат: <b>{r:+.2f}R</b>. Риск по идее закрыт."
+    elif status == "missed":
+        text = f"🚫 <b>{head}: цель взята без входа</b>. Идея упущена, новых входов не ищем."
+    else:
+        text = f"⌛ <b>{head}: вход не исполнился за срок</b>. Идея закрыта без результата."
+    await notify_signal_holders(x["coin"], x["side"], text, kb=kb_nav(back=False), extra_uids=x.get("sent_to", []))
+
+
+async def global_signal_monitor_loop():
+    """Итоги и промежуточные события по свечам 15m: вход, TP1-3, стоп, MFE/MAE, R."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            hist = load_signal_history()
+            changed = False
+            rows_cache = {}
+            for x in hist:
+                if x.get("status") not in ("active", "in_trade"):
+                    continue
+                coin = x["coin"]
+                if coin not in rows_cache:
+                    rows_cache[coin] = await fetch_history(coin, "15m", 400, min_rows=40)
+                    await asyncio.sleep(0.2)
+                rows = rows_cache[coin]
+                if not rows:
+                    continue
+                mfe, mae = excursion(x, rows)
+                if mfe > x.get("mfe", 0) or mae < x.get("mae", 0):
+                    x["mfe"], x["mae"] = max(mfe, x.get("mfe", 0)), min(mae, x.get("mae", 0))
+                    changed = True
+                status, max_tp, hit_sl = simulate_signal(x, rows)
+                prev_status, prev_tp = x["status"], x.get("max_tp_hit", 0)
+                if (status, max_tp, hit_sl) == (prev_status, prev_tp, x.get("hit_sl", 0)):
+                    continue
+                x.update(status=status, max_tp_hit=max_tp, hit_sl=hit_sl)
+                changed = True
+                if prev_status == "active" and status == "in_trade":
+                    await notify_signal_holders(coin, x["side"], f"🎯 <b>{coin} {x['side']}: лимит исполнен</b>\n"
+                                                                 f"Вход <code>{fmt(x['entry'])}</code>. Ведём до TP1.",
+                                                kb=kb_nav(back=False), extra_uids=x.get("sent_to", []))
+                if max_tp > prev_tp and status == "in_trade":
+                    await notify_signal_holders(coin, x["side"], f"🎯 <b>{coin} {x['side']}: достигнут TP{max_tp}</b>\n"
+                                                                 f"Стоп переносится за цену входа.",
+                                                kb=kb_nav(back=False), extra_uids=x.get("sent_to", []))
+                if status in ("win", "loss", "missed", "expired") and prev_status != status:
+                    x["closed_ts"] = time.time()
+                    x["r"] = signal_r(status, max_tp)
+                    await notify_sig_result(x, status, max_tp)
+                    await notify_admin(f"📊 <b>{coin} {x['side']}:</b> {status} · {x['r']:+.2f}R (TP {max_tp})")
+                    asyncio.create_task(send_webhook_all({"event": f"closed_{status}", "coin": coin, "side": x["side"], "r": x["r"]}))
+            if changed:
+                save_signal_history(hist)
+        except Exception as e:
+            log.error(f"global_signal_monitor: {e}", exc_info=True)
+        await asyncio.sleep(120)
+
+
+async def invalidate_signal(x, reason):
+    """Сигнал больше не ликвиден: снимаем из списков и сообщаем получателям и держателям."""
+    x["status"] = "cancelled"
+    x["cancel_reason"] = reason
+    x["closed_ts"] = time.time()
+    x["r"] = 0.0
+    text = (f"🚫 <b>Сигнал снят: {x['coin']} ({x['side']})</b>\n\n{reason}\n"
+            f"Вход был <code>{fmt(x['entry'])}</code>. Не входите по этой идее.")
+    await notify_signal_holders(x["coin"], x["side"], text, kb=webapp_kb(x["coin"]), extra_uids=x.get("sent_to", []))
+    for uid, u in list(_users().items()):
+        pos = (u.get("open_positions") or {}).get(x["coin"])
+        if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
+            set_user_open_position(int(uid), x["coin"], None)
+
+
+# =====================================================================
+# КОЛЛ ДНЯ (ежедневно 08:00 МСК)
+# =====================================================================
+daily_call_state = {"date": None}
+
+
+async def daily_call_loop():
+    while True:
+        msk = datetime.now(timezone(timedelta(hours=3)))
+        target = msk.replace(hour=8, minute=0, second=0, microsecond=0)
+        if msk >= target:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - msk).total_seconds())
+        try:
+            today = datetime.now(timezone(timedelta(hours=3))).date().isoformat()
+            cands = get_active_signals()
+            if cands and daily_call_state["date"] != today:
+                best = max(cands, key=lambda x: x["strength"])
+                best["daily"] = True
+                closes = await _closes(best["coin"])
+                lv = LIVE.get(best["coin"])
+                price = lv["price"] if lv else best["entry"]
+                card = await asyncio.to_thread(render_signal_card, best, closes, price, "КОЛЛ ДНЯ")
+                for cid in signal_recipients(best["coin"], best["side"]):
+                    try:
+                        await _send_new(cid, signal_caption(best, cid, "КОЛЛ ДНЯ"), signal_keyboard(best), card)
+                        best["sent_to"].append(cid)
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+                daily_call_state["date"] = today
+                state_touch()
+        except Exception as e:
+            log.error(f"daily_call: {e}", exc_info=True)
+        await asyncio.sleep(60)
+
+
+# =====================================================================
+# АНАЛИТИКА СИГНАЛОВ
+# =====================================================================
+def _sig_closed_all():
+    with STATE_LOCK:
+        hist = list(STATE["signal_history"])
+    out = []
+    for x in hist:
+        if x.get("status") in ("win", "loss"):
+            if x.get("r") is None:
+                x["r"] = signal_r(x["status"], x.get("max_tp_hit", 0))
+            out.append(x)
+    return sorted(out, key=lambda x: x.get("closed_ts", x["ts"]))
+
+
+def _agg(items):
+    n = len(items)
+    if not n:
+        return None
+    wins = sum(1 for x in items if x["status"] == "win")
+    rs = [x.get("r", 0.0) for x in items]
+    gp = sum(r for r in rs if r > 0)
+    gl = -sum(r for r in rs if r < 0)
+    return {"n": n, "wr": round(wins / n * 100, 1), "avg_r": round(sum(rs) / n, 2),
+            "sum_r": round(sum(rs), 2), "pf": round(gp / gl, 2) if gl else None}
+
+
+def analytics_summary():
+    with STATE_LOCK:
+        allsig = list(STATE["signal_history"])
+    closed = _sig_closed_all()
+    created = len(allsig)
+    cnt = {s: sum(1 for x in allsig if x.get("status") == s) for s in
+           ("win", "loss", "missed", "expired", "cancelled", "active", "in_trade")}
+    entered = cnt["win"] + cnt["loss"] + cnt["in_trade"]
+    total = _agg(closed)
+    curve, cum, peak, dd = [], 0.0, 0.0, 0.0
+    for x in closed:
+        cum += x["r"]
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+        curve.append(round(cum, 2))
+    mw = ml = cw = cl = 0
+    for x in closed:
+        if x["status"] == "win":
+            cw, cl = cw + 1, 0
+        else:
+            cl, cw = cl + 1, 0
+        mw, ml = max(mw, cw), max(ml, cl)
+    bands = [(0, 60, "50–60%"), (60, 70, "60–70%"), (70, 80, "70–80%"), (80, 101, "80%+")]
+    calib = []
+    for lo, hi, label in bands:
+        grp = [x for x in closed if lo <= x["strength"] < hi]
+        if grp:
+            a = _agg(grp)
+            a["label"] = label
+            a["avg_conf"] = round(sum(x["strength"] for x in grp) / len(grp), 1)
+            calib.append(a)
+    sessions = {"день 08–22": [x for x in closed if 8 <= x.get("hour", 12) < 22],
+                "ночь 22–08": [x for x in closed if not (8 <= x.get("hour", 12) < 22)]}
+    coins = {}
+    for x in closed:
+        coins.setdefault(x["coin"], []).append(x)
+    coin_rows = sorted([(c, _agg(v)) for c, v in coins.items()], key=lambda kv: kv[1]["sum_r"], reverse=True)
+    reasons = {}
+    for x in closed:
+        for rsn in set(x.get("reasons") or []):
+            reasons.setdefault(rsn, []).append(x)
+    reason_rows = [(k, _agg(v)) for k, v in reasons.items() if len(v) >= 3]
+    reason_rows.sort(key=lambda kv: kv[1]["avg_r"], reverse=True)
+    thresholds = [(t, _agg([x for x in closed if x["strength"] >= t])) for t in (60, 65, 70, 75, 80)]
+    thresholds = [(t, a) for t, a in thresholds if a]
+    mfe = round(sum(x.get("mfe", 0) for x in closed) / len(closed), 2) if closed else 0.0
+    mae = round(sum(x.get("mae", 0) for x in closed) / len(closed), 2) if closed else 0.0
+    hold = round(sum((x.get("closed_ts", x["ts"]) - x["ts"]) for x in closed) / len(closed) / 3600, 1) if closed else 0.0
+    daily = _agg([x for x in closed if x.get("daily")])
+    return {"created": created, "cnt": cnt, "entered": entered,
+            "fill_rate": round(entered / created * 100, 1) if created else 0.0,
+            "miss_rate": round(cnt["missed"] / (entered + cnt["missed"]) * 100, 1) if (entered + cnt["missed"]) else 0.0,
+            "total": total, "curve": curve[-120:], "max_dd": round(dd, 2), "streak_w": mw, "streak_l": ml,
+            "bands": calib, "sessions": {k: _agg(v) for k, v in sessions.items()},
+            "types": {t: _agg([x for x in closed if x["type"] == t]) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")},
+            "sides": {s: _agg([x for x in closed if x["side"] == s]) for s in ("LONG", "SHORT")},
+            "coins_top": coin_rows[:5], "coins_bottom": coin_rows[-5:][::-1] if len(coin_rows) > 5 else [],
+            "reasons_top": reason_rows[:6], "reasons_bottom": reason_rows[-3:][::-1] if len(reason_rows) > 6 else [],
+            "thresholds": thresholds, "mfe": mfe, "mae": mae, "hold_h": hold, "daily": daily}
+
+
+def _fa(a):
+    if not a:
+        return "нет данных"
+    pf = "—" if a["pf"] is None else a["pf"]
+    return f"{a['n']} сд · WR <b>{a['wr']}%</b> · ср. <b>{a['avg_r']:+.2f}R</b> · Σ {a['sum_r']:+.2f}R · PF {pf}"
+
+
+def analytics_text(s):
+    t = s["total"]
+    if not t:
+        return ("📊 <b>Аналитика сигналов</b>\n\nЗакрытых сигналов пока нет. Данные появятся после первых результатов: "
+                f"создано {s['created']}, активных {s['cnt']['active'] + s['cnt']['in_trade']}.")
+    lines = ["📊 <b>Аналитика сигналов IXCLY</b>", "",
+             f"Создано: <b>{s['created']}</b> · вошли: <b>{s['entered']}</b> ({s['fill_rate']}%) · упущено: {s['miss_rate']}%",
+             f"✅ {s['cnt']['win']} · ❌ {s['cnt']['loss']} · ⌛ {s['cnt']['expired']} · 🚫 {s['cnt']['cancelled']}", "",
+             f"<b>Итог по закрытым:</b> {_fa(t)}",
+             f"Макс. просадка: <b>{s['max_dd']:.2f}R</b> · серии: победы {s['streak_w']}, убытки {s['streak_l']}",
+             f"Средний MFE <b>{s['mfe']:+.2f}R</b> / MAE <b>{s['mae']:+.2f}R</b> · удержание {s['hold_h']} ч", "",
+             "<b>Калибровка по уверенности</b> (проверка, что Conf честный):"]
+    for b in s["bands"]:
+        lines.append(f"• {b['label']} (ср. {b['avg_conf']}%): WR <b>{b['wr']}%</b>, {b['avg_r']:+.2f}R, {b['n']} сд")
+    lines += ["", "<b>Порог уверенности</b> (что было бы, если фильтровать):"]
+    for th, a in s["thresholds"]:
+        lines.append(f"• от {th}%: WR {a['wr']}% · {a['avg_r']:+.2f}R · {a['n']} сд")
+    lines += ["", "<b>Типы:</b>"]
+    lines += [f"• {k}: {_fa(v)}" for k, v in s["types"].items() if v]
+    lines += ["", f"<b>Лонг</b>: {_fa(s['sides']['LONG'])}", f"<b>Шорт</b>: {_fa(s['sides']['SHORT'])}"]
+    for k, a in s["sessions"].items():
+        if a:
+            lines.append(f"<b>{k}</b>: WR {a['wr']}% · {a['avg_r']:+.2f}R · {a['n']} сд")
+    if s["daily"]:
+        lines.append(f"<b>Коллы дня</b>: WR {s['daily']['wr']}% · {s['daily']['avg_r']:+.2f}R · {s['daily']['n']} сд")
+    if s["coins_top"]:
+        lines += ["", "<b>Лучшие монеты (Σ R):</b> " + ", ".join(f"{c} {a['sum_r']:+.1f}R" for c, a in s["coins_top"])]
+    if s["coins_bottom"]:
+        lines.append("<b>Худшие монеты:</b> " + ", ".join(f"{c} {a['sum_r']:+.1f}R" for c, a in s["coins_bottom"]))
+    if s["reasons_top"]:
+        lines += ["", "<b>Факторы, которые работают</b> (ср. R, от 3 сделок):"]
+        lines += [f"• {k}: {a['avg_r']:+.2f}R · WR {a['wr']}% · {a['n']} сд" for k, a in s["reasons_top"][:5]]
+    if s["reasons_bottom"]:
+        lines += ["<b>Факторы, которые ломают:</b>"]
+        lines += [f"• {k}: {a['avg_r']:+.2f}R · WR {a['wr']}% · {a['n']} сд" for k, a in s["reasons_bottom"][:3]]
+    return "\n".join(lines)
+
+
+def render_analytics_png(s):
+    W, H = 1024, 760
+    img = Image.new("RGB", (W, H), (10, 11, 18))
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 8), fill=GOLD)
+    d.text((58, 40), "Кривая результата сигналов, R", fill=(245, 247, 255), font=_font(40, True))
+    t = s["total"]
+    if t:
+        d.text((58, 96), f"Σ {t['sum_r']:+.2f}R · WR {t['wr']}% · {t['n']} сделок · просадка {s['max_dd']:.2f}R",
+               fill=TEXT_GREY, font=_font(26))
+    box = (58, 150, 966, 460)
+    curve = s["curve"] or [0]
+    vmin, vmax = min(min(curve), 0), max(max(curve), 0.5)
+    rng = (vmax - vmin) or 1
+    x0, y0, x1, y1 = box
+    zero_y = y1 - (0 - vmin) / rng * (y1 - y0)
+    d.line((x0, zero_y, x1, zero_y), fill=(60, 66, 96), width=2)
+    pts = [(x0 + i * (x1 - x0) / max(1, len(curve) - 1), y1 - (v - vmin) / rng * (y1 - y0)) for i, v in enumerate(curve)]
+    if len(pts) > 1:
+        d.polygon(pts + [(x1, zero_y), (x0, zero_y)], fill=(18, 48, 52) if curve[-1] >= 0 else (50, 20, 30))
+        d.line(pts, fill=(45, 226, 198) if curve[-1] >= 0 else (255, 90, 110), width=4)
+    d.text((58, 480), "Калибровка: уверенность → фактический винрейт", fill=(245, 247, 255), font=_font(30, True))
+    bands = s["bands"]
+    bx0, bw = 90, 200
+    for i, b in enumerate(bands):
+        x = bx0 + i * 225
+        hgt = int(b["wr"] / 100 * 200)
+        d.rectangle((x, 920 - 200, x + bw, 920 - 200 + 200), outline=(40, 46, 70), width=2)
+        d.rectangle((x, 920 - hgt, x + bw, 920), fill=(96, 136, 255))
+        d.text((x, 935), b["label"], fill=TEXT_GREY, font=_font(24))
+        d.text((x, 720 - hgt), f"{b['wr']}%", fill=(245, 247, 255), font=_font(26, True))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+@dp.message(Command("analytics"))
+async def cmd_analytics(m: types.Message):
+    try:
+        await m.delete()
+    except Exception:
+        pass
+    if m.from_user.id not in ADMIN_IDS and m.from_user.id not in active_chats:
+        return
+    s = await asyncio.to_thread(analytics_summary)
+    await _send_new(m.chat.id, analytics_text(s), kb_nav(back=False), None)
+    if s["total"]:
+        png = await asyncio.to_thread(render_analytics_png, s)
+        await bot.send_photo(m.chat.id, BufferedInputFile(png, "analytics.png"), caption="📈 Кривая результата и калибровка")
+
+
+
+
 @dp.message()
 async def fallback_message(m: types.Message):
     try:
@@ -3802,6 +4274,8 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
+        if data[:3] in ("in:", "sv:"):
+            return await handle_signal_button(cb, data)
         if data == "del_msg" and msg:
             await safe_answer(cb, "Скрыто")
             return await safe_delete(msg)
@@ -4136,7 +4610,7 @@ async def main():
 
         background = [asyncio.create_task(c()) for c in (
             scanner_loop, live_monitor_loop, global_signal_monitor_loop, position_monitor_loop,
-            news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop,
+            news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
             anomaly_scanner_loop, state_flush_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
         background.append(asyncio.create_task(update_market_bias()))
 
