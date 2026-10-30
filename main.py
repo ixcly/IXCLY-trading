@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v3.0.1 PRO
+IXCLY Trading Bot v3.1 PRO
 
-Что внутри:
-- 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик (авто-подбор моделей, бесплатный GPT как запасной)
-- Единый экран: фото + подпись в ОДНОМ сообщении, предыдущие сообщения бота стираются, везде кнопка «Назад»
-- Портфель (риск на сделку), экспорт CSV, вебхуки, шифрование API-ключей, опциональная автоторговля
-- Сигналы проверяются по свечам (вход лимиткой, TP1-3, трейлинг стопа), честная статистика
-- Всё состояние (пользователи, избранное, позиции, сигналы, статистика, настройки) уходит в бэкап админ-боту и восстанавливается при старте
+- 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
+- Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
+- Портфель, личная статистика сделок, экспорт CSV, вебхуки, Mini App (Telegram WebApp)
+- Сигналы проверяются по свечам (вход лимиткой, TP1-3, трейлинг стопа)
+- Всё состояние уходит в бэкап админ-боту и восстанавливается при старте
 """
 
 import asyncio
@@ -15,6 +14,7 @@ import base64
 import csv
 import gc
 import hashlib
+import hmac
 import html
 import io
 import json
@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from threading import Thread
-from urllib.parse import quote
+from urllib.parse import quote, parse_qsl
 
 import aiohttp
 import feedparser
@@ -44,8 +44,9 @@ from aiogram.exceptions import (
     TelegramNetworkError, TelegramNotFound, TelegramRetryAfter,
 )
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup
-from flask import Flask, jsonify
+from aiogram.types import (BufferedInputFile, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
+                           MenuButtonWebApp, WebAppInfo)
+from flask import Flask, Response, jsonify, request, send_file
 from PIL import Image, ImageDraw, ImageFont
 
 try:
@@ -58,18 +59,21 @@ try:
 except ImportError:
     Fernet = None
 
+
 class PortfolioStates(StatesGroup):
     waiting_for_deposit = State()
 
+
 class AutotradeStates(StatesGroup):
     waiting_for_api_key = State()
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout, force=True)
 log = logging.getLogger("ixcly")
 
 
 class _ConflictFilter(logging.Filter):
-    """Конфликт getUpdates при деплое Render безвреден: пишем одну строку раз в минуту вместо десятков ошибок."""
+    """Конфликт getUpdates при деплое Render безвреден: одна строка раз в минуту."""
 
     def __init__(self):
         super().__init__()
@@ -91,7 +95,7 @@ class _ConflictFilter(logging.Filter):
 logging.getLogger("aiogram.dispatcher").addFilter(_ConflictFilter())
 
 # =====================================================================
-# ВЕБ-СЕРВЕР (keep-alive для Render)
+# ВЕБ-СЕРВЕР (keep-alive для Render + Mini App)
 # =====================================================================
 app = Flask(__name__)
 
@@ -146,12 +150,6 @@ def keep_alive():
 # =====================================================================
 # НАСТРОЙКИ
 # =====================================================================
-try:
-    FONT_MAIN = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
-    FONT_BOLD = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-except Exception:
-    FONT_MAIN = FONT_BOLD = ImageFont.load_default()
-
 def clean_key(k):
     return k.strip().strip('"').strip("'") if k else None
 
@@ -163,7 +161,6 @@ GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
 POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))
-# Модели необязательны: если не заданы, бот сам подбирает рабочие через API провайдера
 GEMINI_MODEL = clean_key(os.getenv("GEMINI_MODEL"))
 GROQ_MODEL = clean_key(os.getenv("GROQ_MODEL"))
 OPENROUTER_MODEL = clean_key(os.getenv("OPENROUTER_MODEL"))
@@ -179,7 +176,7 @@ for _x in re.split(r"[,\s]+", ADMIN_ID or ""):
 
 
 def make_cipher():
-    """Ключ шифрования API-ключей: переменная FERNET_KEY, иначе производный от BOT_TOKEN (не хранится в коде)."""
+    """Ключ шифрования API-ключей: FERNET_KEY, иначе производный от BOT_TOKEN."""
     if not Fernet:
         return None
     raw = clean_key(os.getenv("FERNET_KEY"))
@@ -193,7 +190,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "3.0.1"
+VERSION = "3.1"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -206,8 +203,20 @@ MIN_QV24 = float(os.getenv("MIN_QV24", "1000000"))
 SCAN_MAX_COINS = int(os.getenv("SCAN_MAX_COINS", "150"))
 DEPOSIT = float(os.getenv("DEPOSIT", "1000"))
 RISK_PCT = 1.0
-SCAN_INTERVAL = 20 * 60
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))  # сканер каждые 5 минут
 SIGNAL_COOLDOWN = 6 * 3600
+
+# --- Mini App ---
+_wu = clean_key(os.getenv("WEBAPP_URL")) or (
+    os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") if os.getenv("RENDER_EXTERNAL_URL") else None)
+WEBAPP_URL = (_wu.rstrip("/") if _wu.rstrip("/").endswith("/app") else _wu.rstrip("/") + "/app") if _wu else None
+MAIN_LOOP = None
+MODE_TYPES = {"aggressive": ("Краткосрочный", "Среднесрочный"), "balanced": ("Среднесрочный", "Долгосрочный"),
+              "conservative": ("Долгосрочный",)}
+MODE_NAMES = {"aggressive": "🟢 Агрессивный", "balanced": "🟡 Сбалансированный", "conservative": "🔴 Консервативный"}
+MODE_CONF = {"aggressive": 60, "balanced": 66, "conservative": 80}
+NOTIFY_NAMES = {"signals": "Сигналы", "news": "Новости", "anomalies": "Аномалии объёма",
+                "pos_updates": "Отчёты по сделкам", "briefing": "Утренний брифинг"}
 
 bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=30.0))
 dp = Dispatcher()
@@ -248,15 +257,15 @@ SWARMS ARC ZYN LUCE GRIFFAIN ZEREBRO AI16Z BAN FARTCOIN PENGU HYPE HMSTR CATI
 POPULAR_COINS = list(dict.fromkeys(_COIN_TEXT.split()))
 
 CORRELATION_GROUPS = [
-    ["ETH", "ARB", "OP", "MATIC", "STRK", "ZK", "MANTA"],  # L2 / Ethereum
-    ["SOL", "JUP", "PYTH", "WIF", "BONK"],                 # Solana
-    ["DOGE", "SHIB", "PEPE", "FLOKI", "BOME", "MEME"],     # Мемкоины
-    ["AVAX", "JOE", "GMX"],                                # Avalanche
-    ["BNB", "CAKE"],                                       # BSC
-    ["LINK", "PYTH", "BAND"],                              # Оракулы
-    ["UNI", "SUSHI", "1INCH"],                             # DEX
-    ["ATOM", "OSMO", "TIA", "INJ", "SEI"],                 # Cosmos
-    ["NEAR", "FET", "RNDR", "AGIX"]                        # AI
+    ["ETH", "ARB", "OP", "MATIC", "STRK", "ZK", "MANTA"],
+    ["SOL", "JUP", "PYTH", "WIF", "BONK"],
+    ["DOGE", "SHIB", "PEPE", "FLOKI", "BOME", "MEME"],
+    ["AVAX", "JOE", "GMX"],
+    ["BNB", "CAKE"],
+    ["LINK", "PYTH", "BAND"],
+    ["UNI", "SUSHI", "1INCH"],
+    ["ATOM", "OSMO", "TIA", "INJ", "SEI"],
+    ["NEAR", "FET", "RNDR", "AGIX"],
 ]
 
 SYMBOL_ALIASES = {
@@ -271,11 +280,11 @@ SYMBOL_ALIASES = {
 # =====================================================================
 active_chats = set()
 busy_users = set()
-user_res = {}                # uid -> {coin: (ts, res)}
-analysis_cache = {}          # coin -> (ts, ttl, res)
-bt_cache = {}                # coin -> (ts, bt)
-preferred_source = {}        # coin -> (тикер, биржа)
-fetch_errors = {}            # coin -> [строки с причинами]
+user_res = {}
+analysis_cache = {}
+bt_cache = {}
+preferred_source = {}
+fetch_errors = {}
 signal_sent_at = {}
 anomaly_sent_at = {}
 scan_skip = {}
@@ -292,7 +301,7 @@ exchange_bans = {}
 news_blackout_until = 0.0
 
 # =====================================================================
-# ХРАНИЛИЩЕ СОСТОЯНИЯ (в памяти + файл + бэкап в Telegram)
+# ХРАНИЛИЩЕ СОСТОЯНИЯ (память + файл + бэкап в Telegram)
 # =====================================================================
 STATE_FILE = "bot_state.json"
 STATE_LOCK = threading.RLock()
@@ -324,7 +333,7 @@ def collect_persist():
 
 
 def apply_persist(p):
-    global last_news_link, market_bias
+    global last_news_link
     if not isinstance(p, dict):
         return
     for k, v in (p.get("flags") or {}).items():
@@ -351,7 +360,7 @@ def restore_state(data, force=False):
     if not isinstance(data, dict) or not data:
         return 0
     if "users" not in data and all(isinstance(v, dict) for v in data.values()):
-        data = {"users": data}  # старый формат: только users.json
+        data = {"users": data}
     with STATE_LOCK:
         local_ts = STATE["meta"].get("saved_at", 0)
         remote_ts = (data.get("meta") or {}).get("saved_at", 0)
@@ -439,6 +448,7 @@ def user_counts():
     users = _users()
     return len(users), sum(1 for u in users.values() if isinstance(u, dict) and u.get("active", True))
 
+
 def get_user_notif_settings(user_id):
     u = _users().get(str(user_id), {})
     return {
@@ -448,6 +458,7 @@ def get_user_notif_settings(user_id):
         "pos_updates": u.get("notify_pos_updates", True),
         "briefing": u.get("notify_briefing", True),
     }
+
 
 def get_user_saved_signals(user_id):
     return list(_users().get(str(user_id), {}).get("saved_signals", []))
@@ -508,7 +519,6 @@ def save_signal_history(hist):
 
 
 def save_analysis_db(coin, res):
-    """Архив последнего анализа монеты (без картинки). Запись по ключу монеты: дублей нет."""
     item = {k: v for k, v in res.items() if k != "img"}
     with STATE_LOCK:
         STATE["analysis_db"][coin] = {"ts": time.time(), "data": item}
@@ -545,11 +555,11 @@ def set_user_field(user_id, **fields):
 def save_user_api_keys(user_id, exchange, api_key, secret_key):
     if not cipher:
         return False
-    set_user_field(user_id,
-                   exchange=exchange,
+    set_user_field(user_id, exchange=exchange,
                    **{f"{exchange}_api": cipher.encrypt(api_key.encode()).decode(),
                       f"{exchange}_secret": cipher.encrypt(secret_key.encode()).decode()})
     return True
+
 
 def get_user_api_keys(user_id, exchange=None):
     u = _users().get(str(user_id), {})
@@ -593,7 +603,7 @@ _defillama_cache = {"ts": 0.0, "change": 0.0}
 
 
 async def get_onchain_context():
-    """Изменение суммарного TVL за сутки (DefiLlama): отток денег снижает уверенность в лонгах."""
+    """Изменение суммарного TVL за сутки (DefiLlama)."""
     if time.time() - _defillama_cache["ts"] < 3600:
         return _defillama_cache["change"]
     try:
@@ -657,7 +667,7 @@ def trim_html(text, limit):
 
 
 def fit_caption(parts, limit=1000):
-    """parts: [(приоритет, строка)]. Пока не влезает в лимит, убираем строки с наибольшим номером приоритета."""
+    """parts: [(приоритет, строка)]. Пока не влезает в лимит, убираем строки с наибольшим приоритетом."""
     items = list(parts)
 
     def total():
@@ -785,7 +795,6 @@ async def delete_ids(chat_id, ids):
 
 
 async def purge_chat(chat_id, upto_id, count=100):
-    """Стирает последние `count` сообщений до upto_id включительно (и ботовские, и пользовательские)."""
     ids = list(range(max(1, upto_id - count), upto_id + 1))
     try:
         await bot.delete_messages(chat_id=chat_id, message_ids=ids)
@@ -836,7 +845,6 @@ async def present(chat_id, text, kb=None, photo=None, edit_msg=None):
 
 
 async def show_loading(chat_id, edit_msg, text):
-    """Быстрый отклик, пока считается анализ: правим текущее сообщение (текст или подпись фото)."""
     try:
         if edit_msg is None:
             return await present(chat_id, text)
@@ -924,7 +932,6 @@ async def errors_handler(event: ErrorEvent):
 # =====================================================================
 # ИНДИКАТОРЫ И СВЕЧНЫЕ ПАТТЕРНЫ
 # =====================================================================
-# имя: (рус. название, сторона, вес, вид, англ. метка для картинки)
 PATTERNS = {
     "bull_engulf": ("Бычье поглощение", 1, 12, "rev", "BULL ENGULF"),
     "bear_engulf": ("Медвежье поглощение", -1, 12, "rev", "BEAR ENGULF"),
@@ -1076,7 +1083,6 @@ def add_indicators(df):
     raw = tp * v
     pos_f, neg_f = raw.where(tp > tp.shift(), 0.0), raw.where(tp < tp.shift(), 0.0)
     df["mfi"] = (100 - 100 / (1 + pos_f.rolling(14).sum() / neg_f.rolling(14).sum().replace(0, np.nan))).fillna(50)
-    # Оптимизация: используем std() вместо медленного apply()
     std_dev = tp.rolling(20).std().replace(0, np.nan)
     df["cci"] = ((tp - tp.rolling(20).mean()) / (0.015 * std_dev)).fillna(0)
     hh, ll = h.rolling(14).max(), l.rolling(14).min()
@@ -1099,7 +1105,7 @@ def add_indicators(df):
 
 
 def add_scores(df):
-    """Три модели (тренд / моментум / price action) с весами по режиму рынка. long_p 5..95 для каждой свечи."""
+    """Три модели (тренд / моментум / price action) с весами по режиму рынка. long_p 5..95."""
     n = len(df)
     c, adx = df["close"].values, df["adx"].values
     trending, ranging = adx >= 25, adx < 20
@@ -1240,7 +1246,7 @@ def prepare_df(df):
 
 
 def build_tf_data(rows_by_tf):
-    """Индикаторы считаем только по ЗАКРЫТЫМ свечам (формирующуюся отбрасываем), цена живая."""
+    """Индикаторы по ЗАКРЫТЫМ свечам (формирующуюся отбрасываем), цена живая."""
     out = {}
     for tf, rows in rows_by_tf.items():
         price = float(rows[-1][4])
@@ -1278,11 +1284,11 @@ def _p_bybit(j):
     return [[float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in j["result"]["list"]]
 
 
-def _p_kucoin(j):  # [time(сек), open, close, high, low, volume, turnover]
+def _p_kucoin(j):
     return [[float(x[0]) * 1000, float(x[1]), float(x[3]), float(x[4]), float(x[2]), float(x[5])] for x in j["data"]]
 
 
-def _p_gate(j):  # [time(сек), quote_vol, close, high, low, open, base_vol]
+def _p_gate(j):
     return [[float(x[0]) * 1000, float(x[5]), float(x[3]), float(x[4]), float(x[2]), float(x[6])] for x in j]
 
 
@@ -1323,7 +1329,7 @@ EXCHANGES = [
 async def _fetch_klines(ex, coin, tf, limit=200, min_rows=None):
     j = await http_json(ex["url"], params=ex["params"](coin, tf, limit), timeout=9)
     rows = ex["parse"](j)
-    rows.sort(key=lambda r: r[0])  # у разных бирж разный порядок: приводим к «старые → новые»
+    rows.sort(key=lambda r: r[0])
     if len(rows) < (min_rows or MIN_CANDLES + 1):
         raise ValueError(f"мало свечей ({len(rows)})")
     return rows
@@ -1335,7 +1341,6 @@ def _note_error(coin, ex_name, err):
 
 
 async def _try_exchange(ex, cand, tfs, coin=None):
-    """Сначала один пробный запрос (если монеты нет на бирже, не тратим 4 запроса), потом остальные ТФ."""
     if time.time() < exchange_bans.get(ex["name"], 0):
         return None
     coin = coin or cand
@@ -1370,7 +1375,6 @@ async def get_market_data(coin, tfs=tuple(TFS)):
 
 
 async def get_market_data_light(coin, tfs=tuple(TFS)):
-    """Сначала биржа, где монета уже находилась (меньше запросов), иначе полный поиск."""
     pref = preferred_source.get(coin)
     if pref:
         ex = next((e for e in EXCHANGES if e["name"] == pref[1]), None)
@@ -1404,7 +1408,6 @@ async def fetch_history(coin, tf="4h", limit=1000, min_rows=300):
 
 
 async def get_simple_price(coin):
-    """Цена с бирж (быстро), затем с публичных агрегаторов."""
     for cand in SYMBOL_ALIASES.get(coin, [coin]):
         for url, params, path in (
             ("https://data-api.binance.vision/api/v3/ticker/price", {"symbol": f"{cand}USDT"}, lambda j: j["price"]),
@@ -1432,30 +1435,20 @@ _funding_cache = {}
 
 
 async def check_order_book_walls(coin, current_price, is_long):
-    """Ищет огромные лимитные стены в стакане (более $500k) в пределах 2% от цены."""
+    """Лимитные стены в стакане фьючерсов Binance (> $500k в пределах 2% от цены)."""
     try:
-        # Берем стакан с фьючерсов Binance (публичный API)
-        url = "https://fapi.binance.com/fapi/v1/depth"
-        j = await http_json(url, params={"symbol": f"{coin}USDT", "limit": 50}, timeout=5)
+        j = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol": f"{coin}USDT", "limit": 50}, timeout=5)
         if not j or "bids" not in j or "asks" not in j:
             return None
-
         bids = [(float(p), float(q)) for p, q in j["bids"]]
         asks = [(float(p), float(q)) for p, q in j["asks"]]
-
-        # Ищем самую большую стену в пределах 2% от текущей цены
-        # Стена на покупку (bids) - поддержка
         max_bid_wall = max((p * q for p, q in bids if current_price * 0.98 <= p <= current_price), default=0)
-        # Стена на продажу (asks) - сопротивление
         max_ask_wall = max((p * q for p, q in asks if current_price <= p <= current_price * 1.02), default=0)
-
-        wall_size = 500_000 # Порог в $500,000
-
+        wall_size = 500_000
         if is_long and max_ask_wall > wall_size:
             return f"Стена на продажу (${max_ask_wall/1000:.0f}K) прямо над ценой. Риск отскока."
         if not is_long and max_bid_wall > wall_size:
             return f"Стена на покупку (${max_bid_wall/1000:.0f}K) прямо под ценой. Риск отскока."
-            
     except Exception as e:
         log.info(f"Ошибка стакана {coin}: {e}")
     return None
@@ -1475,6 +1468,23 @@ async def get_funding(coin):
             continue
     _funding_cache[coin] = (time.time(), val)
     return val
+
+
+async def get_open_interest_change(coin):
+    """Изменение Open Interest за последние 15 минут, %."""
+    try:
+        async with http.get("https://fapi.binance.com/futures/data/openInterestHist",
+                            params={"symbol": f"{coin}USDT", "period": "15m", "limit": 2}, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status != 200:
+                return 0.0
+            data = await r.json(content_type=None)
+            if len(data) < 2:
+                return 0.0
+            oi_old, oi_new = float(data[0]["sumOpenInterest"]), float(data[1]["sumOpenInterest"])
+            return round((oi_new - oi_old) / oi_old * 100, 2)
+    except Exception as e:
+        log.info(f"Ошибка OI {coin}: {e}")
+        return 0.0
 
 
 _ctx_cache = {"ts": 0.0, "data": {}}
@@ -1501,353 +1511,6 @@ async def get_context(force=False):
         pass
     _ctx_cache.update(ts=time.time(), data=ctx)
     return ctx
-
-
-# =====================================================================
-# ОЦЕНКА СЕТАПА, УРОВНИ, БЭКТЕСТ
-# =====================================================================
-TF_WEIGHTS = {"1d": 0.30, "4h": 0.30, "1h": 0.25, "15m": 0.15}
-
-
-def quick_check(tf_data):
-    if "4h" not in tf_data or "1d" not in tf_data:
-        return None
-    wp = (tf_data["4h"]["long_prob"] + tf_data["1d"]["long_prob"]) / 2
-    strength = max(wp, 100 - wp)
-    if strength < CONF_STAGE1 or tf_data["4h"]["adx"] < 10:
-        return None
-    return wp >= 50, strength
-
-
-def collect_reasons(tf_data, is_long, tfs=("1d", "4h", "1h"), limit=5):
-    side = 1 if is_long else -1
-    bucket = {}
-    for tf in tfs:
-        for rsn in tf_data.get(tf, {}).get("reasons", []):
-            if rsn["side"] == side:
-                b = bucket.setdefault(rsn["text"], {"w": 0, "tfs": []})
-                b["w"] += rsn["w"]
-                b["tfs"].append(tf)
-    items = sorted(bucket.items(), key=lambda kv: kv[1]["w"], reverse=True)[:limit]
-    return [f"{t} ({', '.join(b['tfs'])})" for t, b in items]
-
-
-def pattern_lines(tf_data):
-    return [f"{tf}: {', '.join(p[0] for p in tf_data[tf]['patterns'][:3])}"
-            for tf in ("1d", "4h", "1h") if tf in tf_data and tf_data[tf]["patterns"]]
-
-async def get_open_interest_change(coin):
-    """
-    Возвращает изменение Open Interest за последние 15 минут в процентах.
-    """
-    try:
-        url = "https://fapi.binance.com/futures/data/openInterestHist"
-        # Запрашиваем историю OI (период 15 минут, последние 2 свечи)
-        params = {"symbol": f"{coin}USDT", "period": "15m", "limit": 2}
-        async with http.get(url, params=params, timeout=5) as r:
-            if r.status != 200:
-                return 0.0
-            data = await r.json(content_type=None)
-            
-            if len(data) < 2:
-                return 0.0
-                
-            oi_old = float(data[0]["sumOpenInterest"])
-            oi_new = float(data[1]["sumOpenInterest"])
-            
-            # Считаем процент изменения
-            change_pct = ((oi_new - oi_old) / oi_old) * 100
-            return round(change_pct, 2)
-    except Exception as e:
-        log.info(f"Ошибка OI {coin}: {e}")
-        return 0.0
-
-async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
-    """Итоговая оценка: мульти-ТФ + фильтры (BTC, F&G, funding, on-chain, новости). valid=True только если прошли гейты."""
-    out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрок",
-           "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": []}
-    tfs = [t for t in TF_WEIGHTS if t in tf_data]
-    if "4h" not in tf_data or "1d" not in tf_data:
-        out["reject"] = "Недостаточно данных по таймфреймам"
-        return out
-    wp = sum(TF_WEIGHTS[t] * tf_data[t]["long_prob"] for t in tfs) / sum(TF_WEIGHTS[t] for t in tfs)
-    is_long = wp >= 50
-    side = 1 if is_long else -1
-    strength = max(wp, 100 - wp)
-    notes = []
-
-    def cs(p):
-        return p if is_long else 100 - p
-
-    p4, p1d = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
-    info = tf_data["4h"]
-    reject = ""
-    if (p4 >= 50) != is_long or (p1d >= 50) != is_long:
-        reject = "4h и 1d смотрят в разные стороны"
-        
-    # ИСПРАВЛЕНИЕ: Считаем agree ДО всех проверок
-    agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
-    
-    if not reject and info["adx"] < 15:
-        reject = f"Вялый рынок (ADX {info['adx']:.0f})"
-    if not reject and agree < min(3, len(tfs)):
-        reject = f"Таймфреймы не согласны ({agree}/{len(tfs)})"
-    if not reject and info["atr"] / info["price"] > 0.06:
-        reject = "Слишком высокая волатильность (ATR > 6%)"
-
-
-    if "1h" in tf_data and (tf_data["1h"]["long_prob"] >= 50) != is_long and tf_data["1h"]["confidence"] >= 65:
-        strength -= 8
-        notes.append("1h против направления (−8)")
-    if is_long and (info["rsi"] > 75 or info["price"] - info["ema20"] > 2.5 * info["atr"]):
-        strength -= 8
-        notes.append("цена перегрета, риск погони (−8)")
-    if (not is_long) and (info["rsi"] < 25 or info["ema20"] - info["price"] > 2.5 * info["atr"]):
-        strength -= 8
-        notes.append("цена перепродана, риск погони (−8)")
-
-    if coin != "BTC" and ctx.get("btc_dir", 0) != 0:
-        if ctx["btc_dir"] == side:
-            strength += 3
-            notes.append("BTC в ту же сторону (+3)")
-        else:
-            pen = 10 if ctx.get("btc_conf", 50) >= 65 else 5
-            strength -= pen
-            notes.append(f"BTC против направления (−{pen})")
-    fng = ctx.get("fng")
-    if fng is not None and ((fng >= 80 and is_long) or (fng <= 20 and not is_long)):
-        strength -= 4
-        notes.append(f"экстремальный {'страх' if fng <= 20 else 'жадность'} {fng} (−4)")
-    if funding is not None:
-        if is_long and funding > 0.0005:
-            strength -= 5
-            notes.append(f"перегрет лонг: funding {funding * 100:.3f}% (−5)")
-        elif (not is_long) and funding < -0.0005:
-            strength -= 5
-            notes.append(f"перегрет шорт: funding {funding * 100:.3f}% (−5)")
-
-    # === АНАЛИЗ OPEN INTEREST (OI) ===
-    oi_change = await get_open_interest_change(coin)
-    
-    # Если цена летит, а открытый интерес падает — это закрытие позиций, тренд ненадежный.
-    # Если цена летит и OI растет — это новые деньги, тренд сильный.
-    
-    if is_long:
-        if oi_change > 2.0:
-            strength += 5
-            notes.append(f"OI растет (+{oi_change}%) — новые деньги в лонгах (+5)")
-        elif oi_change < -2.0:
-            strength -= 5
-            notes.append(f"OI падает ({oi_change}%) — закрытие лонгов, тренд слабый (−5)")
-    else: # Для шорта
-        if oi_change > 2.0:
-            strength += 5
-            notes.append(f"OI растет (+{oi_change}%) — новые деньги в шортах (+5)")
-        elif oi_change < -2.0:
-            strength -= 5
-            notes.append(f"OI падает ({oi_change}%) — закрытие шортов, возможен памп (−5)")
-    if onchain_change < -2.0 and is_long:
-        strength -= 10
-        notes.append(f"отток TVL {onchain_change}% против лонга (−10)")
-    elif onchain_change > 2.0 and not is_long:
-        strength -= 10
-        notes.append(f"приток TVL {onchain_change}% против шорта (−10)")
-
-    # === ВРЕМЕННОЙ ФИЛЬТР ===
-    msk = timezone(timedelta(hours=3))
-    now_msk = datetime.now(msk)
-    is_weekend = now_msk.weekday() >= 5
-    is_night = now_msk.hour < 8 or now_msk.hour >= 22
-    
-    if is_weekend or is_night:
-        strength -= 7
-        reason = "Ночь" if is_night else "Выходные"
-        notes.append(f"{reason}: низкая ликвидность (−7)")
-    # ========================
-
-    
-    # === ДЕТЕКТОР ЛОЖНЫХ ПРОБОЕВ ===
-    fake_breakout = False
-    df_info = info.get("df")
-    if df_info is not None and len(df_info) > 0:
-        last_candle = df_info.iloc[-1]
-        # Если был пробой, но объем меньше 80% от среднего
-        if last_candle["brk_up"] or last_candle["brk_dn"]:
-            if last_candle["rel_vol"] < 0.8:
-                fake_breakout = True
-                strength -= 15
-                notes.append("Ложный пробой (тонкий объем) (−15)")
-    # ================================
-    # === ПРОВЕРКА СТЕН В СТАКАНЕ ===
-    # Проверяем только если сигнал в целом хороший, чтобы не спамить API
-    if not reject and strength >= conf_threshold - 5:
-        wall_warning = await check_order_book_walls(coin, info["price"], is_long)
-        if wall_warning:
-            strength -= 10
-            notes.append(f"🐋 Стакан: {wall_warning} (−10)")
-    # ================================
-    nb = market_bias.get("bias", 0)
-    news_status = "Нейтрально"
-    if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
-        word = "бычий" if nb == 1 else "медвежий"
-        if nb == side:
-            strength += 7
-            news_status = f"✅ Подтверждают ({word} фон)"
-        else:
-            strength -= 20
-            news_status = f"❌ Противоречат ({word} фон)"
-
-    strength = max(0.0, min(100.0, strength))
-    if not reject and strength < conf_threshold:
-        reject = f"Уверенность {strength:.0f}% ниже порога {conf_threshold:.0f}%"
-
-    p15, p1h = tf_data.get("15m", {}).get("long_prob", 50), tf_data.get("1h", {}).get("long_prob", 50)
-    fast = "15m" in tf_data and "1h" in tf_data and cs(p15) >= 58 and cs(p1h) >= 56
-    long_term = cs(p1d) >= 64 and cs(p4) >= 60
-    out.update(
-        valid=not reject, 
-        reject=reject, 
-        notes=notes, 
-        is_long=is_long, 
-        strength=round(strength, 1),
-        type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный", 
-        news_status=news_status,
-        wp=wp, 
-        tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
-        reasons=collect_reasons(tf_data, is_long), 
-        patterns=pattern_lines(tf_data),
-        fake_breakout=fake_breakout
-    )
-    return out
-
-
-def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=None, resistance=None):
-    """Вход строго лимиткой на откате. Возвращает entry, sl1, risk."""
-    if is_long:
-        entry = min(price, max(ema20, ema50))
-        if entry > price - 0.2 * atr:
-            entry = price - 0.35 * atr
-        if support and price - 1.5 * atr <= support <= price - 0.15 * atr:
-            entry = min(max(entry, support + 0.1 * atr), price - 0.15 * atr)
-        sl1 = max(min(rec_low - 0.5 * atr, entry - 0.8 * atr), entry - 2.5 * atr)
-        return entry, sl1, entry - sl1
-    entry = max(price, min(ema20, ema50))
-    if entry < price + 0.2 * atr:
-        entry = price + 0.35 * atr
-    if resistance and price + 0.15 * atr <= resistance <= price + 1.5 * atr:
-        entry = max(min(entry, resistance - 0.1 * atr), price + 0.15 * atr)
-    sl1 = min(max(rec_high + 0.5 * atr, entry + 0.8 * atr), entry + 2.5 * atr)
-    return entry, sl1, sl1 - entry
-
-
-def calc_levels_and_risk(info, is_long, sig_type="Среднесрочный"):
-    price = info["price"]
-    atr = info["atr"] if info["atr"] > 0 else price * 0.012
-    sr = info.get("sr", {})
-    entry, sl1, risk = levels_core(price, atr, info["ema20"], info["ema50"], info["recent_low"], info["recent_high"],
-                                   is_long, sr.get("support"), sr.get("resistance"))
-    sign = 1 if is_long else -1
-    tps = [entry + sign * risk * m for m in (1.5, 2.5, 4.0)]
-    sl2 = sl1 - sign * 0.7 * atr
-    
-    # === УМНОЕ ПЛЕЧО (в зависимости от волатильности) ===
-    atr_pct = (atr / price) * 100
-    if atr_pct > 3.0:
-        leverage = "x3-x5 (Высокая волатильность ⚠)"
-    elif atr_pct > 1.5:
-        leverage = "x5-x10 (Средняя волатильность)"
-    else:
-        leverage = "x10-x20 (Низкая волатильность)"
-        
-    # === КАЛЬКУЛЯТОР ЛИКВИДАЦИИ (для плеча x20) ===
-    # Примерный расчет: 1 / 20 = 5% (с учетом комиссий берем 4.75%)
-    liq_x20 = entry * (1 - 0.0475) if is_long else entry * (1 + 0.0475)
-    
-    opp = sr.get("resistance") if is_long else sr.get("support")
-    near = "ближайший уровень слишком близко к входу, цель может не отработать" if opp and abs(opp - entry) < 1.2 * risk else None
-    
-    return entry, tps, [sl1, sl2], risk, leverage, near, liq_x20
-
-
-def backtest_df(df, conf_min=CONF_FINAL, rr1=1.5, fill_bars=6, max_hold=30, fee=0.001):
-    """Симуляция той же стратегии на истории: лимитный вход с проверкой исполнения, TP1/SL, комиссии."""
-    n = len(df)
-    if n < 150:
-        return None
-    lp, adx, atr = df["long_p"].values, df["adx"].values, df["atr"].values
-    c, h, l = df["close"].values, df["high"].values, df["low"].values
-    e20, e50 = df["ema20"].values, df["ema50"].values
-    low28, high28 = df["low"].rolling(28).min().values, df["high"].rolling(28).max().values
-    results, i = [], 80
-    while i < n - 2:
-        p = lp[i]
-        if max(p, 100 - p) < conf_min or adx[i] < 15 or atr[i] <= 0 or np.isnan(low28[i]):
-            i += 1
-            continue
-        is_long = p >= 50
-        entry, sl, risk = levels_core(c[i], atr[i], e20[i], e50[i], low28[i], high28[i], is_long)
-        if risk <= 0:
-            i += 1
-            continue
-        tp = entry + rr1 * risk if is_long else entry - rr1 * risk
-        filled = next((j for j in range(i + 1, min(n, i + 1 + fill_bars))
-                       if (is_long and l[j] <= entry) or ((not is_long) and h[j] >= entry)), None)
-        if filled is None:
-            i += 1
-            continue
-        res, last_k = None, filled
-        for k in range(filled, min(n, filled + max_hold)):
-            last_k = k
-            if (l[k] <= sl) if is_long else (h[k] >= sl):
-                res = -1.0
-                break
-            if (h[k] >= tp) if is_long else (l[k] <= tp):
-                res = rr1
-                break
-        if res is None:
-            res = max(-1.0, min(rr1, (((c[last_k] - entry) if is_long else (entry - c[last_k])) / risk)))
-        results.append(res - fee * entry / risk)
-        i = last_k + 1
-    days = round(n * 4 / 24)
-    if not results:
-        return {"trades": 0, "winrate": 0.0, "avg_r": 0.0, "pf": 0.0, "days": days}
-    arr = np.array(results)
-    wins, losses = arr[arr > 0], arr[arr <= 0]
-    pf = float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else 9.9
-    return {"trades": len(arr), "winrate": round(float((arr > 0).mean() * 100), 1), "avg_r": round(float(arr.mean()), 2),
-            "pf": round(min(pf, 9.9), 2), "days": days}
-
-
-def run_backtest_rows(rows):
-    return backtest_df(prepare_df(rows_to_df(rows[:-1])))
-
-
-async def get_backtest(coin):
-    # Если кэш разросся до 200 монет — очищаем его, чтобы не жрал память
-    if len(bt_cache) > 200:
-        bt_cache.clear()
-        
-    c = bt_cache.get(coin)
-    if c and time.time() - c[0] < 6 * 3600:
-        return c[1]
-    c = bt_cache.get(coin)
-    if c and time.time() - c[0] < 6 * 3600:
-        return c[1]
-    bt = None
-    try:
-        rows = await fetch_history(coin, "4h", 1000)
-        if rows:
-            bt = await asyncio.to_thread(run_backtest_rows, rows)
-    except Exception as e:
-        log.info(f"Бэктест {coin}: {e}")
-    bt_cache[coin] = (time.time(), bt)
-    return bt
-
-
-def bt_ok(bt):
-    return (bool(bt) and bt["trades"] >= BT_MIN_TRADES and bt["avg_r"] >= BT_MIN_AVG_R
-            and bt["winrate"] >= BT_MIN_WINRATE and bt["pf"] >= float(os.getenv("BT_MIN_PF", "1.15")))
-
 
 
 # =====================================================================
@@ -1949,7 +1612,6 @@ async def discover_models(force=False):
             MODEL_CACHE[name] = r
         elif isinstance(r, Exception):
             log.info(f"Подбор моделей {name}: {r}")
-    log.info(f"Модели ИИ: { {k: v for k, v in MODEL_CACHE.items() if k != 'ts'} }")
 
 
 async def models_for(prov):
@@ -1963,7 +1625,7 @@ async def models_for(prov):
 
 def _mark_bad(prov, model):
     BAD_MODELS[(prov, model)] = time.time() + 6 * 3600
-    MODEL_CACHE["ts"] = min(MODEL_CACHE["ts"], time.time() - 6 * 3600 + 600)  # пересмотреть список через 10 минут
+    MODEL_CACHE["ts"] = min(MODEL_CACHE["ts"], time.time() - 6 * 3600 + 600)
 
 
 async def _ask_gemini(prompt):
@@ -2019,7 +1681,6 @@ def _looks_like_junk(text):
 
 
 async def _ask_free_gpt(prompt):
-    """GPT без ключа (Pollinations): несколько эндпоинтов подряд, первый нормальный ответ побеждает."""
     system = "Ты опытный крипто-аналитик. Отвечай на русском языке, кратко и по делу."
     auth = {"Authorization": f"Bearer {POLLINATIONS_KEY}"} if POLLINATIONS_KEY else {}
 
@@ -2082,36 +1743,6 @@ async def ask_ai_named(prompt, timeout=20, validate=None, free_timeout=30):
     return res if res else (None, None)
 
 
-async def run_ai_diag():
-    prompt = "Напиши одно предложение о биткоине."
-    lines = ["🔧 <b>Проверка ИИ</b>", ""]
-
-    async def timed(name, fn):
-        t0 = time.time()
-        try:
-            r = await asyncio.wait_for(fn(), 28)
-        except Exception:
-            r = None
-        model = LAST_MODEL.get(name.split()[0].lower(), "")
-        return f"{'✅' if r else '❌'} {name} {model} · {int((time.time() - t0) * 1000)} мс"
-
-    tests = []
-    if GEMINI_API_KEYS:
-        tests.append(timed("Gemini", lambda: _ask_gemini(prompt)))
-    else:
-        lines.append("➖ Gemini: нет ключа")
-    if GROQ_API_KEY:
-        tests.append(timed("Groq", lambda: _ask_openai_compat("groq", "https://api.groq.com/openai/v1", GROQ_API_KEY, prompt)))
-    else:
-        lines.append("➖ Groq: нет ключа")
-    if OPENROUTER_API_KEY:
-        tests.append(timed("OpenRouter", lambda: _ask_openai_compat("openrouter", "https://openrouter.ai/api/v1", OPENROUTER_API_KEY, prompt)))
-    else:
-        lines.append("➖ OpenRouter: нет ключа")
-    tests.append(timed("Бесплатный GPT", lambda: _ask_free_gpt(prompt)))
-    return "\n".join(lines + list(await asyncio.gather(*tests)))
-
-
 _ai_cache = {}
 
 
@@ -2127,7 +1758,7 @@ def _parse_analyst(text):
 
 
 async def ai_analyst(coin, setup, bt, ctx, entry, tps, sls, tf_data):
-    """Последний вето-слой: нейросеть оценивает идею (ENTER/WAIT) и пишет комментарий."""
+    """Вето-слой: ИИ оценивает идею (ENTER/WAIT) и пишет комментарий."""
     key = (coin, setup["is_long"])
     c = _ai_cache.get(key)
     if c and time.time() - c[0] < 1200:
@@ -2262,8 +1893,8 @@ def _valid_news_ai(text):
 
 
 IMPACT_TEMPLATES = {
-    1: "Фон позитивный: интерес к рисковым активам может поддержать спрос и рост цен на BTC, ETH и альткоины. Следите за точками входа в лонг.",
-    -1: "Фон негативный: возможны распродажи и рост волатильности. Соблюдайте риск-менеджмент и избегайте погони за ценой.",
+    1: "Фон позитивный: интерес к рисковым активам может поддержать спрос и рост цен на BTC, ETH и альткоины.",
+    -1: "Фон негативный: возможны распродажи и рост волатильности. Соблюдайте риск-менеджмент.",
     0: "Фон нейтральный: рынок ждёт новых триггеров, сигналам нужно дополнительное подтверждение.",
 }
 
@@ -2299,7 +1930,6 @@ COINS: тикеры через запятую"""
                                "summary": shorten(p["SUMMARY"], 380), "impact": shorten(p["IMPACT"], 500),
                                "coins": p.get("COINS", "BTC, ETH"), "published": published, "link": link, "engine": engine, "ts": now}
             else:
-                log.warning("Разбор новости: ИИ недоступен, перевод через переводчик")
                 bias = news_sentiment(f"{title}. {summary}")
                 title_ru = await translate_text(title)
                 market_bias = {"bias": bias, "title_ru": title_ru[:170],
@@ -2312,7 +1942,6 @@ COINS: тикеры через запятую"""
 
 
 def format_news_post(nb, limit=1000):
-    """Пост одним сообщением: подгоняем длину под лимит подписи к фото."""
     emoji = {1: "🟢", 0: "⚪", -1: "🔴"}.get(nb.get("bias", 0), "⚪")
     label = {1: "Позитивно", 0: "Нейтрально", -1: "Негативно"}.get(nb.get("bias", 0), "Нейтрально")
     link = f"\n\n🔗 <a href=\"{html.escape(nb['link'], quote=True)}\">Источник</a>" if nb.get("link") else ""
@@ -2336,16 +1965,14 @@ async def prepare_news(force=False):
 
 
 async def get_news_batch_text():
-    """Дайджест из 3 свежих новостей на русском (один запрос к ИИ)."""
     entries = await get_news_entries()
     if not entries:
-        return "📭 <b>Свежих новостей пока нет.</b> Загляните позже."
+        return "📭 <b>Свежих новостей пока нет.</b>"
     batch = entries[:3]
     prompt = ("Ты опытный крипто-аналитик. Разбери эти новости. Для каждой строго по шаблону на русском, без markdown:\n"
               "Новость N:\n📰 Суть: 1-2 предложения\n📊 Влияние: Бычье/Медвежье/Нейтральное и почему\n🪙 Монеты: тикеры через запятую\n\nНовости:\n")
     for i, e in enumerate(batch):
-        pub_time = get_moscow_time_from_entry(e)
-        prompt += f"{i + 1}. [{pub_time}] {html.unescape(getattr(e, 'title', '') or '')}. {clean_summary(getattr(e, 'summary', ''))[:200]}\n"
+        prompt += f"{i + 1}. [{get_moscow_time_from_entry(e)}] {html.unescape(getattr(e, 'title', '') or '')}. {clean_summary(getattr(e, 'summary', ''))[:200]}\n"
     links = " · ".join(f"<a href=\"{html.escape(getattr(e, 'link', ''), quote=True)}\">{i + 1}</a>" for i, e in enumerate(batch))
     text, _engine = await ask_ai_named(prompt, timeout=30, free_timeout=30)
     if text and has_cyr(text, 30):
@@ -2356,127 +1983,276 @@ async def get_news_batch_text():
     return out + f"🔗 Источники: {links}"
 
 
-async def news_watcher_loop():
-    global last_news_link
-    await asyncio.sleep(40)
-    while True:
-        try:
-            entries = await get_news_entries()
-            if entries:
-                link = entries[0].link
-                if last_news_link is None:
-                    last_news_link = link
-                elif link != last_news_link:
-                    last_news_link = link
-                    state_touch(False)
-                    
-                    # 1. Обновляем новостной фон
-                    await update_market_bias(force=True)
-                    
-                    # 2. НОВАЯ ФУНКЦИЯ: Проверяем активные сигналы и позиции на конфликт с новостями
-                    await check_news_conflicts_with_signals()
-                    
-                    # 3. Рассылаем саму новость
-                    if bot_flags["news_enabled"] and active_chats:
-                        text, img_url = await prepare_news()
-                        if text:
-                            img = await download_bytes(img_url) if img_url else None
-                            kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]], back=False)
-                            sent, *_ = await broadcast({"text": text, "photo": img, "kb": kb, "nav": []}, notif_type="news")
-                            stats["news_sent"] += sent
-        except Exception as e:
-            log.warning(f"news_watcher: {e}")
-        next_timers["news_watcher"] = time.time() + 600
-        await asyncio.sleep(600)
-
-# --- ДОБАВИТЬ ЭТУ НОВУЮ ФУНКЦИЮ ПЕРЕД news_watcher_loop ---
-_news_alerted = set()  # (link, uid, coin): чтобы не повторять уведомления
+# =====================================================================
+# ОЦЕНКА СЕТАПА, УРОВНИ, БЭКТЕСТ
+# =====================================================================
+TF_WEIGHTS = {"1d": 0.30, "4h": 0.30, "1h": 0.25, "15m": 0.15}
 
 
-def _parse_news_verdicts(text):
-    try:
-        arr = json.loads(re.search(r"\[.*\]", text or "", re.S).group(0))
-        out = {}
-        for d in arr:
-            coin = str(d.get("coin", "")).upper().strip()
-            action = str(d.get("action", "")).upper().strip()
-            impact = str(d.get("impact", "")).upper().strip()
-            reason = str(d.get("reason", "")).strip()
-            if coin and action in ("CLOSE", "HOLD") and impact in ("NONE", "WEAK", "STRONG") and has_cyr(reason, 5):
-                out[coin] = {"action": action, "impact": impact, "reason": shorten(reason, 220)}
-        return out or None
-    except Exception:
+def quick_check(tf_data):
+    if "4h" not in tf_data or "1d" not in tf_data:
         return None
+    wp = (tf_data["4h"]["long_prob"] + tf_data["1d"]["long_prob"]) / 2
+    strength = max(wp, 100 - wp)
+    if strength < CONF_STAGE1 or tf_data["4h"]["adx"] < 10:
+        return None
+    return wp >= 50, strength
 
 
-async def check_news_conflicts_with_signals():
-    """Новость против позиции: ИИ решает по каждой монете, влияет ли она реально. Пишем только если надо закрывать."""
-    nb, link = market_bias.get("bias", 0), market_bias.get("link")
-    if nb == 0 or not link:
-        return
-    if len(_news_alerted) > 2000:
-        _news_alerted.clear()
+def collect_reasons(tf_data, is_long, tfs=("1d", "4h", "1h"), limit=5):
+    side = 1 if is_long else -1
+    bucket = {}
+    for tf in tfs:
+        for rsn in tf_data.get(tf, {}).get("reasons", []):
+            if rsn["side"] == side:
+                b = bucket.setdefault(rsn["text"], {"w": 0, "tfs": []})
+                b["w"] += rsn["w"]
+                b["tfs"].append(tf)
+    items = sorted(bucket.items(), key=lambda kv: kv[1]["w"], reverse=True)[:limit]
+    return [f"{t} ({', '.join(b['tfs'])})" for t, b in items]
 
-    targets = []  # (uid_str, coin, pos)
-    for uid_str, u in list(_users().items()):
-        if not get_user_notif_settings(uid_str)["signals"]:
+
+def pattern_lines(tf_data):
+    return [f"{tf}: {', '.join(p[0] for p in tf_data[tf]['patterns'][:3])}"
+            for tf in ("1d", "4h", "1h") if tf in tf_data and tf_data[tf]["patterns"]]
+
+
+async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
+    """Мульти-ТФ оценка + фильтры. valid=True только если прошли все гейты."""
+    out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрочный",
+           "news_status": "Нейтрально", "wp": 50.0, "tf_probs": {}, "reasons": [], "patterns": [], "fake_breakout": False}
+    tfs = [t for t in TF_WEIGHTS if t in tf_data]
+    if "4h" not in tf_data or "1d" not in tf_data:
+        out["reject"] = "Недостаточно данных по таймфреймам"
+        return out
+    wp = sum(TF_WEIGHTS[t] * tf_data[t]["long_prob"] for t in tfs) / sum(TF_WEIGHTS[t] for t in tfs)
+    is_long = wp >= 50
+    side = 1 if is_long else -1
+    strength = max(wp, 100 - wp)
+    notes = []
+
+    def cs(p):
+        return p if is_long else 100 - p
+
+    p4, p1d = tf_data["4h"]["long_prob"], tf_data["1d"]["long_prob"]
+    info = tf_data["4h"]
+    reject = ""
+    if (p4 >= 50) != is_long or (p1d >= 50) != is_long:
+        reject = "4h и 1d смотрят в разные стороны"
+    agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
+    if not reject and info["adx"] < 15:
+        reject = f"Вялый рынок (ADX {info['adx']:.0f})"
+    if not reject and agree < min(3, len(tfs)):
+        reject = f"Таймфреймы не согласны ({agree}/{len(tfs)})"
+    if not reject and info["atr"] / info["price"] > 0.06:
+        reject = "Слишком высокая волатильность (ATR > 6%)"
+
+    if "1h" in tf_data and (tf_data["1h"]["long_prob"] >= 50) != is_long and tf_data["1h"]["confidence"] >= 65:
+        strength -= 8
+        notes.append("1h против направления (−8)")
+    if is_long and (info["rsi"] > 75 or info["price"] - info["ema20"] > 2.5 * info["atr"]):
+        strength -= 8
+        notes.append("цена перегрета, риск погони (−8)")
+    if (not is_long) and (info["rsi"] < 25 or info["ema20"] - info["price"] > 2.5 * info["atr"]):
+        strength -= 8
+        notes.append("цена перепродана, риск погони (−8)")
+    if coin != "BTC" and ctx.get("btc_dir", 0) != 0:
+        if ctx["btc_dir"] == side:
+            strength += 3
+            notes.append("BTC в ту же сторону (+3)")
+        else:
+            pen = 10 if ctx.get("btc_conf", 50) >= 65 else 5
+            strength -= pen
+            notes.append(f"BTC против направления (−{pen})")
+    fng = ctx.get("fng")
+    if fng is not None and ((fng >= 80 and is_long) or (fng <= 20 and not is_long)):
+        strength -= 4
+        notes.append(f"экстремальный {'страх' if fng <= 20 else 'жадность'} {fng} (−4)")
+    if funding is not None:
+        if is_long and funding > 0.0005:
+            strength -= 5
+            notes.append(f"перегрет лонг: funding {funding * 100:.3f}% (−5)")
+        elif (not is_long) and funding < -0.0005:
+            strength -= 5
+            notes.append(f"перегрет шорт: funding {funding * 100:.3f}% (−5)")
+
+    oi_change = await get_open_interest_change(coin)
+    if oi_change > 2.0:
+        strength += 5
+        notes.append(f"OI растет (+{oi_change}%) — новые деньги (+5)")
+    elif oi_change < -2.0:
+        strength -= 5
+        notes.append(f"OI падает ({oi_change}%) — закрытие позиций (−5)")
+    if onchain_change < -2.0 and is_long:
+        strength -= 10
+        notes.append(f"отток TVL {onchain_change}% против лонга (−10)")
+    elif onchain_change > 2.0 and not is_long:
+        strength -= 10
+        notes.append(f"приток TVL {onchain_change}% против шорта (−10)")
+
+    now_msk = datetime.now(timezone(timedelta(hours=3)))
+    is_night = now_msk.hour < 8 or now_msk.hour >= 22
+    if is_night or now_msk.weekday() >= 5:
+        strength -= 7
+        notes.append(f"{'Ночь' if is_night else 'Выходные'}: низкая ликвидность (−7)")
+
+    df_info = info.get("df")
+    if df_info is not None and len(df_info) > 0:
+        last_candle = df_info.iloc[-1]
+        if (last_candle["brk_up"] or last_candle["brk_dn"]) and last_candle["rel_vol"] < 0.8:
+            out["fake_breakout"] = True
+            strength -= 15
+            notes.append("Ложный пробой (тонкий объем) (−15)")
+
+    if not reject and strength >= conf_threshold - 5:
+        wall_warning = await check_order_book_walls(coin, info["price"], is_long)
+        if wall_warning:
+            strength -= 10
+            notes.append(f"🐋 Стакан: {wall_warning} (−10)")
+
+    nb = market_bias.get("bias", 0)
+    news_status = "Нейтрально"
+    if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
+        word = "бычий" if nb == 1 else "медвежий"
+        if nb == side:
+            strength += 7
+            news_status = f"✅ Подтверждают ({word} фон)"
+        else:
+            strength -= 20
+            news_status = f"❌ Противоречат ({word} фон)"
+
+    strength = max(0.0, min(100.0, strength))
+    if not reject and strength < conf_threshold:
+        reject = f"Уверенность {strength:.0f}% ниже порога {conf_threshold:.0f}%"
+
+    p15, p1h = tf_data.get("15m", {}).get("long_prob", 50), tf_data.get("1h", {}).get("long_prob", 50)
+    fast = "15m" in tf_data and "1h" in tf_data and cs(p15) >= 58 and cs(p1h) >= 56
+    long_term = cs(p1d) >= 64 and cs(p4) >= 60
+    out.update(valid=not reject, reject=reject, notes=notes, is_long=is_long, strength=round(strength, 1),
+               type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный",
+               news_status=news_status, wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
+               reasons=collect_reasons(tf_data, is_long), patterns=pattern_lines(tf_data))
+    return out
+
+
+def levels_core(price, atr, ema20, ema50, rec_low, rec_high, is_long, support=None, resistance=None):
+    """Вход строго лимиткой на откате. Возвращает entry, sl1, risk."""
+    if is_long:
+        entry = min(price, max(ema20, ema50))
+        if entry > price - 0.2 * atr:
+            entry = price - 0.35 * atr
+        if support and price - 1.5 * atr <= support <= price - 0.15 * atr:
+            entry = min(max(entry, support + 0.1 * atr), price - 0.15 * atr)
+        sl1 = max(min(rec_low - 0.5 * atr, entry - 0.8 * atr), entry - 2.5 * atr)
+        return entry, sl1, entry - sl1
+    entry = max(price, min(ema20, ema50))
+    if entry < price + 0.2 * atr:
+        entry = price + 0.35 * atr
+    if resistance and price + 0.15 * atr <= resistance <= price + 1.5 * atr:
+        entry = max(min(entry, resistance - 0.1 * atr), price + 0.15 * atr)
+    sl1 = min(max(rec_high + 0.5 * atr, entry + 0.8 * atr), entry + 2.5 * atr)
+    return entry, sl1, sl1 - entry
+
+
+def calc_levels_and_risk(info, is_long):
+    price = info["price"]
+    atr = info["atr"] if info["atr"] > 0 else price * 0.012
+    sr = info.get("sr", {})
+    entry, sl1, risk = levels_core(price, atr, info["ema20"], info["ema50"], info["recent_low"], info["recent_high"],
+                                   is_long, sr.get("support"), sr.get("resistance"))
+    sign = 1 if is_long else -1
+    tps = [entry + sign * risk * m for m in (1.5, 2.5, 4.0)]
+    sl2 = sl1 - sign * 0.7 * atr
+    atr_pct = (atr / price) * 100
+    if atr_pct > 3.0:
+        leverage = "x3-x5 (Высокая волатильность ⚠)"
+    elif atr_pct > 1.5:
+        leverage = "x5-x10 (Средняя волатильность)"
+    else:
+        leverage = "x10-x20 (Низкая волатильность)"
+    liq_x20 = entry * (1 - 0.0475) if is_long else entry * (1 + 0.0475)
+    opp = sr.get("resistance") if is_long else sr.get("support")
+    near = "ближайший уровень слишком близко к входу, цель может не отработать" if opp and abs(opp - entry) < 1.2 * risk else None
+    return entry, tps, [sl1, sl2], risk, leverage, near, liq_x20
+
+
+def backtest_df(df, conf_min=CONF_FINAL, rr1=1.5, fill_bars=6, max_hold=30, fee=0.001):
+    """Симуляция стратегии на истории: лимитный вход с проверкой исполнения, TP1/SL, комиссии."""
+    n = len(df)
+    if n < 150:
+        return None
+    lp, adx, atr = df["long_p"].values, df["adx"].values, df["atr"].values
+    c, h, l = df["close"].values, df["high"].values, df["low"].values
+    e20, e50 = df["ema20"].values, df["ema50"].values
+    low28, high28 = df["low"].rolling(28).min().values, df["high"].rolling(28).max().values
+    results, i = [], 80
+    while i < n - 2:
+        p = lp[i]
+        if max(p, 100 - p) < conf_min or adx[i] < 15 or atr[i] <= 0 or np.isnan(low28[i]):
+            i += 1
             continue
-        for coin, pos in (u.get("open_positions") or {}).items():
-            if pos.get("waiting_entry") or pos.get("notified_close"):
-                continue
-            against = (nb == 1 and pos["side"] == "SHORT") or (nb == -1 and pos["side"] == "LONG")
-            if against and (link, uid_str, coin) not in _news_alerted:
-                targets.append((uid_str, coin, pos))
-    if not targets:
-        return
-
-    coins = sorted({c for _, c, _ in targets})
-    sides = {c: sorted({p["side"] for _, cc, p in targets if cc == c}) for c in coins}
-    pos_txt = "; ".join(f"{c} ({'/'.join(sides[c])})" for c in coins)
-    news_txt = (f"Заголовок: {market_bias.get('title_ru')}\nСуть: {market_bias.get('summary')}\n"
-                f"Влияние: {market_bias.get('impact')}\nУпомянутые монеты: {market_bias.get('coins')}")
-    prompt = f"""Ты риск-менеджер крипто-трейдера. Вышла новость, общий фон: {'бычий' if nb == 1 else 'медвежий'}.
-{news_txt}
-
-Открытые позиции против фона: {pos_txt}.
-Для КАЖДОЙ монеты реши, надо ли закрывать позицию.
-Правила:
-- CLOSE только если новость напрямую касается этой монеты или её экосистемы, либо это рыночный шок (регуляторы, взлом крупной биржи или протокола, ETF, ФРС и макро), способный сильно двинуть цену.
-- Локальные, региональные и мелкие новости, партнёрства без влияния на цену, новости про другие проекты: impact NONE или WEAK, action HOLD.
-- Не закрывай только потому, что фон новости противоположен позиции.
-Верни СТРОГО JSON-массив без markdown:
-[{{"coin":"ETH","impact":"NONE или WEAK или STRONG","action":"CLOSE или HOLD","reason":"1 предложение по-русски"}}]"""
-
-    text, _eng = await ask_ai_named(prompt, validate=lambda t: _parse_news_verdicts(t) is not None, timeout=22, free_timeout=25)
-    verdicts = _parse_news_verdicts(text) if text else None
-
-    if verdicts is None:
-        # ИИ недоступен: действуем осторожно, только если монета названа в новости напрямую
-        blob = f"{market_bias.get('title_ru', '')} {market_bias.get('summary', '')} {market_bias.get('coins', '')}".upper()
-        verdicts = {c: {"action": "CLOSE", "impact": "STRONG", "reason": "Монета напрямую упомянута в новости."}
-                    for c in coins if re.search(rf"\b{re.escape(c)}\b", blob)}
-
-    for uid_str, coin, pos in targets:
-        _news_alerted.add((link, uid_str, coin))
-        v = verdicts.get(coin)
-        if not v or v["action"] != "CLOSE" or v["impact"] != "STRONG":
+        is_long = p >= 50
+        entry, sl, risk = levels_core(c[i], atr[i], e20[i], e50[i], low28[i], high28[i], is_long)
+        if risk <= 0:
+            i += 1
             continue
-        text = (f"🚨 <b>Закройте позицию: {html.escape(coin)} ({pos['side']})</b>\n\n"
-                f"📰 {html.escape(shorten(market_bias.get('title_ru', ''), 120))}\n"
-                f"Фон: <b>{'Бычий 🟢' if nb == 1 else 'Медвежий 🔴'}</b>\n\n"
-                f"💡 {html.escape(v['reason'])}")
-        kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-                     [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
-        try:
-            await _send_new(int(uid_str), text, kb, None)
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            log.info(f"Ошибка отправки уведомления о новости: {e}")
+        tp = entry + rr1 * risk if is_long else entry - rr1 * risk
+        filled = next((j for j in range(i + 1, min(n, i + 1 + fill_bars))
+                       if (is_long and l[j] <= entry) or ((not is_long) and h[j] >= entry)), None)
+        if filled is None:
+            i += 1
+            continue
+        res, last_k = None, filled
+        for k in range(filled, min(n, filled + max_hold)):
+            last_k = k
+            if (l[k] <= sl) if is_long else (h[k] >= sl):
+                res = -1.0
+                break
+            if (h[k] >= tp) if is_long else (l[k] <= tp):
+                res = rr1
+                break
+        if res is None:
+            res = max(-1.0, min(rr1, (((c[last_k] - entry) if is_long else (entry - c[last_k])) / risk)))
+        results.append(res - fee * entry / risk)
+        i = last_k + 1
+    days = round(n * 4 / 24)
+    if not results:
+        return {"trades": 0, "winrate": 0.0, "avg_r": 0.0, "pf": 0.0, "days": days}
+    arr = np.array(results)
+    wins, losses = arr[arr > 0], arr[arr <= 0]
+    pf = float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else 9.9
+    return {"trades": len(arr), "winrate": round(float((arr > 0).mean() * 100), 1), "avg_r": round(float(arr.mean()), 2),
+            "pf": round(min(pf, 9.9), 2), "days": days}
 
+
+def run_backtest_rows(rows):
+    return backtest_df(prepare_df(rows_to_df(rows[:-1])))
+
+
+async def get_backtest(coin):
+    if len(bt_cache) > 200:
+        bt_cache.clear()
+    c = bt_cache.get(coin)
+    if c and time.time() - c[0] < 6 * 3600:
+        return c[1]
+    bt = None
+    try:
+        rows = await fetch_history(coin, "4h", 1000)
+        if rows:
+            bt = await asyncio.to_thread(run_backtest_rows, rows)
+    except Exception as e:
+        log.info(f"Бэктест {coin}: {e}")
+    bt_cache[coin] = (time.time(), bt)
+    return bt
+
+
+def bt_ok(bt):
+    return (bool(bt) and bt["trades"] >= BT_MIN_TRADES and bt["avg_r"] >= BT_MIN_AVG_R
+            and bt["winrate"] >= BT_MIN_WINRATE and bt["pf"] >= float(os.getenv("BT_MIN_PF", "1.15")))
 
 
 # =====================================================================
-# ГРАФИК
+# ГРАФИК (PNG)
 # =====================================================================
 def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
     info = tf_data[main_tf]
@@ -2520,26 +2296,14 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
         vh = (vol_bottom - vol_top) * (df["volume"].iloc[i] / vmax)
         color = (0, 120, 60) if df["close"].iloc[i] >= df["open"].iloc[i] else (140, 40, 40)
         draw.rectangle([x - cwid / 2, vol_bottom - vh, x + cwid / 2, vol_bottom], fill=color)
-        # === АВТО-УРОВНИ ФИБОНАЧЧИ ===
-    recent_df = df.tail(50) # Берем последние 50 свечей для поиска импульса
-    swing_high = recent_df["high"].max()
-    swing_low = recent_df["low"].min()
+    recent_df = df.tail(50)
+    swing_high, swing_low = recent_df["high"].max(), recent_df["low"].min()
     diff = swing_high - swing_low
-
     if diff > 0:
-        fib_levels = {
-            "0.236": swing_high - diff * 0.236,
-            "0.382": swing_high - diff * 0.382,
-            "0.500": swing_high - diff * 0.500,
-            "0.618": swing_high - diff * 0.618,
-            "0.786": swing_high - diff * 0.786,
-        }
-        for lbl, lvl in fib_levels.items():
-            yy = y(lvl)
-            # Рисуем тонкую темную линию
+        for lbl, k in (("0.236", 0.236), ("0.382", 0.382), ("0.500", 0.5), ("0.618", 0.618), ("0.786", 0.786)):
+            yy = y(swing_high - diff * k)
             draw.line([(pad_l, yy), (w - pad_r, yy)], fill=(80, 80, 110), width=1)
             draw.text((pad_l + 4, yy - 14), f"Fib {lbl}", fill=(120, 120, 160), font=font)
-    # ==============================
     for lvl_p, lbl in ((info["sr"].get("support"), "SUP"), (info["sr"].get("resistance"), "RES")):
         if lvl_p:
             for xx in range(pad_l, w - pad_r, 10):
@@ -2569,7 +2333,7 @@ def draw_chart(coin, tf_data, main_tf, is_long, entry, tps, sls):
 
 
 # =====================================================================
-# АНАЛИЗ МОНЕТЫ: данные → вердикт → тексты (подпись ≤1024 + детали)
+# АНАЛИЗ МОНЕТЫ
 # =====================================================================
 def local_verdict(setup, bt):
     if not setup["valid"]:
@@ -2585,12 +2349,11 @@ def age_text(ts):
 
 
 def render_caption(res, uid=None):
-    """Главный экран анализа: влезает в подпись к фото (≤1024), риск считается по настройкам пользователя."""
+    """Короткая карточка сигнала для Telegram-уведомления (≤1024 символов)."""
     coin = html.escape(res["coin"])
     if res.get("price_only"):
         return fit_caption([(0, f"💰 <b>{coin}</b>: <code>{fmt(res['price'])}</code>"),
-                            (1, f"ℹ Свечи недоступны, поэтому анализ невозможен. Цена: {html.escape(res.get('source', ''))}."),
-                            (2, "Попробуйте позже или проверьте тикер.")])
+                            (1, "ℹ Свечи недоступны, анализ невозможен.")])
     entry = res["entry"]
 
     def pct(p):
@@ -2602,39 +2365,15 @@ def render_caption(res, uid=None):
     verdict = "✅ <b>ВХОДИТЬ</b>" if res["verdict"] == "ENTER" else "⏳ <b>ЖДАТЬ</b>"
     emoji = "🟢" if res["is_long"] else "🔴"
     parts = []
-    
     if res.get("stale"):
-        parts.append((0, f"🕓 <i>Из архива: {age_text(res['ts'])} (свежие данные недоступны)</i>"))
-        
-    # === ПРОВЕРКА КОРРЕЛЯЦИИ ===
-    corr_warning = None
-    if uid:
-        open_pos = get_user_open_positions(uid)
-        for op_coin, op_data in open_pos.items():
-            if op_coin == res["coin"]:
-                continue
-            if op_data["side"] == res["side"]:
-                for group in CORRELATION_GROUPS:
-                    if op_coin in group and res["coin"] in group:
-                        corr_warning = f"⚠️ <b>Риск:</b> У вас уже есть {op_data['side']} по {op_coin}. {res['coin']} сильно коррелирует. Не удваивайте риск!"
-                        break
-            if corr_warning:
-                break
-
-    if corr_warning:
-        parts.append((0, corr_warning))
-
+        parts.append((0, f"🕓 <i>Из архива: {age_text(res['ts'])}</i>"))
     parts += [
         (0, f"{emoji} <b>{res['side']} · {coin}</b>   {verdict}"),
         (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
         (1, make_strength_bar(res["strength"])),
     ]
-    
-    # === ВЫВОД ПРЕДУПРЕЖДЕНИЯ О ЛОЖНОМ ПРОБОЕ ===
     if res.get("fake_breakout"):
-        parts.append((1, "⚠️ <b>Осторожно, ложный пробой (тонкий объем)</b>"))
-    # =============================================
-
+        parts.append((1, "⚠️ <b>Ложный пробой (тонкий объем)</b>"))
     parts += [
         (2, f"📰 {html.escape(res['news_status'])}"),
         (3, f"🌍 BTC {res['btc_txt']}" + (f" · F&G {res['fng']}" if res.get("fng") is not None else "")),
@@ -2658,32 +2397,10 @@ def render_caption(res, uid=None):
     return fit_caption(parts, 1000)
 
 
-def render_details(res):
-    if res.get("price_only"):
-        return render_caption(res)
-    parts = [(0, f"📋 <b>Детали · {html.escape(res['coin'])}</b>"), (7, "")]
-    if res.get("reasons"):
-        parts.append((1, "📈 <b>Почему:</b>"))
-        parts += [(1 if i < 3 else 3, f"• {html.escape(r)}") for i, r in enumerate(res["reasons"])]
-    if res.get("patterns"):
-        parts.append((2, "🕯 <b>Свечи:</b> " + html.escape("; ".join(res["patterns"]))))
-    if res.get("squeeze"):
-        parts.append((4, "🎯 Сжатие волатильности: возможен резкий импульс"))
-    if res.get("notes"):
-        parts.append((3, "⚙ Поправки: " + html.escape("; ".join(res["notes"]))))
-    if res.get("bt"):
-        b = res["bt"]
-        parts.append((2, f"🧪 Бэктест 4h ({b['days']} дн.): сделок {b['trades']}, TP1 {b['winrate']}%, ср. {b['avg_r']:+.2f}R, PF {b['pf']}"))
-    if res.get("comment"):
-        parts.append((1, f"💬 <b>Аналитик ({html.escape(res.get('risk_lvl', 'средний'))} риск):</b> {html.escape(res['comment'])}"))
-    parts.append((4, "⚠ <i>Входите ТОЛЬКО лимитным ордером на уровне входа, не по рынку.</i>"))
-    return fit_caption(parts, 1000)
-
-
 async def build_analysis(coin, tf_data, setup, bt, ctx, source):
     info = tf_data["4h"]
     is_long = setup["is_long"]
-    entry, tps, sls, risk_dist, leverage, near, liq_x20 = calc_levels_and_risk(info, is_long, setup["type"])
+    entry, tps, sls, risk_dist, leverage, near, liq_x20 = calc_levels_and_risk(info, is_long)
     verdict, comment, risk_lvl, engine = "WAIT", "", "средний", ""
     if not setup["valid"]:
         comment = setup["reject"]
@@ -2708,24 +2425,30 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "strength": setup["strength"], "regime": info["regime"], "news_status": setup["news_status"],
         "btc_txt": ctx.get("btc_txt", "нет данных"), "fng": ctx.get("fng"), "price": info["price"],
         "entry": entry, "tps": tps, "sls": sls, "risk_dist": risk_dist, "leverage": leverage,
-        "reasons": setup["reasons"], "patterns": setup["patterns"], "notes": setup["notes"], "squeeze": info["squeeze"],
-        "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
-        "liq_x20": liq_x20,
-        "fake_breakout": setup.get("fake_breakout", False),
+        "reasons": setup["reasons"], "patterns": setup["patterns"], "notes": setup["notes"],
+        "squeeze": info["squeeze"], "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
+        "liq_x20": liq_x20, "fake_breakout": setup.get("fake_breakout", False),
+        "long_prob": {t: round(tf_data[t]["long_prob"], 1) for t in tfs_list(tf_data)},
+        "adx": round(info["adx"], 1), "rsi": round(info["rsi"], 1),
+        "sr": info.get("sr", {}),
     }
     res["text"] = render_caption(res)
     return res
 
 
+def tfs_list(tf_data):
+    return [t for t in TFS if t in tf_data]
+
+
 def fetch_error_text(coin):
     errs = fetch_errors.get(coin, [])
     tried = ", ".join(e["name"] for e in EXCHANGES)
-    base = f"Монета <b>{html.escape(coin)}</b> не найдена ни на одной бирже ({tried}) и в публичных источниках цен."
-    return base + ("\n\n<i>Причины: " + html.escape("; ".join(errs[-4:])) + "</i>" if errs else "") + "\n\nПроверьте тикер или выберите другую монету."
+    base = f"Монета <b>{html.escape(coin)}</b> не найдена ни на одной бирже ({tried})."
+    return base + ("\n\n<i>Причины: " + html.escape("; ".join(errs[-4:])) + "</i>" if errs else "")
 
 
 async def analyze_coin(coin, uid=None, force=False):
-    """(res, error). Свежий анализ → архив (если биржи недоступны) → только цена → ошибка."""
+    """(res, error). Свежий анализ → архив → только цена → ошибка."""
     cached = analysis_cache.get(coin)
     if cached and not force and time.time() - cached[0] < cached[1]:
         return cached[2], None
@@ -2733,20 +2456,17 @@ async def analyze_coin(coin, uid=None, force=False):
         tf_data, source = await get_market_data(coin)
         ctx = await get_context()
         funding = await get_funding(coin)
-        
-        # Берем настройки пользователя (если передан uid), иначе стандарт
         user_conf = CONF_FINAL
         if uid:
-            u = _users().get(str(uid), {})
-            user_conf = float(u.get("conf_final", CONF_FINAL))
-            
+            user_conf = float(_users().get(str(uid), {}).get("conf_final", CONF_FINAL))
         setup = await evaluate_setup(coin, tf_data, ctx, funding, onchain_change=await get_onchain_context(), conf_threshold=user_conf)
         bt = await get_backtest(coin)
         res = await asyncio.wait_for(build_analysis(coin, tf_data, setup, bt, ctx, source), timeout=80)
-        analysis_cache[coin] = (time.time(), 180, res)
+        res["conf_used"] = user_conf
+        analysis_cache[coin] = (time.time(), 60, res)
         save_analysis_db(coin, res)
-        if len(analysis_cache) > 60:
-            for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:20]:
+        if len(analysis_cache) > 80:
+            for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:30]:
                 analysis_cache.pop(k, None)
         return res, None
     except LookupError:
@@ -2760,14 +2480,14 @@ async def analyze_coin(coin, uid=None, force=False):
         return res, None
     price = await get_simple_price(coin)
     if price:
-        return {"coin": coin, "price": price, "price_only": True, "ts": time.time(), "img": None, "source": "публичный API цен"}, None
+        return {"coin": coin, "price": price, "price_only": True, "ts": time.time(), "img": None, "source": "API цен"}, None
     return None, "🚫 " + fetch_error_text(coin)
 
 
 def remember_res(uid, coin, res):
     d = user_res.setdefault(uid, {})
     d[coin] = (time.time(), res)
-    for k in sorted(d, key=lambda c: d[c][0])[:-6]:
+    for k in sorted(d, key=lambda c: d[c][0])[:-8]:
         d.pop(k, None)
 
 
@@ -2777,67 +2497,39 @@ def get_user_res(uid, coin):
 
 
 # =====================================================================
-# АВТОТОРГОВЛЯ (опционально, по команде /autotrade on)
+# СИГНАЛЫ: выборка, сканер, симуляция, живой мониторинг
 # =====================================================================
-async def execute_auto_trade(user_id, coin, is_long, entry, sl, tp):
-    if not ccxt:
-        return False, "ccxt не установлен"
-    u = _users().get(str(user_id), {})
-    exch_name = u.get("exchange", "binance")
-    api_key, secret = get_user_api_keys(user_id, exch_name)
-    if not api_key:
-        return False, "API-ключи не заданы"
-    exchange = None
-    try:
-        if exch_name == "binance":
-            exchange = ccxt.binanceusdm({"apiKey": api_key, "secret": secret, "enableRateLimit": True})
-        elif exch_name == "bybit":
-            exchange = ccxt.bybit({"apiKey": api_key, "secret": secret, "enableRateLimit": True,
-                                   "options": {"defaultType": "swap"}})
-        elif exch_name == "bingx" and hasattr(ccxt, "bingx"):
-            exchange = ccxt.bingx({"apiKey": api_key, "secret": secret, "enableRateLimit": True,
-                                   "options": {"defaultType": "swap"}})
-        else:
-            return False, f"Биржа {exch_name} не поддерживается"
-        symbol = f"{coin}/USDT:USDT"
-        await exchange.load_markets()
-        balance = await exchange.fetch_balance()
-        risk_amount = balance["USDT"]["free"] * get_user_risk_settings(user_id)["risk_pct"] / 100
-        amount = float(exchange.amount_to_precision(symbol, risk_amount / abs(entry - sl)))
-        side, opp = ("buy", "sell") if is_long else ("sell", "buy")
-        await exchange.create_order(symbol, "limit", side, amount,
-                                    float(exchange.price_to_precision(symbol, entry)))
-        await exchange.create_order(symbol, "stop_market", opp, amount, None,
-                                    {"stopPrice": float(exchange.price_to_precision(symbol, sl)),
-                                     "reduceOnly": True})
-        return True, f"лимит {fmt(entry)}, стоп {fmt(sl)}, объём {amount}"
-    except Exception as e:
-        log.error(f"Автоторговля {user_id}/{coin}: {e}")
-        return False, str(e)[:120]
-    finally:
-        if exchange:
-            await exchange.close()
+SIGNAL_TTL = 12 * 3600          # сигнал без входа живёт 12 часов
+INVALID_ATR_MULT = 2.5          # цена ушла от входа дальше этого (в ATR) — вход потерян
+signal_notify_log = {}          # coin:side -> ts отправки (анти-дубль уведомлений)
 
 
-# =====================================================================
-# СИГНАЛЫ: сканер, симуляция по свечам, мониторинг, аномалии
-# =====================================================================
 def get_active_signals():
-    """Возвращает список реально актуальных сигналов (скрывает те, что висят без входа > 12 часов)."""
-    hist = load_signal_history()
+    """Актуальные сигналы: один на монету+сторону, без протухших и аннулированных."""
     now = time.time()
     active, seen = [], set()
-    for x in sorted(hist, key=lambda k: k.get("ts", 0), reverse=True):
+    for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
         key = f"{x['coin']}_{x['side']}"
-        if x.get("status") in ("active", "in_trade") and key not in seen:
-            if x.get("status") == "active" and (now - x.get("ts", 0) > 12 * 3600):
-                continue
-            seen.add(key)
-            active.append(x)
+        if x.get("status") not in ("active", "in_trade") or key in seen:
+            continue
+        if x.get("status") == "active" and now - x.get("ts", 0) > SIGNAL_TTL:
+            continue
+        seen.add(key)
+        active.append(x)
     return active
 
+
+def signals_for(uid, category="Все"):
+    items = get_active_signals()
+    if category == "Все":
+        mode = _users().get(str(uid), {}).get("trade_mode", "balanced") if uid else "balanced"
+        return [x for x in items if x.get("type") in MODE_TYPES.get(mode, MODE_TYPES["balanced"])]
+    if category.startswith("mode:"):
+        return [x for x in items if x.get("type") in MODE_TYPES.get(category[5:], ())]
+    return [x for x in items if x.get("type") == category]
+
+
 async def get_scan_universe():
-    """Монеты, реально торгующиеся на Binance с достаточным оборотом: сканер не тратит запросы на мёртвые тикеры."""
     try:
         j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=12)
         qv = {x["symbol"]: float(x["quoteVolume"]) for x in j if x["symbol"].endswith("USDT")}
@@ -2855,29 +2547,12 @@ async def get_scan_universe():
     return [c for c, _ in uni[:SCAN_MAX_COINS]] or POPULAR_COINS[:SCAN_MAX_COINS]
 
 
-def signals_overview():
-    active_signals = get_active_signals()
-    cnt = {t: sum(1 for x in active_signals if x.get("type") == t) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
-    total_active = len(active_signals)
-    
-    text = f"🔥 <b>Актуальные сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(shorten(market_bias.get('impact', 'Нейтральный фон'), 500))}\n\nВыберите категорию:"
-    rows = [
-        [InlineKeyboardButton(text=f"📋 Все сигналы ({total_active})", callback_data="sig_list:Все")],
-        [InlineKeyboardButton(text=f"⚡ Краткосрочный ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
-        [InlineKeyboardButton(text=f"⏳ Среднесрочный ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрок")],
-        [InlineKeyboardButton(text=f"🛡 Долгосрочный ({cnt['Долгосрочный']})", callback_data="sig_list:Долгосрок")],
-        [InlineKeyboardButton(text="⚙️ По типу торговли", callback_data="sig_modes")], # НОВАЯ КНОПКА
-        [InlineKeyboardButton(text="🔄 Обновить меню", callback_data="last_signals")]
-    ]
-    return text, kb_nav(rows)
-
 def recent_results(n=20):
     hist = sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True)
     return [x for x in hist if x.get("status") in ("win", "loss")][:n]
 
 
 def adaptive_conf_bonus():
-    """Если последние сигналы отрабатывают плохо, порог уверенности растёт сам."""
     r = recent_results(20)
     if len(r) < 8:
         return 0
@@ -2902,7 +2577,6 @@ def set_blackout(secs):
 
 
 async def btc_shock():
-    """Свеча BTC на 1h больше 2.5 ATR: рынок в шоке, сигналы не выдаём."""
     try:
         tf, _ = await get_market_data_light("BTC", ("1h",))
         last = tf["1h"]["df"].iloc[-1]
@@ -2910,96 +2584,64 @@ async def btc_shock():
     except Exception:
         return False
 
+
 async def check_macro_calendar():
-    """
-    Проверяет экономический календарь на наличие важных новостей (ФРС, инфляция, безработица).
-    Если новость выходит в ближайшие 30 минут или вышла 30 минут назад — возвращает True.
-    """
+    """Важные новости USD (ФРС, CPI и т.п.) в окне ±30 минут."""
     try:
-        # Бесплатный JSON-фид экономического календаря
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+        async with http.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status != 200:
                 return False
             events = await r.json(content_type=None)
-            
         now = datetime.now(timezone.utc)
-        
         for event in events:
-            # Нас интересуют только новости с ВЫСОКИМ влиянием (High) по доллару США (USD)
             if event.get("impact") == "High" and event.get("country") == "USD":
-                # Парсим время новости
-                event_time = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
-                
-                # Считаем разницу во времени в секундах
-                diff = (event_time - now).total_seconds()
-                
-                # Если новость выходит в ближайшие 30 минут (1800 сек) 
-                # ИЛИ вышла 30 минут назад (-1800 сек)
+                diff = (datetime.fromisoformat(event["date"].replace("Z", "+00:00")) - now).total_seconds()
                 if -1800 < diff < 1800:
-                    log.warning(f"⚠️ Найдена макро-новость: {event['title']}")
+                    log.warning(f"Макро-новость: {event.get('title')}")
                     return True
     except Exception as e:
         log.warning(f"Ошибка проверки календаря: {e}")
-        
     return False
 
 
+def signal_recipients(coin, side):
+    """Кому отправлять уведомления о сигнале: включивших сигналы."""
+    return [int(uid) for uid, u in list(_users().items())
+            if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)]
+
+
 async def scan_once(send=True):
+    """Сканер: быстрый этап по 4h/1d, затем 1h/15m, бэктест, ИИ. Отсев с причинами."""
     if scan_lock.locked():
         return []
     async with scan_lock:
         t0 = time.time()
-        if time.time() < news_blackout_until:
+        if time.time() < news_blackout_until or streak_pause():
             return []
-        if streak_pause():
-            log.info("Сканер на паузе: серия убытков")
-            return []
-            
-        # --- НОВАЯ ПРОВЕРКА: МАКРО-НОВОСТИ ФРС ---
         if await check_macro_calendar():
-            set_blackout(1800) # Ставим паузу на 1 час
-            await notify_admin("🏦 <b>Макро-новость (ФРС/CPI)!</b>\nСканер на паузе 1 час во избежание проскальзываний.")
+            set_blackout(1800)
+            await notify_admin("🏦 Макро-новость (ФРС/CPI): сканер на паузе 30 минут.")
             return []
-        # ------------------------------------------
-            
         if await btc_shock():
-            set_blackout(3600)
-            await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
+            set_blackout(1800)
+            await notify_admin("⚠ Шок BTC: сканер на паузе 30 минут.")
             return []
 
-        # Дальше идет дублирующийся код проверок (можете его удалить, если он там есть)
-        if streak_pause():
-            log.info("Сканер на паузе: серия убытков")
-            return []
-        # ... и так далее
-        if await btc_shock():
-            set_blackout(3600)
-            await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
-            return []
-
-        if streak_pause():
-            log.info("Сканер на паузе: серия убытков")
-            return []
-        if await btc_shock():
-            set_blackout(3600)
-            await notify_admin("⚠ Шок BTC: сканер на паузе 1 час")
-            return []
-            
         if time.time() - market_bias["ts"] > 900:
             await update_market_bias()
         ctx = await get_context(force=True)
         onchain = await get_onchain_context()
         universe = await get_scan_universe()
+        # Порог сканера = самый мягкий среди получателей, остальных отфильтруем при рассылке
         scan_conf = min([CONF_FINAL] + [float(u.get("conf_final", CONF_FINAL)) for u in _users().values()
-        if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)])
+                                        if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)])
         rej = {}
+
         def _rej(k):
             rej[k] = rej.get(k, 0) + 1
 
-        sem = asyncio.Semaphore(2)
-
-        stage1 = []
+        sem = asyncio.Semaphore(3)
+        stage1, stage2, final, bt_pass = [], [], [], 0
 
         async def s1(coin):
             if time.time() < scan_skip.get(coin, 0):
@@ -3015,42 +2657,32 @@ async def scan_once(send=True):
                 q = quick_check(tf2)
                 if q:
                     stage1.append((coin, tf2, q[1]))
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.15)
 
         await asyncio.gather(*[s1(c) for c in universe])
         stage1 = sorted(stage1, key=lambda x: x[2], reverse=True)[:30]
 
-                stage2 = []
-        scan_conf = min([CONF_FINAL] + [float(u.get("conf_final", CONF_FINAL)) for u in _users().values()
-                                        if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)])
-        rej = {}
-
-        def _rej(k):
-            rej[k] = rej.get(k, 0) + 1
-
         async def s2(item):
-            coin, tf2, _ = item
-            if coin_recently_lost(coin):
+            sc, tf2, _ = item
+            if coin_recently_lost(sc):
                 _rej("недавний убыток по монете")
                 return
             async with sem:
                 tf_data = dict(tf2)
                 try:
-                    extra, _src = await get_market_data_light(coin, ("1h", "15m"))
+                    extra, _src = await get_market_data_light(sc, ("1h", "15m"))
                     tf_data.update(extra)
                 except Exception:
                     pass
-                setup = await evaluate_setup(coin, tf_data, ctx, await get_funding(coin), scan=True,
+                setup = await evaluate_setup(sc, tf_data, ctx, await get_funding(sc), scan=True,
                                              onchain_change=onchain, conf_threshold=scan_conf + adaptive_conf_bonus())
                 if setup["valid"]:
-                    stage2.append((coin, tf_data, setup))
+                    stage2.append((sc, tf_data, setup))
                 else:
                     _rej(setup["reject"][:28])
 
         await asyncio.gather(*[s2(i) for i in stage1])
 
-        bt_pass = 0
-        final = []
         sem3 = asyncio.Semaphore(2)
 
         async def s3(item):
@@ -3069,93 +2701,92 @@ async def scan_once(send=True):
                     return
                 if res["verdict"] == "ENTER":
                     final.append(res)
-                    analysis_cache[coin] = (time.time(), 1200, res)
+                    analysis_cache[coin] = (time.time(), 60, res)
                     save_analysis_db(coin, res)
                 else:
                     _rej("ИИ: ЖДАТЬ")
 
         await asyncio.gather(*[s3(i) for i in stage2])
-
-
-        # ВАЖНО: Добавлены недостающие переменные
-        bt_pass = 0
-        final = []
-        sem3 = asyncio.Semaphore(2)
-
-        
         final.sort(key=lambda r: r["strength"], reverse=True)
         last_scan_info.update(ts=int(time.time()), stage1=len(stage1), stage2=len(stage2), backtest_ok=bt_pass,
                               final=len(final), secs=int(time.time() - t0))
         state_touch(False)
-        log.info(f"Сканер: {len(universe)} монет → {len(stage1)} → {len(stage2)} → бэктест {bt_pass} → итог {len(final)} за {last_scan_info['secs']} с")
+        log.info(f"Сканер: {len(universe)} → {len(stage1)} → {len(stage2)} → бэктест {bt_pass} → итог {len(final)}")
 
-        if send and active_chats:
+        new_items = []
+        if send:
             now = time.time()
             hist = load_signal_history()
-            # Исключаем те, что уже в работе или недавно отправлялись
             busy = {f"{x['coin']}:{x['side']}" for x in hist if x.get("status") in ("active", "in_trade")}
-            new_items = []
-
             used_groups = set()
             for r in final:
                 key = f"{r['coin']}:{r['side']}"
                 if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
                     continue
-                    
-                # ИСПРАВЛЕНИЕ 2: Выровнен отступ для if len(new_items)
                 if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
                     continue
-                    
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
                 if grp is not None:
                     if (grp, r["side"]) in used_groups:
                         continue
                     used_groups.add((grp, r["side"]))
-
                 signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
-                new_items.append(r)
-                
-                hist.append({"ts": now, "expire_ts": now + 6 * 3600, "coin": r["coin"], "side": r["side"], "type": r["type"],
-                             "strength": r["strength"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1],
-                             "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
-                             "max_tp_hit": 0, "hit_sl": 0, "text": r["text"]})
-                             
-            if new_items:  # Если есть новые сигналы, сохраняем и рассылаем
+                item = {"ts": now, "expire_ts": now + SIGNAL_TTL, "coin": r["coin"], "side": r["side"], "type": r["type"],
+                        "strength": r["strength"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1],
+                        "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
+                        "max_tp_hit": 0, "hit_sl": 0, "price": r["price"], "sent_to": [], "is_long": r["is_long"],
+                        "tf_probs": r.get("tf_probs") or {}, "text": r["text"]}
+                hist.append(item)
+                new_items.append((item, r))
+            if new_items:
                 save_signal_history(hist)
                 stats["signals"] += len(new_items)
-                
-                # Рассылаем КАЖДЫЙ сигнал отдельным сообщением, чтобы они копились как пуши
-                for r in new_items:
-                    kb = coin_keyboard(r["coin"])
-                    
-                    for cid in list(active_chats):
-                        if not get_user_notif_settings(cid)["signals"]:
-                            continue
-                            
-                        try:
-                            # Отправляем через _send_new, чтобы не затирать другие сообщения
-                            await _send_new(cid, r["text"], kb, r.get("img"))
-                            await asyncio.sleep(0.05) # Задержка, чтобы не получить бан от Telegram
-                        except Exception as e:
-                            log.info(f"Ошибка отправки сигнала {cid}: {e}")
-                            
-                    asyncio.create_task(send_webhook_all({"event": "new_signal", "coin": r["coin"], "side": r["side"], "entry": r["entry"],
-                                                          "tp1": r["tps"][0], "sl1": r["sls"][0]}))
-                    asyncio.create_task(auto_trade_for_users(r))
+                for item, r in new_items:
+                    await deliver_new_signal(item, r)
         if send:
-            await notify_admin(f"🔍 <b>Скан завершён</b> за {last_scan_info['secs']} с\nМонет: {len(universe)} → {len(stage1)} → {len(stage2)}\n"
-                               f"Бэктест: {bt_pass} · ✅ <b>Итог: {len(final)}</b>")
+            top = "; ".join(f"{k}: {v}" for k, v in sorted(rej.items(), key=lambda kv: -kv[1])[:5])
+            await notify_admin(f"🔍 <b>Скан завершён</b> за {last_scan_info['secs']} с\n"
+                               f"Монет: {len(universe)} → {len(stage1)} → {len(stage2)} · бэктест {bt_pass} · ✅ <b>{len(final)}</b>\n"
+                               f"🧾 Отсев: {top or '—'}")
         gc.collect()
         return final
 
 
-async def auto_trade_for_users(r):
-    return  # ВРЕМЕННО ОТКЛЮЧЕНО (биржа не поддерживается)
+async def deliver_new_signal(item, r):
+    """Рассылка сигнала тем, кто включил уведомления и чей порог ниже силы сигнала."""
+    kb = signal_keyboard(item["coin"])
+    for cid in signal_recipients(item["coin"], item["side"]):
+        u = _users().get(str(cid), {})
+        if r["strength"] < float(u.get("conf_final", CONF_FINAL)):
+            continue
+        try:
+            await _send_new(cid, r["text"], kb, r.get("img"))
+            item["sent_to"].append(cid)
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            log.info(f"Ошибка отправки сигнала {cid}: {e}")
+    state_touch()
+    asyncio.create_task(send_webhook_all({"event": "new_signal", "coin": item["coin"], "side": item["side"],
+                                          "entry": item["entry"], "tp1": item["tp1"], "sl1": item["sl1"]}))
+
+
+def signal_keyboard(coin):
+    rows = [[InlineKeyboardButton(text="📈 Открыть в приложении", web_app=WebAppInfo(url=webapp_link(coin)))]] if WEBAPP_URL else []
+    return InlineKeyboardMarkup(inline_keyboard=rows + [[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]])
+
+
+def webapp_link(coin=None, tab=None):
+    base = WEBAPP_URL or ""
+    q = []
+    if coin:
+        q.append(f"coin={coin}")
+    if tab:
+        q.append(f"tab={tab}")
+    return base + (("?" + "&".join(q)) if q else "")
 
 
 def simulate_signal(x, rows, now=None):
-    """Статус сигнала по свечам 15m: ожидание входа лимиткой → в сделке → TP1-3 с трейлингом стопа → win/loss.
-    Возвращает (status, max_tp, hit_sl)."""
+    """Статус по 15m свечам: ожидание входа лимиткой → в сделке → TP1-3 с трейлингом."""
     now = now or time.time()
     is_long = x["side"] == "LONG"
     entry, tp1, tp2, tp3, sl = x["entry"], x["tp1"], x["tp2"], x["tp3"], x["sl1"]
@@ -3166,15 +2797,16 @@ def simulate_signal(x, rows, now=None):
             continue
         if state == "waiting":
             if (is_long and h >= tp1 and l > entry) or ((not is_long) and l <= tp1 and h < entry):
-                return "missed", 0, 0  # цель достигнута без отката к лимитке
+                return "missed", 0, 0
             if (l <= entry) if is_long else (h >= entry):
                 state = "in_trade"
                 if (l <= sl) if is_long else (h >= sl):
                     return "loss", 0, 1
             continue
-        if (l <= sl) if is_long else (h >= sl):  # внутри свечи считаем стоп раньше тейка (консервативно)
+        if (l <= sl) if is_long else (h >= sl):
             return ("win" if max_tp >= 1 else "loss"), max_tp, 1
-        lvl = (3 if h >= tp3 else 2 if h >= tp2 else 1 if h >= tp1 else 0) if is_long else (3 if l <= tp3 else 2 if l <= tp2 else 1 if l <= tp1 else 0)
+        lvl = (3 if h >= tp3 else 2 if h >= tp2 else 1 if h >= tp1 else 0) if is_long else \
+              (3 if l <= tp3 else 2 if l <= tp2 else 1 if l <= tp1 else 0)
         if lvl > max_tp:
             max_tp = lvl
             sl = entry if max_tp == 1 else tp1
@@ -3187,7 +2819,113 @@ def simulate_signal(x, rows, now=None):
     return "in_trade", max_tp, 0
 
 
+async def notify_signal_holders(coin, side, text, kb=None, extra_uids=()):
+    """Уведомление тем, кто получил сигнал или держит по нему позицию / сохранил."""
+    uids = set(int(x) for x in extra_uids)
+    for uid, u in list(_users().items()):
+        if not isinstance(u, dict):
+            continue
+        if coin in (u.get("open_positions") or {}) or any(s.get("coin") == coin for s in u.get("saved_signals", [])):
+            uids.add(int(uid))
+    for uid in uids:
+        try:
+            await _send_new(uid, text, kb or kb_nav(back=False), None)
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            log.info(f"notify {uid}: {e}")
+
+
+async def invalidate_signal(x, reason):
+    """Сигнал больше не ликвиден: убираем из списков и сообщаем тем, кто его получал."""
+    x["status"] = "cancelled"
+    x["cancel_reason"] = reason
+    text = (f"🚫 <b>Сигнал снят: {x['coin']} ({x['side']})</b>\n\n{reason}\n"
+            f"Вход был: <code>{fmt(x['entry'])}</code>. Не входите по этой идее.")
+    await notify_signal_holders(x["coin"], x["side"], text,
+                                kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(x["coin"])))]]) if WEBAPP_URL else None,
+                                extra_uids=x.get("sent_to", []))
+    # Лимитка, которая ещё не исполнена, снимается у пользователей
+    for uid, u in list(_users().items()):
+        pos = (u.get("open_positions") or {}).get(x["coin"])
+        if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
+            set_user_open_position(int(uid), x["coin"], None)
+
+
+def live_check_signal(x, live):
+    """Правила ликвидности сигнала по свежему анализу. Возвращает причину или None."""
+    price = live["price"]
+    is_long = x["side"] == "LONG"
+    sign = 1 if is_long else -1
+    atr = live.get("atr") or price * 0.01
+    if sign * (price - x["sl1"]) <= 0:
+        return f"Цена пробила стоп-уровень ({fmt(x['sl1'])}) до входа — структура сломана."
+    if abs(price - x["entry"]) > INVALID_ATR_MULT * atr and x.get("status") == "active":
+        return f"Цена ушла на {abs(price - x['entry']) / atr:.1f} ATR от входа, вход потерян."
+    p4, p1h = live["long_prob"].get("4h", 50), live["long_prob"].get("1h", 50)
+    cs4 = p4 if is_long else 100 - p4
+    cs1h = p1h if is_long else 100 - p1h
+    if cs4 < 45 and cs1h < 40:
+        return "Тренд развернулся против сигнала (4h и 1h). Идея больше не работает."
+    return None
+
+
+async def live_refresh_coin(coin):
+    """Живое обновление одной монеты: свежие свечи, цена, вероятности. Пишет в live-кэш."""
+    try:
+        tf_data, source = await get_market_data_light(coin, ("15m", "1h", "4h", "1d"))
+    except Exception as e:
+        log.info(f"live {coin}: {e}")
+        return None
+    live = {"ts": time.time(), "price": tf_data["4h"]["price"], "atr": tf_data["4h"]["atr"],
+            "long_prob": {t: round(tf_data[t]["long_prob"], 1) for t in tf_data},
+            "rsi": {t: round(tf_data[t]["rsi"], 1) for t in tf_data},
+            "adx": round(tf_data["4h"]["adx"], 1), "regime": tf_data["4h"]["regime"], "source": source}
+    LIVE[coin] = live
+    return live
+
+
+LIVE = {}
+
+
+async def live_monitor_loop():
+    """Каждые 60 с: обновляет данные по каждой активной монете и проверяет ликвидность сигналов."""
+    await asyncio.sleep(40)
+    while True:
+        try:
+            hist = load_signal_history()
+            open_coins = {c for u in _users().values() if isinstance(u, dict)
+                          for c in (u.get("open_positions") or {})}
+            watch = {x["coin"] for x in hist if x.get("status") in ("active", "in_trade")} | open_coins
+            changed = False
+            for coin in sorted(watch)[:40]:
+                live = await live_refresh_coin(coin)
+                await asyncio.sleep(0.2)
+                if not live:
+                    continue
+                for x in hist:
+                    if x["coin"] != coin or x.get("status") not in ("active", "in_trade"):
+                        continue
+                    x["live_price"] = live["price"]
+                    x["live_ts"] = live["ts"]
+                    if x.get("status") == "active" and time.time() - x["ts"] > SIGNAL_TTL:
+                        x["status"], changed = "expired", True
+                        continue
+                    reason = live_check_signal(x, live)
+                    if reason:
+                        await invalidate_signal(x, reason)
+                        changed = True
+                    else:
+                        changed = True
+            if changed:
+                save_signal_history(hist)
+        except Exception as e:
+            log.error(f"live_monitor: {e}", exc_info=True)
+        next_timers["global_signals"] = time.time() + 60
+        await asyncio.sleep(60)
+
+
 async def global_signal_monitor_loop():
+    """Итоги сигналов по свечам: win/loss, webhook, уведомление владельцам."""
     await asyncio.sleep(120)
     while True:
         try:
@@ -3210,39 +2948,501 @@ async def global_signal_monitor_loop():
                     x.update(status=status, max_tp_hit=max_tp, hit_sl=hit_sl)
                     changed = True
                     if status in ("win", "loss") and prev != status:
-                        await notify_admin(f"📊 <b>{coin} {x['side']} закрыт:</b> {'✅ WIN' if status == 'win' else '❌ LOSS'} (TP: {max_tp})")
+                        await notify_admin(f"📊 <b>{coin} {x['side']}:</b> {'✅ WIN' if status == 'win' else '❌ LOSS'} (TP: {max_tp})")
                         asyncio.create_task(send_webhook_all({"event": f"closed_{status}", "coin": coin, "side": x["side"]}))
             if changed:
                 save_signal_history(hist)
-            await update_saved_signals_status(rows_cache)
         except Exception as e:
             log.error(f"global_signal_monitor: {e}")
-            await notify_admin(f"🚨 <b>Ошибка мониторинга сигналов:</b>\n<code>{html.escape(str(e))}</code>")
-        next_timers["global_signals"] = time.time() + 300
         await asyncio.sleep(300)
 
 
-async def update_saved_signals_status(rows_cache):
-    """Статусы избранного: ожидание входа → в сделке / истёк срок."""
-    changed = False
-    for uid, u in list(_users().items()):
-        for s in u.get("saved_signals", []):
-            if s.get("status") != "active" or not s.get("entry"):
-                continue
-            coin = s["coin"]
-            rows = rows_cache.get(coin) or await fetch_history(coin, "15m", 400, min_rows=40)
-            rows_cache[coin] = rows
-            if not rows:
-                continue
-            filled = any((l <= s["entry"]) if s.get("is_long") else (h >= s["entry"]) for ts, _o, h, l, _c, _v in rows if ts >= s["ts"] * 1000)
-            if filled:
-                s["status"], changed = "in_trade", True
-            elif time.time() > s.get("expire_ts", 0):
-                s["status"], changed = "expired", True
-    if changed:
-        state_touch()
+async def scanner_loop():
+    await asyncio.sleep(45)
+    while True:
+        try:
+            if bot_flags["alerts_enabled"] and active_chats:
+                await scan_once(send=True)
+        except Exception as e:
+            log.error(f"scanner: {e}", exc_info=True)
+            await notify_admin(f"🚨 <b>Ошибка сканера:</b>\n<code>{html.escape(str(e))}</code>")
+        next_timers["scanner"] = time.time() + SCAN_INTERVAL
+        await asyncio.sleep(SCAN_INTERVAL)
 
 
+# =====================================================================
+# ПОЗИЦИИ, ЛИЧНАЯ СТАТИСТИКА, СОПРОВОЖДЕНИЕ
+# =====================================================================
+def open_tracked_position(uid, coin, res):
+    """Ставит сделку на сопровождение: лимитка ждёт входа, затем TP/SL/трейлинг и итог в статистику."""
+    if get_open_position(uid, coin):
+        return False
+    set_user_open_position(uid, coin, {
+        "side": res["side"], "entry_price": res["entry"], "created_at": time.time(), "entered_at": time.time(),
+        "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
+        "sl_orig": res["sls"][0], "risk_pct": get_user_risk_settings(uid)["risk_pct"],
+        "notified_close": False, "waiting_entry": True, "peak_pnl": 0.0})
+    return True
+
+
+def record_trade_result(uid, coin, pos, exit_price, reason):
+    """Итог сделки: TP1 = 50% позиции, TP2 = 30%, остаток по цене выхода."""
+    if pos.get("waiting_entry"):
+        return None
+    entry, side = pos["entry_price"], pos["side"]
+    sign = 1 if side == "LONG" else -1
+    pnl_at = lambda p: sign * (p - entry) / entry * 100
+    h3 = pos.get("hit_tp3")
+    h2 = pos.get("hit_tp2") or h3
+    h1 = pos.get("hit_tp1") or h2
+    parts, rest = [], 1.0
+    if h1:
+        parts.append((0.5, pnl_at(pos["tp1"])))
+        rest -= 0.5
+    if h2:
+        parts.append((0.3, pnl_at(pos["tp2"])))
+        rest -= 0.3
+    parts.append((rest, pnl_at(exit_price)))
+    pnl = sum(w * p for w, p in parts)
+    dist = abs(entry - pos.get("sl_orig", pos["sl1"])) / entry * 100
+    r = pnl / dist if dist > 0 else 0.0
+    s = get_user_risk_settings(uid)
+    now = time.time()
+    rec = {"coin": coin, "side": side, "entry": entry, "exit": exit_price, "pnl": round(pnl, 2), "r": round(r, 2),
+           "usd": round(s["deposit"] * s["risk_pct"] / 100 * r, 2),
+           "result": "win" if (h1 or pnl > 0.05) else "loss" if pnl < -0.05 else "be",
+           "reason": reason, "max_tp": 3 if h3 else 2 if h2 else 1 if h1 else 0,
+           "peak": round(pos.get("peak_pnl", 0.0), 2), "opened_at": pos.get("entered_at", now), "closed_at": now,
+           "hold_h": round((now - pos.get("entered_at", now)) / 3600, 1)}
+    with STATE_LOCK:
+        u = STATE["users"].setdefault(str(uid), {"active": True})
+        u["trade_log"] = (u.get("trade_log", []) + [rec])[-300:]
+    state_touch()
+    return rec
+
+
+def render_trade_card(rec):
+    icon = {"win": "✅", "loss": "❌", "be": "➖"}[rec["result"]]
+    return (f"{icon} <b>Итог сделки: {rec['coin']} ({rec['side']})</b>\n"
+            f"Вход: <code>{fmt(rec['entry'])}</code> → Выход: <code>{fmt(rec['exit'])}</code>\n"
+            f"Результат: <b>{rec['pnl']:+.2f}%</b> · {rec['r']:+.2f}R · {rec['usd']:+.2f}$\n"
+            f"Удержание: {rec['hold_h']} ч · взято целей: {rec['max_tp']} · {rec['reason']}")
+
+
+async def close_position_manual(uid, coin):
+    pos = get_open_position(uid, coin)
+    rec = None
+    if pos and not pos.get("waiting_entry"):
+        price = await get_simple_price(coin)
+        if price:
+            rec = record_trade_result(uid, coin, pos, price, "закрыто вручную")
+    set_user_open_position(uid, coin, None)
+    if rec:
+        await _tell(uid, render_trade_card(rec))
+    return rec
+
+
+def personal_stats(uid):
+    t = list(_users().get(str(uid), {}).get("trade_log", []))
+    n = len(t)
+    if not n:
+        return {"n": 0}
+    wins = sum(1 for x in t if x["result"] == "win")
+    losses = sum(1 for x in t if x["result"] == "loss")
+    closed = wins + losses
+    gp = sum(x["pnl"] for x in t if x["pnl"] > 0)
+    gl = -sum(x["pnl"] for x in t if x["pnl"] < 0)
+    kind, streak = t[-1]["result"], 0
+    for x in reversed(t):
+        if x["result"] != kind:
+            break
+        streak += 1
+    coins = {}
+    for x in t:
+        coins[x["coin"]] = coins.get(x["coin"], 0) + x["pnl"]
+    rk = sorted(coins.items(), key=lambda kv: kv[1])
+
+    def swr(sd):
+        s = [x for x in t if x["side"] == sd and x["result"] != "be"]
+        return round(sum(1 for x in s if x["result"] == "win") / len(s) * 100) if s else None
+
+    acc, dd, peak = 0.0, 0.0, 0.0
+    for x in t:
+        acc += x["usd"]
+        peak = max(peak, acc)
+        dd = max(dd, peak - acc)
+    eq, run = [], 0.0
+    for x in t[-40:]:
+        run += x["usd"]
+        eq.append(round(run, 2))
+    return {"n": n, "wins": wins, "losses": losses, "be": n - closed,
+            "wr": round(wins / closed * 100, 1) if closed else 0.0,
+            "pnl": round(sum(x["pnl"] for x in t), 2), "usd": round(sum(x["usd"] for x in t), 2),
+            "avg_r": round(sum(x["r"] for x in t) / n, 2), "pf": round(gp / gl, 2) if gl else None,
+            "streak": streak, "streak_kind": kind, "best": max(t, key=lambda x: x["pnl"]),
+            "worst": min(t, key=lambda x: x["pnl"]),
+            "top": [c for c in reversed(rk) if c[1] > 0][:3], "bottom": [c for c in rk if c[1] < 0][:3],
+            "wr_long": swr("LONG"), "wr_short": swr("SHORT"), "max_dd": round(dd, 2),
+            "expectancy": round((wins * (gp / wins if wins else 0) - losses * (gl / losses if losses else 0)) / closed, 2) if closed else 0.0,
+            "avg_hold": round(sum(x["hold_h"] for x in t) / n, 1), "equity": eq, "last": t[-10:][::-1]}
+
+
+def render_mystats(uid):
+    s = personal_stats(uid)
+    if not s["n"]:
+        return ("📈 <b>Моя статистика</b>\n\n<i>Пока нет закрытых сделок. Сохраните сигнал или нажмите «Вошёл в сделку» — "
+                "итог запишется сам, когда сделка закроется.</i>")
+    kind = {"win": "побед", "loss": "убытков", "be": "в ноль"}[s["streak_kind"]]
+    dash = lambda v: "—" if v is None else v
+    lines = ["📈 <b>Моя статистика</b>\n",
+             f"Сделок: <b>{s['n']}</b> · ✅ {s['wins']} · ❌ {s['losses']} · ➖ {s['be']}",
+             f"🎯 Винрейт: <b>{s['wr']}%</b> · PF: <b>{dash(s['pf'])}</b> · Мат. ожидание: <b>{s['expectancy']:+.2f}R</b>",
+             f"💵 Итого: <b>{s['usd']:+.2f}$</b> ({s['pnl']:+.2f}%) · ср. {s['avg_r']:+.2f}R",
+             f"📉 Макс. просадка: <b>{s['max_dd']:.2f}$</b>",
+             f"🔥 Серия: {s['streak']} {kind} подряд",
+             f"↕ Лонг {dash(s['wr_long'])}% · Шорт {dash(s['wr_short'])}%",
+             f"⏱ Среднее удержание: {s['avg_hold']} ч", "",
+             f"🏆 Лучшая: {s['best']['coin']} {s['best']['pnl']:+.2f}%",
+             f"💀 Худшая: {s['worst']['coin']} {s['worst']['pnl']:+.2f}%"]
+    if s["top"]:
+        lines.append("➕ Лучшие: " + ", ".join(f"{c} {p:+.1f}%" for c, p in s["top"]))
+    if s["bottom"]:
+        lines.append("➖ Слабые: " + ", ".join(f"{c} {p:+.1f}%" for c, p in s["bottom"]))
+    lines += ["", "<b>Последние сделки:</b>"] + [
+        f"{'✅' if x['result'] == 'win' else '❌' if x['result'] == 'loss' else '➖'} {x['coin']} {x['side']}: "
+        f"<code>{fmt(x['entry'])}</code> → <code>{fmt(x['exit'])}</code> · {x['pnl']:+.2f}%" for x in s["last"][:6]]
+    return "\n".join(lines)
+
+
+async def check_position(user_id, coin, pos):
+    """Сопровождение сделки: вход лимиткой, безубыток, TP1-3, трейлинг, предупреждения, итог."""
+    if pos.get("notified_close"):
+        return
+    price = await get_simple_price(coin)
+    if not price:
+        return
+    side, entry = pos["side"], pos["entry_price"]
+    sign = 1 if side == "LONG" else -1
+    pnl = sign * (price - entry) / entry * 100
+
+    if pos.get("waiting_entry"):
+        if sign * (price - entry) <= 0:
+            pos["waiting_entry"] = False
+            pos["entered_at"] = time.time()
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\nНаправление: <b>{side}</b>\n"
+                                 f"Цена входа: <code>{fmt(entry)}</code>\n🚀 Сделка на сопровождении.",
+                        kb_nav([[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(coin)))]], back=False)
+                        if WEBAPP_URL else None)
+        elif time.time() - pos.get("created_at", time.time()) > 24 * 3600:
+            set_user_open_position(user_id, coin, None)
+            await _tell(user_id, f"⌛ <b>Ордер отменён: {coin}</b>\nЦена не дошла до входа за 24 часа.")
+        return
+
+    pos["peak_pnl"] = max(pos.get("peak_pnl", 0.0), pnl)
+    for k in ("hit_tp1", "hit_tp2", "hit_tp3"):
+        pos.setdefault(k, False)
+    current_sl = pos["sl1"]
+    reason, urgency, exit_price, why = None, "info", price, "закрытие"
+
+    if not pos["hit_tp1"] and pnl >= 1.5 and current_sl != entry:
+        pos["sl1"] = entry
+        current_sl = entry
+        set_user_open_position(user_id, coin, pos)
+        await _tell(user_id, f"🛡 <b>Безубыток: {coin}</b>\nЦена в плюсе на {pnl:.2f}%. Стоп перенесён на вход.")
+
+    if pos["hit_tp1"] and not pos["hit_tp3"]:
+        new_sl = price * 0.985 if side == "LONG" else price * 1.015
+        better = new_sl > current_sl if side == "LONG" else new_sl < current_sl
+        if better and (new_sl > entry if side == "LONG" else new_sl < entry):
+            pos["sl1"] = current_sl = new_sl
+            set_user_open_position(user_id, coin, pos)
+
+    if pnl <= -5.0 and not pos.get("notified_urgent"):
+        pos["notified_urgent"] = True
+        set_user_open_position(user_id, coin, pos)
+        await _tell(user_id, f"🚨 <b>{coin} идёт против вас:</b> {pnl:+.2f}%. Будьте готовы к стопу.")
+
+    tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
+    if sign * (price - current_sl) <= 0:
+        reason = ("🛑 Сработал трейлинг-стоп, часть прибыли зафиксирована." if current_sl != pos.get("sl_orig") and pos.get("hit_tp1")
+                  else "🛑 Сработал стоп-лосс.")
+        exit_price, urgency = current_sl, "success" if pos.get("hit_tp1") else "danger"
+        pos["notified_close"] = True
+        why = "стоп / трейлинг"
+    elif sign * (price - tp3) >= 0 and not pos["hit_tp3"]:
+        reason, urgency = "🏆 Достигнут TP3. Сделка полностью закрыта.", "success"
+        pos["hit_tp3"] = True
+        exit_price, pos["notified_close"], why = tp3, True, "TP3"
+    elif sign * (price - tp2) >= 0 and not pos["hit_tp2"]:
+        reason, urgency = "✅ Достигнут TP2. Стоп подтянут на TP1.", "success"
+        pos["hit_tp2"] = True
+        pos["sl1"] = tp1
+        set_user_open_position(user_id, coin, pos)
+    elif sign * (price - tp1) >= 0 and not pos["hit_tp1"]:
+        reason, urgency = "✅ Достигнут TP1. Фиксируем 50%, стоп в безубыток.", "success"
+        pos["hit_tp1"] = True
+        pos["sl1"] = entry
+        set_user_open_position(user_id, coin, pos)
+
+    if not reason and not pos.get("notified_close") and time.time() - pos.get("last_warn", 0) > 3600:
+        warn = None
+        live = LIVE.get(coin)
+        if live and time.time() - live["ts"] < 300:
+            p1h = live["long_prob"].get("1h", 50)
+            p15 = live["long_prob"].get("15m", 50)
+            against = (lambda p: 100 - p) if side == "LONG" else (lambda p: p)
+            if against(p1h) >= 60 and against(p15) >= 58:
+                warn = "Рынок разворачивается против сделки (1h и 15m)."
+        if not warn and pos["peak_pnl"] >= 1.0 and pnl <= pos["peak_pnl"] * 0.5 and not pos["hit_tp1"]:
+            warn = f"Отдана половина прибыли (пик {pos['peak_pnl']:+.1f}%, сейчас {pnl:+.1f}%)."
+        if warn:
+            pos["last_warn"] = time.time()
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"⚠️ <b>Рекомендую закрыть: {coin} ({side})</b>\n\n{warn}\n"
+                                 f"Сейчас: <code>{fmt(price)}</code> · PnL <b>{pnl:+.2f}%</b>")
+
+    if reason:
+        text = (f"{'🏆' if urgency == 'success' else '🛑'} <b>Сопровождение: {coin} ({side})</b>\n"
+                f"Вход: <code>{fmt(entry)}</code> | Сейчас: <code>{fmt(price)}</code> | PnL <b>{pnl:+.2f}%</b>\n\n{reason}")
+        if pos.get("notified_close"):
+            rec = record_trade_result(user_id, coin, pos, exit_price, why)
+            set_user_open_position(user_id, coin, None)
+            if rec:
+                text += "\n\n" + render_trade_card(rec)
+        else:
+            set_user_open_position(user_id, coin, pos)
+        await _tell(user_id, text)
+    else:
+        set_user_open_position(user_id, coin, pos)
+
+
+async def position_monitor_loop():
+    await asyncio.sleep(50)
+    while True:
+        try:
+            for uid_str, u in list(_users().items()):
+                for coin, pos in list((u.get("open_positions") or {}).items()):
+                    try:
+                        await check_position(int(uid_str), coin, pos)
+                    except Exception as e:
+                        log.info(f"check_position {coin}: {e}")
+                    await asyncio.sleep(0.3)
+        except Exception as e:
+            log.error(f"pos monitor: {e}")
+        next_timers["positions"] = time.time() + 60
+        await asyncio.sleep(60)
+
+
+async def _tell(uid, text, kb=None):
+    try:
+        await _send_new(uid, trim_html(text, 4000), kb or kb_nav(back=False), None)
+    except Exception as e:
+        log.info(f"notify {uid}: {e}")
+
+
+async def daily_digest_loop():
+    """Ежедневная сводка в 21:00 МСК: итоги дня по каждому пользователю с закрытыми сделками."""
+    while True:
+        msk = datetime.now(timezone(timedelta(hours=3)))
+        target = msk.replace(hour=21, minute=0, second=0, microsecond=0)
+        if msk >= target:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - msk).total_seconds())
+        day_start = (datetime.now(timezone(timedelta(hours=3))).replace(hour=0, minute=0, second=0, microsecond=0)).timestamp()
+        for uid_str, u in list(_users().items()):
+            if not isinstance(u, dict) or not get_user_notif_settings(uid_str)["pos_updates"]:
+                continue
+            today = [x for x in u.get("trade_log", []) if x["closed_at"] >= day_start]
+            if not today:
+                continue
+            usd = sum(x["usd"] for x in today)
+            wins = sum(1 for x in today if x["result"] == "win")
+            await _tell(int(uid_str), f"🌙 <b>Итоги дня</b>\nСделок: {len(today)} · ✅ {wins} · ❌ {len(today) - wins}\n"
+                                      f"Результат: <b>{usd:+.2f}$</b>")
+        await asyncio.sleep(60)
+
+
+# =====================================================================
+# НОВОСТИ ПРОТИВ ПОЗИЦИЙ, АЛЕРТЫ, БРИФИНГ
+# =====================================================================
+_news_alerted = set()
+
+
+async def check_news_conflicts_with_signals():
+    nb, link = market_bias.get("bias", 0), market_bias.get("link")
+    if nb == 0 or not link:
+        return
+    for uid_str, u in list(_users().items()):
+        if not isinstance(u, dict) or not get_user_notif_settings(uid_str)["signals"]:
+            continue
+        for coin, pos in (u.get("open_positions") or {}).items():
+            if pos.get("waiting_entry") or pos.get("notified_close"):
+                continue
+            against = (nb == 1 and pos["side"] == "SHORT") or (nb == -1 and pos["side"] == "LONG")
+            if not against or (link, uid_str, coin) in _news_alerted:
+                continue
+            _news_alerted.add((link, uid_str, coin))
+            if re.search(rf"\b{re.escape(coin)}\b", f"{market_bias.get('title_ru', '')} {market_bias.get('coins', '')}".upper()):
+                await _tell(int(uid_str), f"🚨 <b>Новость касается {coin} против вашей сделки ({pos['side']})</b>\n\n"
+                                          f"📰 {html.escape(shorten(market_bias.get('title_ru', ''), 120))}\n"
+                                          f"Рассмотрите закрытие позиции.")
+    if len(_news_alerted) > 2000:
+        _news_alerted.clear()
+
+
+async def news_watcher_loop():
+    global last_news_link
+    await asyncio.sleep(40)
+    while True:
+        try:
+            entries = await get_news_entries()
+            if entries:
+                link = entries[0].link
+                if last_news_link is None:
+                    last_news_link = link
+                elif link != last_news_link:
+                    last_news_link = link
+                    state_touch(False)
+                    await update_market_bias(force=True)
+                    await check_news_conflicts_with_signals()
+                    if bot_flags["news_enabled"] and active_chats:
+                        text, img_url = await prepare_news()
+                        if text:
+                            img = await download_bytes(img_url) if img_url else None
+                            sent = 0
+                            for cid in list(active_chats):
+                                if not get_user_notif_settings(cid)["news"]:
+                                    continue
+                                try:
+                                    await _send_new(cid, text, kb_nav([[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]], back=False), img)
+                                    sent += 1
+                                    await asyncio.sleep(0.05)
+                                except Exception:
+                                    pass
+                            stats["news_sent"] += sent
+        except Exception as e:
+            log.warning(f"news_watcher: {e}")
+        next_timers["news_watcher"] = time.time() + 600
+        await asyncio.sleep(600)
+
+
+async def price_alerts_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            for uid_str, u in list(_users().items()):
+                alerts = u.get("price_alerts", []) if isinstance(u, dict) else []
+                if not alerts:
+                    continue
+                triggered = []
+                for alert in alerts:
+                    price = await get_simple_price(alert["coin"])
+                    if not price:
+                        continue
+                    if (alert["op"] == ">" and price >= alert["price"]) or (alert["op"] == "<" and price <= alert["price"]):
+                        triggered.append(alert)
+                        await _tell(int(uid_str), f"🔔 <b>Алерт сработал: {alert['coin']}</b>\n"
+                                                  f"Условие: <code>{alert['op']} {fmt(alert['price'])}</code>\n"
+                                                  f"Текущая цена: <code>{fmt(price)}</code>",
+                                    kb_nav([[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(alert['coin'])))]], back=False)
+                                    if WEBAPP_URL else None)
+                if triggered:
+                    with STATE_LOCK:
+                        u["price_alerts"] = [a for a in alerts if a not in triggered]
+                    state_touch()
+        except Exception as e:
+            log.error(f"price_alerts_loop: {e}")
+        await asyncio.sleep(120)
+
+
+async def morning_briefing_loop():
+    while True:
+        msk = datetime.now(timezone(timedelta(hours=3)))
+        target = msk.replace(hour=8, minute=0, second=0, microsecond=0)
+        if msk >= target:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - msk).total_seconds())
+        try:
+            ctx = await get_context(force=True)
+            fng = ctx.get("fng")
+            text = (f"☀️ <b>Доброе утро!</b>\n\n🌍 <b>BTC:</b> {ctx.get('btc_txt')}\n"
+                    f"😨 <b>F&G:</b> {fng if fng is not None else '—'} {ctx.get('fng_txt', '')}\n"
+                    f"🔥 <b>Активных сигналов:</b> {len(get_active_signals())}\n\n<i>Удачной торговли!</i>")
+            for cid in list(active_chats):
+                if get_user_notif_settings(cid)["briefing"]:
+                    try:
+                        await _send_new(cid, text, kb_nav([[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(tab="signals")))]], back=False)
+                                        if WEBAPP_URL else None, None)
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.error(f"Ошибка утреннего брифинга: {e}")
+        await asyncio.sleep(60)
+
+
+# =====================================================================
+# ЛИКВИДНОСТЬ СИГНАЛОВ ПРИ ОБНОВЛЕНИИ И ПОЛНОЕ ОБНОВЛЕНИЕ ДАННЫХ
+# =====================================================================
+refresh_job = {"running": False, "done": 0, "total": 0, "removed": 0, "ts": 0.0}
+
+
+async def drop_waiting_signals(coin, res):
+    """Если анализ монеты сейчас даёт «ЖДАТЬ» — сигнал по ней снимается с уведомлением."""
+    if res.get("price_only") or res.get("verdict") != "WAIT" or res.get("stale"):
+        return 0
+    n = 0
+    hist = load_signal_history()
+    for x in hist:
+        if x["coin"] == coin and x.get("status") == "active":
+            await invalidate_signal(x, f"Обновлённый анализ: рекомендация «ЖДАТЬ». {html.escape(shorten(res.get('comment', ''), 160))}")
+            n += 1
+    if n:
+        save_signal_history(hist)
+    return n
+
+
+async def refresh_all_data(uid):
+    """Пересчёт всех монет пользователя (сигналы, избранное, позиции) с нуля."""
+    coins = [x["coin"] for x in get_active_signals()] + [s["coin"] for s in get_user_saved_signals(uid)] \
+        + list(get_user_open_positions(uid))
+    coins = list(dict.fromkeys(coins))[:40]
+    before = len(get_active_signals())
+    refresh_job.update(running=True, done=0, total=len(coins), removed=0)
+    analysis_cache.clear()
+    _funding_cache.clear()
+    _ai_cache.clear()
+    _ctx_cache["ts"] = 0
+    _defillama_cache["ts"] = 0
+    _news_cache["ts"] = 0
+    for c in coins:
+        bt_cache.pop(c, None)
+    sem = asyncio.Semaphore(3)
+
+    async def one(c):
+        async with sem:
+            try:
+                res, _ = await asyncio.wait_for(analyze_coin(c, uid=uid, force=True), 120)
+                if res and not res.get("price_only"):
+                    remember_res(uid, c, res)
+                    await drop_waiting_signals(c, res)
+                await live_refresh_coin(c)
+            except Exception as e:
+                log.info(f"refresh {c}: {e}")
+            refresh_job["done"] += 1
+
+    try:
+        await get_context(force=True)
+        await update_market_bias()
+        await asyncio.gather(*[one(c) for c in coins])
+    finally:
+        refresh_job.update(running=False, ts=time.time(), removed=max(0, before - len(get_active_signals())))
+
+
+# =====================================================================
+# АНОМАЛЬНЫЙ ОБЪЁМ
+# =====================================================================
 async def anomaly_scan_once():
     j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=12)
     vol = {x["symbol"]: float(x["quoteVolume"]) for x in j if x["symbol"].endswith("USDT")}
@@ -3259,9 +3459,9 @@ async def anomaly_scan_once():
                 return
         if len(k) < 22:
             return
-        closed = k[:-1]  # последняя свеча ещё формируется
+        closed = k[:-1]
         last, base = closed[-1], closed[:-1]
-        avg = float(np.mean([float(x[7]) for x in base]))  # x[7] = оборот в USDT
+        avg = float(np.mean([float(x[7]) for x in base]))
         qv = float(last[7])
         if avg > 0 and qv / avg >= 10 and qv >= 250_000:
             found.append((coin, qv, qv / avg, (float(last[4]) / float(last[1]) - 1) * 100))
@@ -3269,15 +3469,14 @@ async def anomaly_scan_once():
     await asyncio.gather(*[check(c) for c in coins])
     now = time.time()
     fresh = sorted([a for a in found if now - anomaly_sent_at.get(a[0], 0) > 2 * 3600], key=lambda a: a[2], reverse=True)[:3]
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑 Удалить сообщение", callback_data="del_msg")]])
     for coin, qv, ratio, chg in fresh:
         anomaly_sent_at[coin] = now
         state_touch(False)
-        text = (f"🚨 <b>Аномальный объём: {coin}</b>\n"
-                f"Оборот за минуту: <b>${qv:,.0f}</b> (×{ratio:.0f} к среднему)\n"
-                f"Цена за минуту: <b>{chg:+.2f}%</b> {'🟢' if chg >= 0 else '🔴'}\n\n"
-                f"Крупные игроки резко входят или выходят. Часто это предшествует импульсу: проверьте график.")
-        await broadcast({"text": text, "kb": kb, "clean": False}, notif_type="anomalies")
+        text = (f"🚨 <b>Аномальный объём: {coin}</b>\nОборот за минуту: <b>${qv:,.0f}</b> (×{ratio:.0f})\n"
+                f"Цена за минуту: <b>{chg:+.2f}%</b>")
+        for cid in list(active_chats):
+            if get_user_notif_settings(cid)["anomalies"]:
+                await _tell(cid, text, signal_keyboard(coin))
 
 
 async def anomaly_scanner_loop():
@@ -3292,321 +3491,357 @@ async def anomaly_scanner_loop():
         await asyncio.sleep(180)
 
 
-async def scanner_loop():
-    await asyncio.sleep(60)
-    while True:
-        try:
-            if bot_flags["alerts_enabled"] and active_chats:
-                await scan_once(send=True)
-        except Exception as e:
-            log.error(f"scanner: {e}", exc_info=True)
-            await notify_admin(f"🚨 <b>Ошибка сканера:</b>\n<code>{html.escape(str(e))}</code>")
-        next_timers["scanner"] = time.time() + SCAN_INTERVAL
-        await asyncio.sleep(SCAN_INTERVAL)
-
-async def send_position_update(uid, coin, pos):
-    if pos.get("notified_close") or pos.get("waiting_entry"): 
-        return # Если ждем лимитку или уже закрыли, не спамим
-        
-    price = await get_simple_price(coin)
-    if not price: return
-        
-    entry, side = pos["entry_price"], pos["side"]
-    sign = 1 if side == "LONG" else -1
-    pnl = sign * (price - entry) / entry * 100
-    
-    advice = ""
-    trend_1h_long, trend_4h_long = True, True
-    
+# =====================================================================
+# MINI APP: API
+# =====================================================================
+def tg_auth(init):
+    """Проверка подписи initData от Telegram (HMAC-SHA256)."""
     try:
-        tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
-        trend_1h_long = tf_data["1h"]["long_prob"] >= 50
-        trend_4h_long = tf_data["4h"]["long_prob"] >= 50
+        pairs = dict(parse_qsl(init, keep_blank_values=True))
+        got = pairs.pop("hash")
+        check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
+            return None
+        if time.time() - int(pairs.get("auth_date", 0)) > 86400:
+            return None
+        return json.loads(pairs["user"])
+    except Exception:
+        return None
+
+
+@app.route("/app")
+def mini_page():
+    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp.html"))
+
+
+@app.route("/api/<act>", methods=["POST"])
+def mini_api(act):
+    d = request.get_json(silent=True) or {}
+    u = tg_auth(d.get("initData", ""))
+    if not u:
+        return Response('{"error":"Откройте приложение из Telegram"}', 401, mimetype="application/json")
+    try:
+        out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(120)
+    except Exception as e:
+        log.warning(f"mini_api {act}: {e}")
+        out = {"error": "Ошибка сервера, попробуйте ещё раз"}
+    return Response(json.dumps(out, ensure_ascii=False, default=str), mimetype="application/json")
+
+
+def _sig_item(x, live=True):
+    item = {k: x.get(k) for k in ("coin", "side", "type", "strength", "entry", "tp1", "tp2", "tp3", "sl1", "status", "ts",
+                                  "max_tp_hit", "cancel_reason", "live_price")}
+    item["sent"] = len(x.get("sent_to", []))
+    if live and x.get("coin") in LIVE:
+        lv = LIVE[x["coin"]]
+        item["live_price"] = lv["price"]
+        item["live_age"] = int(time.time() - lv["ts"])
+        item["live_long_prob"] = lv["long_prob"]
+    dist = None
+    if item.get("live_price") and item.get("entry"):
+        dist = round((item["live_price"] - item["entry"]) / item["entry"] * 100, 2)
+    item["dist_pct"] = dist
+    return item
+
+
+def _enrich_user_positions(uid):
+    out = {}
+    for c, p in get_user_open_positions(uid).items():
+        lv = LIVE.get(c)
+        price = (lv["price"] if lv else None) or p["entry_price"]
+        sign = 1 if p["side"] == "LONG" else -1
+        out[c] = dict(p, price=price, pnl=round(sign * (price - p["entry_price"]) / p["entry_price"] * 100, 2))
+    return out
+
+
+async def coin_payload(uid, coin, force=False):
+    res, err = await analyze_coin(coin, uid=uid, force=force)
+    if err:
+        return {"error": strip_tags(err)[:300]}
+    remember_res(uid, coin, res)
+    if res.get("price_only"):
+        return {"price_only": True, "price": res["price"], "coin": coin}
+    out = {k: v for k, v in res.items() if k not in ("img", "text", "reasons_raw")}
+    out["img"] = ("data:image/png;base64," + base64.b64encode(res["img"]).decode()) if res.get("img") else None
+    s = get_user_risk_settings(uid)
+    out["risk_usdt"] = s["deposit"] * s["risk_pct"] / 100
+    out["pos_usdt"] = out["risk_usdt"] / res["risk_dist"] * res["entry"] if res["risk_dist"] > 0 else 0.0
+    out["in_fav"] = any(x["coin"] == coin for x in get_user_saved_signals(uid))
+    out["position"] = bool(get_open_position(uid, coin))
+    out["live"] = LIVE.get(coin)
+    out["signal_active"] = any(x["coin"] == coin for x in get_active_signals())
+    out["corr"] = None
+    for oc, od in get_user_open_positions(uid).items():
+        if oc != coin and od["side"] == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
+            out["corr"] = f"Уже открыт {od['side']} по {oc}: монеты коррелируют"
+    return out
+
+
+async def mini_dispatch(uid, u, act, d):
+    if uid not in active_chats:
+        active_chats.add(uid)
+        await asyncio.to_thread(save_user_data, uid, u.get("username"), u.get("first_name"))
+    uu = _users().get(str(uid), {})
+    coin = normalize_ticker(str(d.get("coin", ""))) if d.get("coin") else None
+
+    if act == "me":
+        mode = uu.get("trade_mode", "balanced")
+        return {"name": u.get("first_name") or "трейдер", "version": VERSION, "risk": get_user_risk_settings(uid),
+                "mode": mode, "conf": MODE_CONF.get(mode, CONF_FINAL), "notif": get_user_notif_settings(uid),
+                "saved": [_sig_item(s, False) for s in get_user_saved_signals(uid)],
+                "alerts": uu.get("price_alerts", []), "webhook": uu.get("webhook_url", ""),
+                "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150],
+                "counts": {"signals": len(signals_for(uid)), "saved": len(get_user_saved_signals(uid)),
+                           "positions": len(get_user_open_positions(uid))}}
+
+    if act == "signals":
+        flt = d.get("flt", "Все")
+        keys = ("Все", "Краткосрочный", "Среднесрочный", "Долгосрочный", "mode:aggressive", "mode:balanced", "mode:conservative")
+        return {"items": [_sig_item(x) for x in signals_for(uid, flt)[:50]],
+                "counts": {k: len(signals_for(uid, k)) for k in keys},
+                "refresh": dict(refresh_job), "market": market_bias.get("impact", "")}
+
+    if act == "refresh_all":
+        if not refresh_job["running"]:
+            asyncio.create_task(refresh_all_data(uid))
+        return {"started": True}
+
+    if act == "refresh_status":
+        return dict(refresh_job)
+
+    if act == "coin" and coin:
+        return await coin_payload(uid, coin, force=bool(d.get("force")))
+
+    if act == "live" and coin:
+        lv = LIVE.get(coin)
+        if not lv or time.time() - lv["ts"] > 30:
+            lv = await live_refresh_coin(coin)
+        return {"live": lv}
+
+    if act == "movers":
+        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
+        mv = [(x["symbol"][:-4], float(x["priceChangePercent"])) for x in j
+              if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
+        up = sorted([m for m in mv if m[1] > 0], key=lambda m: -m[1])[:10]
+        dn = sorted([m for m in mv if m[1] < 0], key=lambda m: m[1])[:10]
+        return {"up": up, "down": dn}
+
+    if act == "portfolio":
+        return {"risk": get_user_risk_settings(uid), "open_risk": calculate_portfolio_risk(uid), "mode": uu.get("trade_mode", "balanced"),
+                "positions": _enrich_user_positions(uid), "saved": [_sig_item(s, False) for s in get_user_saved_signals(uid)],
+                "history": uu.get("trade_history", [])[-15:]}
+
+    if act == "mystats":
+        return personal_stats(uid)
+
+    if act == "stats":
+        uniq, seen = [], set()
+        for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
+            if f"{x['coin']}_{x['side']}" not in seen:
+                seen.add(f"{x['coin']}_{x['side']}")
+                uniq.append(x)
+        cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("win", "missed", "loss", "expired", "cancelled")}
+        cnt["active"] = len(get_active_signals())
+        lists = {s: [_sig_item(x, False) for x in uniq if x.get("status") == s][:30] for s in ("win", "missed", "loss", "expired", "cancelled")}
+        lists["active"] = [_sig_item(x) for x in get_active_signals()][:30]
+        closed = cnt["win"] + cnt["loss"]
+        return {"counts": cnt, "lists": lists, "total": len(uniq),
+                "wr": cnt["win"] / closed * 100 if closed else 0.0}
+
+    if act == "news":
+        return {"bias": market_bias, "html": await get_news_batch_text()}
+
+    if act == "toggle" and d.get("key") in NOTIFY_NAMES:
+        k = d["key"]
+        new = not uu.get(f"notify_{k}", True)
+        set_user_field(uid, **{f"notify_{k}": new})
+        return {"msg": f"{NOTIFY_NAMES[k]}: {'вкл' if new else 'выкл'}"}
+
+    if act == "set_deposit":
+        v = float(d.get("value", 0))
+        if v <= 0:
+            return {"error": "Депозит должен быть больше 0"}
+        set_user_field(uid, deposit=v)
+        return {"msg": "Депозит сохранён"}
+
+    if act == "set_risk":
+        v = float(d.get("value", 0))
+        if not 0.1 <= v <= 10:
+            return {"error": "Риск от 0.1 до 10%"}
+        set_user_field(uid, risk_pct=v)
+        return {"msg": "Риск сохранён"}
+
+    if act == "set_mode" and d.get("value") in MODE_NAMES:
+        m = d["value"]
+        set_user_field(uid, trade_mode=m, conf_final=MODE_CONF[m])
+        return {"msg": "Режим обновлён"}
+
+    if act == "fav_add" and coin:
+        res = get_user_res(uid, coin) or (await analyze_coin(coin, uid=uid))[0]
+        if not res or res.get("price_only"):
+            return {"error": "Нет данных по монете"}
+        await asyncio.to_thread(add_user_saved_signal, uid, coin, render_caption(res, uid), res)
+        open_tracked_position(uid, coin, res)
+        return {"msg": f"{coin} сохранён и поставлен на сопровождение"}
+
+    if act == "fav_del" and coin:
+        await asyncio.to_thread(del_user_saved_signal, uid, coin)
+        return {"msg": "Удалено из избранного"}
+
+    if act == "pos_enter" and coin:
+        res = get_user_res(uid, coin) or (await analyze_coin(coin, uid=uid))[0]
+        if not res or res.get("price_only"):
+            return {"error": "Данные устарели, обновите анализ"}
+        for oc, od in get_user_open_positions(uid).items():
+            if oc != coin and od.get("side") == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
+                return {"error": f"Уже открыт {od['side']} по {oc}: {coin} сильно коррелирует"}
+        if not open_tracked_position(uid, coin, res):
+            return {"error": "Сделка по монете уже открыта"}
+        await _tell(uid, f"⏳ <b>Лимитный ордер: {coin} ({res['side']})</b>\nЖдём вход: <code>{fmt(res['entry'])}</code>\n"
+                         f"Сопровождение включено: вход, TP1-3, стоп и итог придут сюда.")
+        return {"msg": "Ордер поставлен, ждём вход"}
+
+    if act == "pos_close" and coin:
+        rec = await close_position_manual(uid, coin)
+        return {"msg": f"Закрыто: {rec['pnl']:+.2f}%" if rec else "Позиция закрыта"}
+
+    if act == "alert_add" and coin:
+        price = float(d.get("price", 0))
+        if price <= 0:
+            return {"error": "Неверная цена"}
+        cur = await get_simple_price(coin)
+        op = d.get("op") or (">" if cur is None or price >= cur else "<")
+        with STATE_LOCK:
+            lst = STATE["users"].setdefault(str(uid), {"active": True}).setdefault("price_alerts", [])
+            if len(lst) >= 20:
+                return {"error": "Максимум 20 алертов"}
+            lst.append({"coin": coin, "op": op, "price": price})
+        state_touch()
+        return {"msg": "Алерт создан"}
+
+    if act == "alert_del":
+        with STATE_LOCK:
+            lst = STATE["users"].get(str(uid), {}).get("price_alerts", [])
+            i = int(d.get("idx", -1))
+            if 0 <= i < len(lst):
+                lst.pop(i)
+        state_touch()
+        return {"msg": "Удалено"}
+
+    if act == "webhook":
+        url = str(d.get("url", "")).strip()
+        if url and not url.startswith("http"):
+            return {"error": "Ссылка должна начинаться с http"}
+        set_user_field(uid, webhook_url=url)
+        return {"msg": "Вебхук сохранён" if url else "Вебхук отключён"}
+
+    if act == "csv":
+        await bot.send_document(uid, BufferedInputFile(generate_csv_history(), "signals_history.csv"), caption="📊 История сигналов (CSV)")
+        return {"msg": "Файл отправлен в чат"}
+
+    return {"error": "Неизвестное действие"}
+
+
+# =====================================================================
+# БОТ: /start, уведомления, кнопки
+# =====================================================================
+def bot_main_keyboard():
+    rows = []
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton(text="🚀 Открыть IXCLY App", web_app=WebAppInfo(url=webapp_link()))])
+    rows.append([InlineKeyboardButton(text="🔥 Сигналы", web_app=WebAppInfo(url=webapp_link(tab="signals")))] if WEBAPP_URL else
+                [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
+    rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+WELCOME_BOT = ("👋 <b>IXCLY PRO</b>\n\nВся работа теперь в мини-приложении: сигналы, графики, портфель, статистика.\n"
+               "Сюда я присылаю уведомления: новые сигналы, сопровождение сделок, итоги и снятые идеи.")
+
+
+def notif_keyboard(uid):
+    s = get_user_notif_settings(uid)
+    rows = [[InlineKeyboardButton(text=f"{'🟢' if s[k] else '🔴'} {NOTIFY_NAMES[k]}", callback_data=f"notif:{k}")]
+            for k in ("signals", "pos_updates", "news", "anomalies", "briefing")]
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="notif:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("start", "menu"))
+async def cmd_start(m: types.Message, state: FSMContext):
+    await state.clear()
+    uid = m.from_user.id
+    await asyncio.to_thread(save_user_data, uid, m.from_user.username, m.from_user.first_name)
+    active_chats.add(m.chat.id)
+    try:
+        await m.delete()
     except Exception:
         pass
+    await bot.send_message(m.chat.id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
 
-    is_trend_against_1h = (side == "LONG" and not trend_1h_long) or (side == "SHORT" and trend_1h_long)
-    is_trend_against_4h = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
 
-    # Формируем умный совет на основе состояния сделки
-    if pos.get("hit_tp2"):
-        advice = "🔥 <b>Сделка в отличном плюсе.</b> Трейлинг-стоп защищает вашу прибыль. Держим до TP3, следим за 4h трендом."
-    elif pos.get("hit_tp1"):
-        if is_trend_against_1h:
-            advice = "⚠️ <b>TP1 взят, но тренд на 1h развернулся против нас.</b> Бот подтягивает трейлинг-стоп. Будьте готовы к выходу."
-        else:
-            advice = "✅ <b>TP1 взят.</b> Стоп в безубытке. Включен трейлинг. Держим до TP2."
-    elif pnl > 1.5:
-        advice = "🛡 <b>Сделка в плюсе!</b> Скоро бот переведет стоп в безубыток (при 1.5%) и включит трейлинг."
-    elif is_trend_against_4h and pnl < 0:
-        advice = "🚨 <b>Глобальный тренд (4h) против вас, PnL в минусе.</b> Высокий риск! Рекомендуем сократить позицию."
-    elif is_trend_against_1h and pnl < 0:
-        advice = "⚠️ <b>Тренд на 1h против вас.</b> Подтяните стоп-лосс поближе к текущей цене."
-    else:
-        advice = "⏳ <b>Тренд в силе.</b> Держим позицию по плану, ждем отработки целей."
-
-    text = (f"📊 <b>Отчет по сделке: {coin} ({side})</b>\n\n"
-            f"Вход: <code>{fmt(entry)}</code> → Сейчас: <code>{fmt(price)}</code>\n"
-            f"Текущий PnL: <b>{pnl:+.2f}%</b>\n"
-            f"Текущий стоп: <code>{fmt(pos['sl1'])}</code>\n\n"
-            f"💡 <b>Статус:</b> {advice}")
-    
-    kb = kb_nav([
-        [InlineKeyboardButton(text="📈 Открыть график", callback_data=f"c:{coin}")],
-        [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]
-    ], back=False)
-    
+@dp.message()
+async def fallback_message(m: types.Message):
     try:
-        await _send_new(uid, text, kb, None)
-    except Exception as e:
-        log.info(f"Ошибка отправки отчета по {coin}: {e}")
+        await m.delete()
+    except Exception:
+        pass
+    coin = normalize_ticker(m.text or "") if m.text and re.fullmatch(r"[A-Za-z0-9]{2,12}", m.text.strip()) else None
+    if coin and WEBAPP_URL:
+        await bot.send_message(m.chat.id, f"🔍 <b>{html.escape(coin)}</b>: открыть анализ в приложении",
+                               parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                   InlineKeyboardButton(text="📈 Открыть анализ", web_app=WebAppInfo(url=webapp_link(coin)))]]))
+    else:
+        await bot.send_message(m.chat.id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
 
 
-async def position_update_loop():
-    """Цикл отправки статусов по открытым сделкам каждые 20 минут."""
-    await asyncio.sleep(120) # Небольшая пауза при старте бота
-    while True:
-        try:
-            for uid_str, u in list(_users().items()):
-                if not get_user_notif_settings(uid_str)["pos_updates"]: continue # НОВАЯ СТРОКА
-                for coin, pos in list((u.get("open_positions") or {}).items()):
-                    try:
-                        await send_position_update(int(uid_str), coin, pos)
-                    except Exception as e:
-                        log.info(f"update_position {coin}: {e}")
-                    await asyncio.sleep(0.5) # Защита от спама API биржи
-        except Exception as e:
-            log.error(f"pos update loop: {e}")
-        next_timers["pos_updates"] = time.time() + (20 * 60)
-        await asyncio.sleep(20 * 60)
-
-# ---------------- ручные позиции пользователей ----------------
-async def position_monitor_loop():
-    await asyncio.sleep(50)
-    while True:
-        try:
-            for uid_str, u in list(_users().items()):
-                for coin, pos in list((u.get("open_positions") or {}).items()):
-                    try:
-                        await check_position(int(uid_str), coin, pos)
-                    except Exception as e:
-                        log.info(f"check_position {coin}: {e}")
-                    await asyncio.sleep(0.3)
-        except Exception as e:
-            log.error(f"pos monitor: {e}")
-        next_timers["positions"] = time.time() + 320
-        await asyncio.sleep(320)
-
-
-async def check_position(user_id, coin, pos):
-    if pos.get("notified_close"):
-        return
-    price = await get_simple_price(coin)
-    if not price:
-        return
-
-    side, entry = pos["side"], pos["entry_price"]
-    sign = 1 if side == "LONG" else -1
-    pnl = sign * (price - entry) / entry * 100
-
-    # === 1. ПРОВЕРКА ОЖИДАНИЯ ВХОДА (Лимитка) ===
-    if pos.get("waiting_entry"):
-        hit_entry = (sign * (price - entry)) <= 0
-        if hit_entry:
-            pos["waiting_entry"] = False
-            pos["entered_at"] = time.time()
-            set_user_open_position(user_id, coin, pos)
-            text = (f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\n"
-                    f"Направление: <b>{side}</b>\n"
-                    f"Цена входа: <code>{fmt(entry)}</code>\n"
-                    f"🚀 <b>Сделка активирована!</b> Бот начинает полное сопровождение.")
-            kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]], back=False)
-            try: await _send_new(user_id, text, kb, None)
-            except Exception: pass
+@dp.callback_query()
+async def on_callback(cb: types.CallbackQuery, state: FSMContext):
+    data = cb.data or ""
+    uid = cb.from_user.id
+    msg = cb.message
+    try:
+        if data == "del_msg" and msg:
+            await safe_answer(cb, "Скрыто")
+            return await safe_delete(msg)
+        if data == "notif:menu" and msg:
+            await safe_answer(cb)
+            return await msg.edit_text("🔔 <b>Уведомления</b>\nВыберите, что присылать в чат:", parse_mode="HTML",
+                                       reply_markup=notif_keyboard(uid))
+        if data == "notif:back" and msg:
+            await safe_answer(cb)
+            return await msg.edit_text(WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
+        if data.startswith("notif:") and data.split(":")[1] in NOTIFY_NAMES:
+            k = data.split(":")[1]
+            cur = _users().get(str(uid), {}).get(f"notify_{k}", True)
+            set_user_field(uid, **{f"notify_{k}": not cur})
+            await safe_answer(cb, f"{NOTIFY_NAMES[k]}: {'вкл' if not cur else 'выкл'}")
+            if msg:
+                await msg.edit_reply_markup(reply_markup=notif_keyboard(uid))
             return
-        elif time.time() - pos.get("created_at", time.time()) > 24 * 3600:
-            set_user_open_position(user_id, coin, None)
-            try: await _send_new(user_id, f"⌛ <b>Ордер отменен: {coin}</b>\nЦена не дошла до входа за 24 часа.", kb_nav(back=False), None)
-            except Exception: pass
-        return
-
-    # === 2. ПОЛНОЕ СОПРОВОЖДЕНИЕ (Защита и Трейлинг) ===
-    if "hit_tp1" not in pos: pos["hit_tp1"] = False
-    if "hit_tp2" not in pos: pos["hit_tp2"] = False
-    if "hit_tp3" not in pos: pos["hit_tp3"] = False
-
-    current_sl = pos["sl1"]
-    pos["peak_pnl"] = max(pos.get("peak_pnl", 0.0), pnl)
-
-    # --- А) Защита прибыли до TP1 (Безубыток) ---
-    if not pos["hit_tp1"] and pnl >= 1.5 and current_sl != entry:
-        pos["sl1"] = entry
-        set_user_open_position(user_id, coin, pos)
-        await _send_new(user_id, f"🛡 <b>Защита прибыли: {coin}</b>\n\nЦена ушла в плюс на <b>{pnl:.2f}%</b>.\nСтоп-лосс передвинут в безубыток (Entry). Теперь вы не потеряете деньги.", kb_nav(back=False), None)
-        current_sl = entry
-
-    # --- Б) Динамический трейлинг после TP1 ---
-    # Если TP1 взят, стоп идет за ценой на расстоянии 1.5% (или можно использовать ATR)
-    if pos["hit_tp1"] and not pos["hit_tp3"]:
-        # Для лонга подтягиваем стоп вверх
-        if side == "LONG":
-            new_sl = price * 0.985  # Стоп на 1.5% ниже текущей цены
-            if new_sl > current_sl and new_sl > entry:
-                pos["sl1"] = new_sl
-                set_user_open_position(user_id, coin, pos)
-                current_sl = new_sl
-        # Для шорта подтягиваем стоп вниз
-        elif side == "SHORT":
-            new_sl = price * 1.015  # Стоп на 1.5% выше текущей цены
-            if new_sl < current_sl and new_sl < entry:
-                pos["sl1"] = new_sl
-                set_user_open_position(user_id, coin, pos)
-                current_sl = new_sl
-
-    # --- В) Срочный алерт при резком минусе ---
-    if pnl <= -5.0 and not pos.get("notified_urgent"):
-        text = f"🚨 <b>СРОЧНО! {coin} идет против вас!</b>\nУбыток: <b>{pnl:+.2f}%</b>. Будьте готовы к стопу."
-        await _send_new(user_id, text, kb_nav(back=False), None)
-        pos["notified_urgent"] = True
-        set_user_open_position(user_id, coin, pos)
-
-    # --- Г) Проверка целей и стопов ---
-    tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
-    hit_tp1 = sign * (price - tp1) >= 0
-    hit_tp2 = sign * (price - tp2) >= 0
-    hit_tp3 = sign * (price - tp3) >= 0
-    hit_sl = sign * (price - current_sl) <= 0
-
-    reason, urgency = None, "info"
-
-    if hit_sl:
-        if current_sl >= (entry if side == "LONG" else entry):
-            reason, urgency = f"🛑 Сработал Трейлинг-стоп на уровне <code>{fmt(current_sl)}</code>. Вы зафиксировали профит!", "success"
-        else:
-            reason, urgency = "🛑 Сработал стоп-лосс. Позиция закрыта.", "danger"
-        pos["notified_close"] = True
-
-    elif hit_tp3 and not pos["hit_tp3"]:
-        reason, urgency = "🏆 Достигнут <b>TP3</b>! Забираем весь профит. Сделка полностью закрыта.", "success"
-        pos["hit_tp3"] = True
-        pos["notified_close"] = True
-
-    elif hit_tp2 and not pos["hit_tp2"]:
-        reason, urgency = "✅ Достигнут <b>TP2</b>! Фиксируем 30%. Стоп подтягивается.", "success"
-        pos["hit_tp2"] = True
-        # Можно ужесточить стоп при взятии TP2
-        pos["sl1"] = tp1 if side == "LONG" else tp1 
-        set_user_open_position(user_id, coin, pos)
-
-    elif hit_tp1 and not pos["hit_tp1"]:
-        reason, urgency = "✅ Достигнут <b>TP1</b>! Фиксируем 50%. Стоп переведен в безубыток. Включаю трейлинг.", "success"
-        pos["hit_tp1"] = True
-        pos["sl1"] = entry
-        set_user_open_position(user_id, coin, pos)
-
-    # --- Д) Экстренное закрытие при смене тренда (если дошли до TP2) ---
-    if pos.get("hit_tp2") and not pos.get("notified_close"):
-        try:
-            tf_data, _ = await get_market_data_light(coin, ("1h", "4h"))
-            trend_1h_long = tf_data["1h"]["long_prob"] >= 50
-            trend_4h_long = tf_data["4h"]["long_prob"] >= 50
-            is_global_against = (side == "LONG" and not trend_4h_long) or (side == "SHORT" and trend_4h_long)
-            
-            if is_global_against:
-                reason, urgency = "⚠️ <b>Глобальный тренд развернулся!</b> Бот рекомендует закрыть остаток позиции прямо сейчас, чтобы не отдать прибыль.", "danger"
-                pos["notified_close"] = True
-        except Exception:
-            pass
-
-
-        # --- Е) Предупреждение: пора закрывать (разворот или отдача прибыли) ---
-    if not reason and not pos.get("notified_close") and time.time() - pos.get("last_warn", 0) > 3600 \
-            and get_user_notif_settings(user_id)["signals"]:
-        warn = None
-        try:
-            tfw, _ = await get_market_data_light(coin, ("15m", "1h"))
-            against = lambda k: (100 - tfw[k]["long_prob"]) if side == "LONG" else tfw[k]["long_prob"]
-            if against("1h") >= 60 and against("15m") >= 58:
-                warn = "Рынок разворачивается против вашей сделки (1h и 15m). Цель маловероятна."
-        except Exception:
-            pass
-        if not warn and pos["peak_pnl"] >= 1.0 and pnl <= pos["peak_pnl"] * 0.5 and not pos["hit_tp1"]:
-            warn = f"Вы отдали больше половины прибыли (пик {pos['peak_pnl']:+.1f}%, сейчас {pnl:+.1f}%)."
-        if warn:
-            pos["last_warn"] = time.time()
-            set_user_open_position(user_id, coin, pos)
-            kb = kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-                         [InlineKeyboardButton(text="❌ Закрыл вручную", callback_data=f"pos:close:{coin}")]], back=False)
-            try:
-                await _send_new(user_id, f"⚠️ <b>Рекомендую закрыть: {coin} ({side})</b>\n\n{warn}\n"
-                                         f"Сейчас: <code>{fmt(price)}</code> · PnL <b>{pnl:+.2f}%</b>\n\n"
-                                         f"<i>Лучше выйти вручную, чем ждать стопа.</i>", kb, None)
-            except Exception:
-                pass
-
-
-    # Отправка сообщения, если есть причина
-    if reason:
-        text = (f"{'🏆' if urgency == 'success' else '🛑'} <b>Сопровождение: {coin} ({side})</b>\n\n"
-                f"Вход: <code>{fmt(entry)}</code> | Сейчас: <code>{fmt(price)}</code>\n"
-                f"PnL: <b>{pnl:+.2f}%</b>\n\n{reason}")
-        kb = kb_nav([
-            [InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")],
-            [InlineKeyboardButton(text="❌ Закрыть остаток", callback_data=f"pos:close:{coin}")]
-        ], back=False)
-        try:
-            await _send_new(user_id, text, kb, None)
-        except Exception:
-            pass
-        set_user_open_position(user_id, coin, pos)
+        await safe_answer(cb)
+    except Exception as e:
+        log.info(f"callback {data}: {e}")
+        await safe_answer(cb)
 
 
 # =====================================================================
-# РАССЫЛКА
+# АДМИН-БОТ
 # =====================================================================
-async def broadcast(payload, only_ids=None, notif_type=None):
-    """payload: text, photo(bytes|None), kb, nav, clean"""
-    targets = list(only_ids) if only_ids else list(active_chats)
-    
-    # ФИЛЬТРАЦИЯ: не отправляем сообщение тем, кто отключил этот тип
-    if notif_type:
-        targets = [cid for cid in targets if get_user_notif_settings(cid).get(notif_type, True)]
-        
-    sent = failed = 0
-    dead = []
-    for cid in targets:
-        for _ in range(2):
-            try:
-                if payload.get("clean", True):
-                    await present(cid, payload["text"], payload.get("kb"), payload.get("photo") if vis_len(payload["text"]) <= 1024 else None)
-                    if payload.get("nav") is not None:
-                        nav_reset(cid, *payload["nav"])
-                else:
-                    await _send_new(cid, payload["text"], payload.get("kb"), None)
-                sent += 1
-                break
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
-            except (TelegramForbiddenError, TelegramNotFound):
-                dead.append(cid)
-                break
-            except Exception as e:
-                log.info(f"broadcast {cid}: {e}")
-                failed += 1
-                break
-        await asyncio.sleep(0.04)
-    if dead:
-        for cid in dead:
-            active_chats.discard(cid)
-        await asyncio.to_thread(mark_users_inactive, dead)
-    stats["broadcasts"] += 1
-    state_touch(False)
-    return sent, failed, len(dead)
+def admin_keyboard():
+    B = InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [B(text="📊 Статистика", callback_data="admin:stats"), B(text="👥 Пользователи", callback_data="admin:users")],
+        [B(text="📰 Новость сейчас", callback_data="admin:news_now"),
+         B(text=f"🔔 Новости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="admin:toggle_news")],
+        [B(text=f"🚨 Сканер: {'ВКЛ' if bot_flags['alerts_enabled'] else 'ВЫКЛ'}", callback_data="admin:toggle_scan"),
+         B(text="🔍 Скан-тест", callback_data="admin:scan_test")],
+        [B(text="🔧 Диагностика", callback_data="admin:diag"), B(text="💾 Бэкап", callback_data="admin:backup")],
+        [B(text="📥 Восстановить", callback_data="admin:restore"), B(text="⏳ Таймеры", callback_data="admin:timers")],
+    ])
 
 
-# =====================================================================
-# БЭКАП ВСЕГО СОСТОЯНИЯ В АДМИН-БОТ
-# =====================================================================
 async def notify_admin(text):
     if not admin_bot:
         return
@@ -3624,7 +3859,7 @@ async def telegram_backup(reason="auto"):
     data = (await asyncio.to_thread(flush_state)).encode("utf-8")
     ok = False
     caption = (f"💾 БЭКАП · юзеров {len(STATE['users'])} · сигналов {len(STATE['signal_history'])} · "
-               f"анализов {len(STATE['analysis_db'])} · {reason} · {datetime.now().strftime('%d.%m %H:%M')}")
+               f"{reason} · {datetime.now().strftime('%d.%m %H:%M')}")
     for aid in ADMIN_IDS:
         try:
             msg = await admin_bot.send_document(aid, BufferedInputFile(data, "bot_state.json"), caption=caption, disable_notification=True)
@@ -3642,7 +3877,7 @@ async def telegram_backup(reason="auto"):
             last_backup_msg[aid] = msg.message_id
             ok = True
         except Exception as e:
-            log.warning(f"Бэкап админу {aid} не отправлен: {e} (откройте админ-бота и нажмите /start)")
+            log.warning(f"Бэкап админу {aid} не отправлен: {e}")
     if ok:
         backup_dirty, last_backup_ts = False, time.time()
     return ok
@@ -3680,923 +3915,6 @@ async def backup_loop():
         await asyncio.sleep(30)
 
 
-# =====================================================================
-# КЛАВИАТУРЫ
-# =====================================================================
-def signals_for(uid, category="Все"):
-    items = get_active_signals()
-    if category == "Все":
-        mode = _users().get(str(uid), {}).get("trade_mode", "balanced")
-        return [x for x in items if x.get("type") in MODE_TYPES.get(mode, MODE_TYPES["balanced"])]
-    if category.startswith("mode:"):
-        return [x for x in items if x.get("type") in MODE_TYPES.get(category[5:], ())]
-    return [x for x in items if x.get("type") == category]
-
-
-def get_main_keyboard(uid=None):
-    B = InlineKeyboardButton
-    n_sig = len(signals_for(uid)) if uid else len(get_active_signals())
-    n_fav = len(get_user_saved_signals(uid)) if uid else 0
-    n_pos = len(get_user_open_positions(uid)) if uid else 0
-    cnt = lambda n: f" ({n})" if n else ""
-    rows = []
-    if WEBAPP_URL:
-        rows.append([B(text="🚀  Открыть IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL))])
-    rows += [
-        [B(text="📰  Новости", callback_data="news_menu"), B(text="🧐  Графики", callback_data="interesting_menu")],
-        [B(text=f"🔥  Сигналы{cnt(n_sig)}", callback_data="last_signals"), B(text="📊  Статистика", callback_data="global_stats")],
-        [B(text=f"⭐  Избранное{cnt(n_fav)}", callback_data="sig:menu"), B(text=f"💼  Портфель{cnt(n_pos)}", callback_data="portfolio")],
-        [B(text="⚙️ Настройки", callback_data="settings_menu"), B(text="📥  Экспорт CSV", callback_data="export_csv")],
-        [B(text="🔍  Поиск монеты", callback_data="search")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def signals_overview(uid=None):
-    cnt = {t: len(signals_for(uid, t)) for t in ("Краткосрочный", "Среднесрочный", "Долгосрочный")}
-    text = f"🔥 <b>Актуальные сигналы</b>\n\n📊 <b>Кратко о рынке:</b>\n{html.escape(shorten(market_bias.get('impact', 'Нейтральный фон'), 500))}\n\nВыберите категорию:"
-    rows = [
-        [InlineKeyboardButton(text=f"📋 Все сигналы ({len(signals_for(uid))})", callback_data="sig_list:Все")],
-        [InlineKeyboardButton(text=f"⚡ Краткосрочные ({cnt['Краткосрочный']})", callback_data="sig_list:Краткосрочный")],
-        [InlineKeyboardButton(text=f"⏳ Среднесрочные ({cnt['Среднесрочный']})", callback_data="sig_list:Среднесрочный")],
-        [InlineKeyboardButton(text=f"🛡 Долгосрочные ({cnt['Долгосрочный']})", callback_data="sig_list:Долгосрочный")],
-        [InlineKeyboardButton(text="⚙️ По типу торговли", callback_data="sig_modes")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="last_signals")],
-    ]
-    return text, kb_nav(rows)
-
-
-def screen_sig_list(uid, category):
-    active = signals_for(uid, category)
-    title = {"Все": "Все сигналы (по вашему режиму)"}.get(category) or (
-        f"Режим: {MODE_NAMES.get(category[5:], category[5:])}" if category.startswith("mode:") else f"Сигналы: {category}")
-    if not active:
-        return f"📋 <b>{title}</b>\n\n<i>Сейчас сигналов в этой категории нет.</i>", kb_nav()
-    rows = []
-    for x in active[:20]:
-        c_type = {"Краткосрочный": "⚡", "Среднесрочный": "⏳"}.get(x.get("type"), "🛡")
-        rows.append([InlineKeyboardButton(text=f"{'🟢' if x['side'] == 'LONG' else '🔴'} {x['coin']} · {c_type} {x.get('strength', 0)}%",
-                                          callback_data=f"c:{x['coin']}")])
-    return f"📋 <b>{title}</b> ({len(active)})\n\nВыберите монету:", kb_nav(rows)
-
-
-
-
-def coin_grid(coins, cb_prefix, page, per=8, page_cb="search_page"):
-    B = InlineKeyboardButton
-    chunk = coins[page * per:(page + 1) * per]
-    rows = []
-    for i in range(0, len(chunk), 2):
-        rows.append([B(text=f"• {c}", callback_data=f"{cb_prefix}{c}") for c in chunk[i:i + 2]])
-    total = (len(coins) + per - 1) // per
-    nav = []
-    if page > 0:
-        nav.append(B(text="⬅", callback_data=f"{page_cb}:{page - 1}"))
-    nav.append(B(text=f"{page + 1}/{total}", callback_data="ignore"))
-    if page < total - 1:
-        nav.append(B(text="➡", callback_data=f"{page_cb}:{page + 1}"))
-    return rows + [nav]
-
-
-def coin_keyboard(coin, view="main"):
-    B = InlineKeyboardButton
-    if view == "main":
-        rows = [[B(text="🔄 Обновить", callback_data=f"r:{coin}"), B(text="💾 Сохранить", callback_data=f"sig:quick_save:{coin}")],
-                [B(text="📋 Детали", callback_data=f"view:details:{coin}")],
-                [B(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")],
-                [B(text="🗑 Скрыть сообщение", callback_data="del_msg")]] # Добавили кнопку скрытия
-    else:
-        rows = [[B(text="⬅ К сигналу", callback_data=f"view:main:{coin}")]]
-    return kb_nav(rows)
-
-
-def fav_keyboard(uid):
-    B = InlineKeyboardButton
-    saved = get_user_saved_signals(uid)
-    rows, row = [], []
-    for s in saved:
-        icon = {"in_trade": "📈", "expired": "⌛"}.get(s.get("status"), "⭐")
-        row.append(B(text=f"{icon} {s['coin']}", callback_data=f"sig:view:{s['coin']}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([B(text="➕ Добавить новый", callback_data="sig:save_new")])
-    if saved:
-        rows.append([B(text="🗑 Удалить", callback_data="sig:del_menu")])
-    return kb_nav(rows)
-
-
-def fav_view_keyboard(uid, coin):
-    B = InlineKeyboardButton
-    rows = [[B(text="🔄 Обновить анализ", callback_data=f"c:{coin}")]]
-    if get_open_position(uid, coin):
-        rows += [[B(text="📈 Статус позиции", callback_data=f"pos:status:{coin}")],
-                 [B(text="❌ Закрыл сделку", callback_data=f"pos:close:{coin}")]]
-    else:
-        rows.append([B(text="✅ Вошёл в сделку", callback_data=f"pos:enter:{coin}")])
-    return kb_nav(rows)
-
-
-def admin_keyboard():
-    B = InlineKeyboardButton
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [B(text="📊 Статистика", callback_data="admin:stats"), B(text="👥 Пользователи", callback_data="admin:users")],
-        [B(text="📰 Новость сейчас", callback_data="admin:news_now"),
-         B(text=f"🔔 Новости: {'🟢 ВКЛ' if bot_flags['news_enabled'] else '🔴 ВЫКЛ'}", callback_data="admin:toggle_news")],
-        [B(text=f"🚨 Сканер: {'🟢 ВКЛ' if bot_flags['alerts_enabled'] else '🔴 ВЫКЛ'}", callback_data="admin:toggle_scan"),
-         B(text="🔍 Скан-тест", callback_data="admin:scan_test")],
-        [B(text="⚡ Рассылка сигналов", callback_data="admin:broadcast_now")],
-        [B(text="🔧 Диагностика", callback_data="admin:diag"), B(text="💾 Бэкап", callback_data="admin:backup")],
-        [B(text="📥 Восстановить", callback_data="admin:restore"), B(text="⏳ Таймеры", callback_data="admin:timers")],
-        [B(text="📜 CSV сигналов", callback_data="admin:csv")],
-    ])
-
-
-# =====================================================================
-# ЭКРАНЫ
-# =====================================================================
-WELCOME = ("👋 <b>Привет! Добро пожаловать в IXCLY PRO!</b>\n\nЯ твой персональный крипто-помощник.\n\n"
-           "📊 <b>Умный анализ</b>: 20+ индикаторов, свечи, 4 таймфрейма и бэктест.\n"
-           "🔥 <b>Готовые сигналы</b>: только сетапы, прошедшие все фильтры.\n"
-           "💼 <b>Портфель</b>: свой депозит и риск на сделку.\n"
-           "📥 <b>CSV</b>: выгрузка истории сигналов.\n\n"
-           "⚠ <i>Криптовалюта — это рискованно!</i>\n\n👇 Выбери раздел:")
-
-
-async def screen_coin(chat_id, uid, coin, edit_msg, force):
-    if uid in busy_users:
-        return
-    busy_users.add(uid)
-    try:
-        res = None if force else get_user_res(uid, coin)
-        if res is None:
-            await show_loading(chat_id, edit_msg, f"⏳ Анализирую <b>{html.escape(coin)}</b>: индикаторы, свечи, бэктест…")
-            res, err = await analyze_coin(coin, uid=uid, force=force)
-            if err:
-                return await present(chat_id, err, kb_nav())
-            remember_res(uid, coin, res)
-        kb = coin_keyboard(coin) if not res.get("price_only") else kb_nav()
-        await present(chat_id, render_caption(res, uid), kb, photo=res.get("img"), edit_msg=edit_msg)
-    finally:
-        busy_users.discard(uid)
-
-
-async def screen_news(chat_id, uid, edit_msg):
-    await show_loading(chat_id, edit_msg, "⏳ Анализирую последние новости…")
-    try:
-        text = await get_news_batch_text()
-    except Exception as e:
-        log.error(f"Новости: {e}")
-        text = "📭 Не удалось загрузить новости (ошибка сети или API)."
-    kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]])
-    await present(chat_id, text, kb, edit_msg=edit_msg)
-
-
-async def screen_interesting(chat_id, uid, edit_msg):
-    try:
-        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
-        movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
-        gain = sorted([x for x in movers if float(x["priceChangePercent"]) > 0], key=lambda x: float(x["priceChangePercent"]), reverse=True)[:20]
-        lose = sorted([x for x in movers if float(x["priceChangePercent"]) < 0], key=lambda x: float(x["priceChangePercent"]))[:20]
-        rg = sorted(random.sample(gain, min(5, len(gain))), key=lambda x: -float(x["priceChangePercent"]))
-        rl = sorted(random.sample(lose, min(5, len(lose))), key=lambda x: float(x["priceChangePercent"]))
-        
-        text = "🧐 <b>Интересные за 24ч</b>\n\n🟢 <b>Топ роста:</b>\n"
-        text += "".join(f"<code>{x['symbol'][:-4]}</code> +{float(x['priceChangePercent']):.1f}%\n" for x in rg)
-        text += "\n🔴 <b>Топ падения:</b>\n"
-        text += "".join(f"<code>{x['symbol'][:-4]}</code> {float(x['priceChangePercent']):.1f}%\n" for x in rl)
-        
-        # Добавляем время обновления, чтобы было видно, что данные новые
-        now_msk = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M:%S')
-        text += f"\n\n🕒 <i>Обновлено: {now_msk} МСК</i>"
-        
-        kb = kb_nav([[InlineKeyboardButton(text="🔄 Обновить", callback_data="interesting_menu")]])
-        
-    except Exception as e:
-        log.info(f"interesting: {e}")
-        text = "⚠ Биржа временно не отдаёт данные. Попробуйте позже."
-        kb = kb_nav([[InlineKeyboardButton(text="🔄 Обновить", callback_data="interesting_menu")]])
-        
-    await present(chat_id, text, kb, edit_msg=edit_msg)
-def screen_sig_modes():
-    text = "⚙️ <b>Сигналы по типу торговли</b>\n\nВыберите режим для отображения сигналов с соответствующей минимальной уверенностью:"
-    rows = [
-        [InlineKeyboardButton(text="🟢 Агрессивный (от 60%)", callback_data="sig_list:mode:aggressive")],
-        [InlineKeyboardButton(text="🟡 Сбалансированный (от 66%)", callback_data="sig_list:mode:balanced")],
-        [InlineKeyboardButton(text="🔴 Консервативный (от 80%)", callback_data="sig_list:mode:conservative")]
-    ]
-    return text, kb_nav(rows)
-
-def screen_gstats():
-    hist = load_signal_history()
-    uniq, seen = [], set()
-    for x in sorted(hist, key=lambda k: k.get("ts", 0), reverse=True):
-        if f"{x['coin']}_{x['side']}" not in seen:
-            seen.add(f"{x['coin']}_{x['side']}")
-            uniq.append(x)
-            
-    active_cnt = len(get_active_signals())
-    cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("win", "loss", "missed", "expired")}
-    
-    closed = cnt["win"] + cnt["loss"]
-    wr = cnt["win"] / closed * 100 if closed else 0.0
-    exp_r = (cnt["win"] * 1.5 - cnt["loss"]) / closed if closed else 0.0
-    text = (f"📊 <b>Статистика сигналов</b>\n\n📈 Всего уникальных: <b>{len(uniq)}</b>\n🎯 Винрейт: <b>{wr:.1f}%</b>"
-            f" · ср. результат <b>{exp_r:+.2f}R</b>\n✅ Побед: <b>{cnt['win']}</b> | ❌ Убытков: <b>{cnt['loss']}</b>\n"
-            f"🚫 Упущено: <b>{cnt['missed']}</b>\n\n<i>* Считается по свечам: вход лимиткой, TP1 засчитывается как победа "
-            f"(после TP1 стоп переносится в безубыток).</i>")
-    B = InlineKeyboardButton
-    rows = [[B(text=f"⏳ В работе ({active_cnt})", callback_data="stats_list:active:0"),
-             B(text=f"✅ Успешные ({cnt['win']})", callback_data="stats_list:win:0")],
-            [B(text=f"🚫 Упущено ({cnt['missed']})", callback_data="stats_list:missed:0"),
-             B(text=f"❌ Убыточные ({cnt['loss']})", callback_data="stats_list:loss:0")],
-            [B(text=f"⌛ По времени ({cnt['expired']})", callback_data="stats_list:expired:0")]]
-    return text, kb_nav(rows)
-
-
-def screen_stats_list(list_type, page, per=10):
-    titles = {"active": "⏳ В работе", "win": "✅ Успешные", "missed": "🚫 Упущенные", "loss": "❌ Убыточные", "expired": "⌛ По времени"}
-    
-    # ИСПРАВЛЕНИЕ: Для "В работе" берем только реально актуальные сигналы (до 12 часов)
-    if list_type == "active":
-        items = get_active_signals()
-    else:
-        want = (list_type,)
-        items, seen = [], set()
-        for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
-            if x.get("status") in want and f"{x['coin']}_{x['side']}" not in seen:
-                seen.add(f"{x['coin']}_{x['side']}")
-                items.append(x)
-                
-    pages = (len(items) + per - 1) // per or 1
-    page = max(0, min(page, pages - 1))
-    B = InlineKeyboardButton
-    rows = [[B(text=f"{'🟢' if x['side'] == 'LONG' else '🔴'} {x['coin']}", callback_data=f"c:{x['coin']}")] for x in items[page * per:(page + 1) * per]]
-    nav = []
-    if page > 0:
-        nav.append(B(text="⬅", callback_data=f"stats_list:{list_type}:{page - 1}"))
-    nav.append(B(text=f"{page + 1}/{pages}", callback_data="ignore"))
-    if page < pages - 1:
-        nav.append(B(text="➡", callback_data=f"stats_list:{list_type}:{page + 1}"))
-    return f"{titles.get(list_type, '')}\nНайдено: <b>{len(items)}</b>", kb_nav(rows + [nav])
-
-
-def screen_sig_list(uid, category):
-    active = get_active_signals()
-    
-    if category == "Все":
-        # Фильтруем "Все сигналы" под режим торговли пользователя
-        u = _users().get(str(uid), {})
-        mode = u.get("trade_mode", "balanced")
-        if mode == "aggressive":
-            active = [x for x in active if x.get("type") in ("Краткосрочный", "Среднесрочный")]
-        elif mode == "balanced":
-            active = [x for x in active if x.get("type") in ("Среднесрочный", "Долгосрочный")]
-        elif mode == "conservative":
-            active = [x for x in active if x.get("type") == "Долгосрочный"]
-        title = f"Все сигналы (режим {mode})"
-        
-    elif category.startswith("mode:"):
-        # Фильтруем по конкретному выбранному режиму (по типу сигнала)
-        mode = category.split(":")[1]
-        if mode == "aggressive":
-            active = [x for x in active if x.get("type") in ("Краткосрочный", "Среднесрочный")]
-            title = "Режим: 🟢 Агрессивный"
-        elif mode == "balanced":
-            active = [x for x in active if x.get("type") in ("Среднесрочный", "Долгосрочный")]
-            title = "Режим: 🟡 Сбалансированный"
-        elif mode == "conservative":
-            active = [x for x in active if x.get("type") == "Долгосрочный"]
-            title = "Режим: 🔴 Консервативный"
-        else:
-            active = []
-            title = f"Режим: {mode}"
-            
-    elif category != "Все":
-        # Фильтруем по типу сигнала (Краткосрочный, Среднесрочный и т.д.)
-        active = [x for x in active if x.get("type") == category]
-        title = f"Сигналы: {category}"
-    else:
-        title = "Сигналы: Все"
-    
-    if not active:
-        return f"📋 <b>{title}</b>\n\n<i>Сейчас активных сигналов в этой категории нет.</i>", kb_nav()
-        
-    rows = []
-    for x in active[:20]: # Показываем до 20 монет
-        icon = "🟢" if x['side'] == 'LONG' else "🔴"
-        c_type = "⚡" if x['type'] == "Краткосрочный" else "⏳" if x['type'] == "Среднесрочный" else "🛡"
-        rows.append([InlineKeyboardButton(
-            text=f"{icon} {x['coin']} · {c_type} {x.get('strength', 0)}%", 
-            callback_data=f"c:{x['coin']}"
-        )])
-        
-    return f"📋 <b>{title}</b>\n\nВыберите монету:", kb_nav(rows)
-
-
-def get_portfolio_keyboard():
-    B = InlineKeyboardButton
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [B(text="💰  Изменить депозит",   callback_data="set_deposit")],
-        [B(text="⚙️  Режим торговли",     callback_data="set_mode")],
-        [B(text="🤖  Автоторговля",       callback_data="autotrade_menu")],
-        [B(text="📜  История моих входов", callback_data="trade_history")],  # <-- Новая кнопка
-        [B(text="⬅  Назад в меню",        callback_data="menu")],
-    ])
-
-def screen_portfolio(uid):
-    s = get_user_risk_settings(uid)
-    u = _users().get(str(uid), {})
-    mode = u.get("trade_mode", "balanced")
-    mode_txt = {"aggressive": "🟢 Агрессивный",
-                "balanced":  "🟡 Сбалансированный",
-                "conservative": "🔴 Консервативный"}.get(mode, "🟡 Сбалансированный")
-    auto = "🟢 ВКЛ" if u.get("auto_trade_enabled") else "🔴 ВЫКЛ"
-    exch = u.get("exchange", "")
-    keys = f"✅ {exch.title()}" if exch and u.get(f"{exch}_api") else "❌ нет"
-    text = (f"💼 <b>Ваш портфель</b>\n\n"
-            f"💰 Депозит: <b>${s['deposit']:.2f}</b>\n"
-            f"📉 Риск на сделку: <b>{s['risk_pct']}%</b>\n"
-            f"⚙️ Режим: <b>{mode_txt}</b>\n"
-            f"🤖 Автоторговля: <b>{auto}</b> · API: {keys}\n"
-            f"⚠ Открытый риск: <b>{calculate_portfolio_risk(uid):.1f}%</b> "
-            f"(макс {s['max_open_risk']}%)\n\n"
-            f"<i>Выберите, что изменить:</i>")
-    return text, get_portfolio_keyboard()
-
-def screen_settings(uid):
-    s = get_user_notif_settings(uid)
-    B = InlineKeyboardButton
-    rows = [
-        [B(text=f"Сигналы (сетапы): {'🟢 ВКЛ' if s['signals'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:signals")],
-        [B(text=f"Новости: {'🟢 ВКЛ' if s['news'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:news")],
-        [B(text=f"Аномалии объема: {'🟢 ВКЛ' if s['anomalies'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:anomalies")],
-        [B(text=f"Отчеты по 20 мин: {'🟢 ВКЛ' if s['pos_updates'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:pos_updates")],
-        [B(text=f"Утренний брифинг: {'🟢 ВКЛ' if s['briefing'] else '🔴 ВЫКЛ'}", callback_data="toggle_setting:briefing")],
-    ]
-    text = ("⚙️ <b>Настройки уведомлений</b>\n\n"
-            "Вы можете отключить типы сообщений, которые вам не нужны. Бот перестанет присылать их лично вам.\n\n"
-            "🟢 <i>Включено</i> | 🔴 <i>Выключено</i>")
-    return text, kb_nav(rows)
-
-def screen_trade_history(uid):
-    u = _users().get(str(uid), {})
-    th = u.get("trade_history", [])
-    if not th:
-        return "📜 <b>История моих входов</b>\n\n<i>Вы еще не входили в сделки.</i>", kb_nav()
-
-    text = "📜 <b>История моих входов (последние 50)</b>\n\n"
-    # Показываем последние 15 сделок, чтобы не превысить лимит сообщения
-    for t in reversed(th[-15:]):
-        dt = datetime.fromtimestamp(t["entered_at"]).strftime("%d.%m %H:%M")
-        icon = "🟢" if t["side"] == "LONG" else "🔴"
-        text += f"{icon} <b>{t['coin']}</b> ({dt})\n"
-        text += f"Вход: <code>{fmt(t['entry'])}</code> | TP1: <code>{fmt(t['tp1'])}</code> | SL: <code>{fmt(t['sl1'])}</code>\n\n"
-        
-    return trim_html(text, 4000), kb_nav()
-
-async def _show_exchange_menu(chat_id, msg):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Binance", callback_data="at:ex:binance")],
-        [InlineKeyboardButton(text="🟡 Bybit",   callback_data="at:ex:bybit")],
-        [InlineKeyboardButton(text="🔵 BingX",   callback_data="at:ex:bingx")],
-        [InlineKeyboardButton(text="⬅ Назад в портфель", callback_data="portfolio")],
-    ])
-    await present(chat_id,
-        "🤖 <b>Автоторговля</b>\n\n"
-        "Здесь вы подключаете биржу — бот будет открывать сделки автоматически по сигналам.\n\n"
-        "🔐 <b>Зачем нужен API-ключ?</b>\n"
-        "Ключ даёт боту право выставлять ордера от вашего имени. Мы <b>НЕ запрашиваем право вывода</b> — "
-        "только торговлю. Ключи шифруются (Fernet) и хранятся на сервере в зашифрованном виде.\n\n"
-        "🛡 <b>Безопасность:</b>\n"
-        "• В бирже отключите «Разрешить вывод» (Withdraw)\n"
-        "• Включите белый список IP\n"
-        "• Используйте отдельный подключ с малым балансом\n"
-        "• Сообщение с ключом будет удалено сразу после сохранения\n\n"
-        "Выберите биржу:",
-        kb, edit_msg=msg)
-
-def _exchange_instructions(exchange):
-    if exchange == "binance":
-        return (
-            "🟢 <b>Binance — как получить API-ключ</b>\n\n"
-            "1️⃣ Войдите на <b>binance.com</b> → Профиль → <b>API Management</b>\n"
-            "2️⃣ <b>Create API</b> → «System generated»\n"
-            "3️⃣ Пройдите верификацию (SMS / Google Authenticator)\n"
-            "4️⃣ В настройках ключа:\n"
-            "   • ✅ <b>Enable Futures</b>\n"
-            "   • ❌ <b>Enable Withdrawals — ВЫКЛЮЧИТЕ</b>\n"
-            "   • ✅ Restrict access to trusted IPs (IP сервера)\n"
-            "5️⃣ Скопируйте <b>API Key</b> и <b>Secret Key</b>\n\n"
-            "📩 Отправьте одним сообщением в формате:\n"
-            "<code>API_KEY,SECRET_KEY</code>\n\n"
-            "🛡 Сообщение с ключом будет удалено автоматически."
-        )
-    if exchange == "bybit":
-        return (
-            "🟡 <b>Bybit — как получить API-ключ</b>\n\n"
-            "1️⃣ Войдите на <b>bybit.com</b> → Профиль → <b>API</b>\n"
-            "2️⃣ <b>Create New Key</b> → «System-generated API Keys»\n"
-            "3️⃣ Тип: <b>Unified Trading</b> (Derivatives)\n"
-            "4️⃣ В правах:\n"
-            "   • ✅ <b>Read-Write → Contract Trading</b>\n"
-            "   • ❌ <b>Withdraw — ВЫКЛЮЧИТЕ</b>\n"
-            "   • ✅ Только ваш IP (IP-whitelist)\n"
-            "5️⃣ Скопируйте <b>API Key</b> и <b>Secret</b>\n\n"
-            "📩 Отправьте одним сообщением в формате:\n"
-            "<code>API_KEY,SECRET</code>\n\n"
-            "🛡 Сообщение с ключом будет удалено автоматически."
-        )
-    return (
-        "🔵 <b>BingX — как получить API-ключ</b>\n\n"
-        "1️⃣ Войдите на <b>bingx.com</b> → Профиль → <b>API Management</b>\n"
-        "2️⃣ <b>Create API</b> → <b>Perpetual Futures</b>\n"
-        "3️⃣ В правах:\n"
-        "   • ✅ <b>Read + Trade</b>\n"
-        "   • ❌ <b>Withdraw — ВЫКЛЮЧИТЕ</b>\n"
-        "4️⃣ Сохраните <b>API Key</b> и <b>Secret Key</b>\n\n"
-        "📩 Отправьте одним сообщением в формате:\n"
-        "<code>API_KEY,SECRET_KEY</code>\n\n"
-        "🛡 Сообщение с ключом будет удалено автоматически."
-    )
-
-
-async def show_screen(chat_id, uid, screen, edit_msg=None, force=False):
-    kind = screen[0]
-    if kind == "menu":
-        return await present(chat_id, WELCOME, get_main_keyboard(), edit_msg=edit_msg)
-    if kind == "search":
-        kb = InlineKeyboardMarkup(inline_keyboard=coin_grid(POPULAR_COINS, "c:", screen[1]) + [nav_row()])
-        return await present(chat_id, "🔍 <b>Выбери монету</b>\n<i>или просто напиши тикер сообщением:</i>", kb, edit_msg=edit_msg)
-    if kind == "coin":
-        return await screen_coin(chat_id, uid, screen[1], edit_msg, force)
-    if kind == "signals":
-        text, kb = signals_overview()
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "sig_list":
-        text, kb = screen_sig_list(uid, screen[1]) # Добавили uid
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "sig_modes":
-        text, kb = screen_sig_modes()
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "news":
-        return await screen_news(chat_id, uid, edit_msg)
-    if kind == "interesting":
-        return await screen_interesting(chat_id, uid, edit_msg)
-    if kind == "gstats":
-        text, kb = screen_gstats()
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "stats_list":
-        text, kb = screen_stats_list(screen[1], screen[2])
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "fav":
-        return await present(chat_id, "⭐ <b>Избранное</b>", fav_keyboard(uid), edit_msg=edit_msg)
-    if kind == "fav_save":
-        kb = InlineKeyboardMarkup(inline_keyboard=coin_grid(POPULAR_COINS, "sig:do_save:", screen[1], page_cb="sig:save_page") + [nav_row()])
-        return await present(chat_id, "➕ <b>Какую монету сохранить?</b>", kb, edit_msg=edit_msg)
-    if kind == "fav_del":
-        rows = [[InlineKeyboardButton(text=f"❌ {s['coin']}", callback_data=f"sig:del:{s['coin']}")] for s in get_user_saved_signals(uid)]
-        return await present(chat_id, "🗑 <b>Что удалить?</b>", kb_nav(rows), edit_msg=edit_msg)
-    if kind == "fav_view":
-        item = next((s for s in get_user_saved_signals(uid) if s["coin"] == screen[1]), None)
-        text = item["text"] if item else "Сигнал не найден."
-        status = {"in_trade": "\n\n📈 <i>Цена достигла входа: сделка в работе.</i>", "expired": "\n\n⌛ <i>Срок идеи истёк.</i>"}.get((item or {}).get("status"), "")
-        return await present(chat_id, text + status, fav_view_keyboard(uid, screen[1]), edit_msg=edit_msg)
-    if kind == "portfolio":
-        text, kb = screen_portfolio(uid)
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "settings":
-        text, kb = screen_settings(uid)
-        return await present(chat_id, text, kb, edit_msg=edit_msg)
-    if kind == "pos_status":
-        return await present(chat_id, await position_status_text(uid, screen[1]), kb_nav(), edit_msg=edit_msg)
-
-
-async def position_status_text(uid, coin):
-    pos = get_open_position(uid, coin)
-    if not pos:
-        return "Позиция не найдена."
-    price = await get_simple_price(coin)
-    if not price:
-        return "Не удалось получить цену."
-        
-    entry = pos["entry_price"]
-    side = pos["side"]
-
-    if pos.get("waiting_entry"):
-        dist = abs(price - entry) / entry * 100
-        return (f"⏳ <b>Ожидание входа: {coin}</b>\n\n"
-                f"Направление: <b>{side}</b>\n"
-                f"Целевой лимит: <code>{fmt(entry)}</code>\n"
-                f"Цена сейчас: <code>{fmt(price)}</code>\n"
-                f"Расстояние: <b>{dist:.2f}%</b>\n\n"
-                f"<i>Сделка еще не открыта. Бот ждет касания цены входа.</i>")
-
-    pnl = (price - entry) / entry * 100 * (1 if side == "LONG" else -1)
-    
-    t1 = "✅ " if pos.get("hit_tp1") else "⏳ "
-    t2 = "✅ " if pos.get("hit_tp2") else "⏳ "
-    t3 = "✅ " if pos.get("hit_tp3") else "⏳ "
-    
-    current_sl = pos["sl1"]
-    sl_note = ""
-    if current_sl == entry:
-        sl_note = " (в безубытке)"
-    elif current_sl == pos["tp1"]:
-        sl_note = " (на TP1)"
-        
-    return (f"📈 <b>Статус {coin}</b>\n\n"
-            f"Направление: <b>{side}</b>\n"
-            f"Вход: <code>{fmt(entry)}</code>\n"
-            f"Сейчас: <code>{fmt(price)}</code>\n"
-            f"PnL: <b>{pnl:+.2f}%</b>\n\n"
-            f"<b>Цели:</b>\n"
-            f"{t1} TP1: <code>{fmt(pos['tp1'])}</code>\n"
-            f"{t2} TP2: <code>{fmt(pos['tp2'])}</code>\n"
-            f"{t3} TP3: <code>{fmt(pos['tp3'])}</code>\n\n"
-            f"🛡 Текущий стоп: <code>{fmt(current_sl)}</code>{sl_note}")
-
-
-# =====================================================================
-# ХЕНДЛЕРЫ ОСНОВНОГО БОТА
-# =====================================================================
-@dp.message(PortfolioStates.waiting_for_deposit)
-async def process_deposit(m: types.Message, state: FSMContext):
-    try:
-        amount = float((m.text or "").replace(",", ".").strip())
-        if amount <= 0:
-            raise ValueError
-    except Exception:
-        await m.answer("❌ Введите положительное число, например <code>1000</code> или <code>500.50</code>",
-                       parse_mode="HTML")
-        return
-    uid = m.from_user.id
-    set_user_field(uid, deposit=amount)
-    await safe_delete(m)
-    await state.clear()
-    text, kb = screen_portfolio(uid)
-    await present(m.chat.id, f"✅ Депозит обновлён: <b>${amount:.2f}</b>\n\n{text}", kb)
-
-@dp.message(AutotradeStates.waiting_for_api_key)
-async def process_api_key(m: types.Message, state: FSMContext):
-    data = await state.get_data()
-    exchange = data.get("exchange", "binance")
-    parts = [p.strip() for p in (m.text or "").split(",")]
-    if len(parts) < 2 or len(parts[0]) < 10 or len(parts[1]) < 10:
-        await m.answer("❌ Неверный формат. Отправьте так:\n<code>API_KEY,SECRET_KEY</code>\n\n"
-                       "Или нажмите «⬅ Назад» в меню выше.", parse_mode="HTML")
-        return
-    api_key, secret = parts[0], parts[1]
-    uid = m.from_user.id
-    await safe_delete(m)
-    ok = save_user_api_keys(uid, exchange, api_key, secret)
-    await state.clear()
-    text, kb = screen_portfolio(uid)
-    if ok:
-        set_user_field(uid, auto_trade_enabled=True)
-        await present(m.chat.id,
-                      f"✅ <b>Ключи {exchange.title()} сохранены и зашифрованы.</b>\n"
-                      f"Автоторговля включена — бот будет выставлять лимитные ордера "
-                      f"и стоп-лоссы по новым сигналам.\n\n{text}", kb)
-    else:
-        await present(m.chat.id, "❌ Шифрование недоступно, ключи не сохранены.\n\n" + text, kb)
-
-@dp.message(Command("start", "menu"))
-async def cmd_start(m: types.Message, state: FSMContext):
-    await state.clear()
-    uid = m.from_user.id
-    await asyncio.to_thread(save_user_data, uid, m.from_user.username, m.from_user.first_name)
-    active_chats.add(m.chat.id)
-    await purge_chat(m.chat.id, m.message_id)
-    nav_reset(uid)
-    await present(m.chat.id, WELCOME, get_main_keyboard())
-
-
-@dp.message(Command("set_risk"))
-async def cmd_set_risk(m: types.Message):
-    uid = m.from_user.id
-    await safe_delete(m)
-    try:
-        dep, rsk = float((m.text.split()[1]).replace(",", ".")), float((m.text.split()[2]).replace(",", "."))
-        if dep <= 0 or not 0.1 <= rsk <= 10:
-            raise ValueError
-        set_user_field(uid, deposit=dep, risk_pct=rsk)
-        text = f"✅ Настройки обновлены. Депозит: ${dep:g}, риск: {rsk:g}%."
-    except Exception:
-        text = "❌ Формат: <code>/set_risk 1000 1.5</code> (депозит > 0, риск от 0.1 до 10%)"
-    await present(m.chat.id, text, kb_nav())
-
-
-@dp.message(Command("api"))
-async def cmd_api(m: types.Message):
-    await safe_delete(m)
-    await present(m.chat.id, "🔐 Отправьте API Key и Secret Binance Futures одним сообщением:\n<code>api_key,secret_key</code>\n\n"
-                  "⚠ Права: только чтение и торговля, <b>БЕЗ вывода средств</b>. Включите IP-whitelist. Сообщение с ключами я сразу удалю.", kb_nav())
-
-
-@dp.message(Command("autotrade"))
-async def cmd_autotrade(m: types.Message):
-    await safe_delete(m)
-    await present(m.chat.id, "⛔ <b>Автоторговля временно недоступна.</b>\n\nПриносим извинения за неудобства. Вы можете продолжать пользоваться ручными сигналами и анализом.", kb_nav())
-
-
-@dp.message(Command("webhook"))
-async def cmd_webhook(m: types.Message):
-    await safe_delete(m)
-    parts = m.text.split(maxsplit=1)
-    if len(parts) == 2 and parts[1].startswith("http"):
-        set_user_field(m.from_user.id, webhook_url=parts[1].strip())
-        text = "✅ Вебхук установлен: новые сигналы будут дублироваться POST-запросом."
-    else:
-        text = "❌ Формат: <code>/webhook https://your-server.com/api/signal</code>"
-    await present(m.chat.id, text, kb_nav())
-
-
-@dp.message(F.text.regexp(r"^[A-Za-z0-9]{2,12}$"))
-async def msg_ticker(m: types.Message):
-    uid, coin = m.from_user.id, normalize_ticker(m.text)
-    await safe_delete(m)
-    nav_push(uid, ("coin", coin))
-    await show_screen(m.chat.id, uid, ("coin", coin))
-
-
-@dp.callback_query()
-async def on_callback(cb: types.CallbackQuery, state: FSMContext):
-    if not cb.message:
-        return await safe_answer(cb)
-    uid, chat_id, msg, data = cb.from_user.id, cb.message.chat.id, cb.message, cb.data or ""
-    simple = {"news_menu": ("news",), "interesting_menu": ("interesting",), "last_signals": ("signals",), "global_stats": ("gstats",),
-              "sig:menu": ("fav",), "portfolio": ("portfolio",), "search": ("search", 0), "sig:save_new": ("fav_save", 0),
-              "sig:del_menu": ("fav_del",), "settings_menu": ("settings",), "sig_modes": ("sig_modes",)}
-    try:
-        if data == "ignore":
-            return await safe_answer(cb)
-        if data.startswith("toggle_setting:"):
-            key = data.split(":", 1)[1]
-            u = _users().get(str(uid), {})
-            curr = u.get(f"notify_{key}", True)
-            set_user_field(uid, **{f"notify_{key}": not curr})
-            await safe_answer(cb, "✅ Настройка сохранена")
-            text, kb = screen_settings(uid)
-            return await present(chat_id, text, kb, edit_msg=msg)
-        if data == "del_msg":
-            await safe_answer(cb, "Удалено")
-            return await safe_delete(msg)
-        if data == "trade_history":
-            await safe_answer(cb)
-            text, kb = screen_trade_history(uid)
-            return await present(chat_id, text, kb, edit_msg=msg)
-        if data == "set_deposit":
-            await safe_answer(cb)
-            await state.set_state(PortfolioStates.waiting_for_deposit)
-            return await present(chat_id,
-                "💰 <b>Изменение депозита</b>\n\n"
-                "Отправьте сумму вашего депозита в USDT одним сообщением.\n\n"
-                "📝 <b>Пример:</b> <code>1000</code> или <code>500.50</code>\n\n"
-                "После этого бот пересчитает риск на сделку под новую сумму.",
-                kb_nav(back=True), edit_msg=msg)
-            
-            
-        if data == "set_mode":
-            await safe_answer(cb)
-            u = _users().get(str(uid), {})
-            cur = u.get("trade_mode", "balanced")
-            cur_txt = {"aggressive": "🟢 Агрессивный",
-                       "balanced": "🟡 Сбалансированный",
-                       "conservative": "🔴 Консервативный"}.get(cur, "🟡 Сбалансированный")
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🟢 Агрессивный · 60% · много сигналов",    callback_data="mode:aggressive")],
-                [InlineKeyboardButton(text="🟡 Сбалансированный · 66% · среднее",       callback_data="mode:balanced")],
-                [InlineKeyboardButton(text="🔴 Консервативный · 80% · только идеальные", callback_data="mode:conservative")],
-                [InlineKeyboardButton(text="⬅ Назад в портфель",                        callback_data="portfolio")],
-            ])
-            return await present(chat_id,
-                f"⚙️ <b>Режим торговли</b>\n\n"
-                f"Сейчас активен: <b>{cur_txt}</b>\n\n"
-                f"Режим определяет минимальную уверенность модели, чтобы сигнал был отправлен:\n\n"
-                f"🟢 <b>Агрессивный</b> — порог 60%, много сигналов, больше шума\n"
-                f"🟡 <b>Сбалансированный</b> — порог 66%, оптимально\n"
-                f"🔴 <b>Консервативный</b> — порог 80%, только идеальные сетапы\n\n"
-                f"<i>Чем выше порог — тем реже сигналы, но выше их качество.</i>",
-                kb, edit_msg=msg)
-
-        if data.startswith("mode:"):
-            mode = data.split(":", 1)[1]
-            conf_map = {"aggressive": 60, "balanced": 66, "conservative": 80}
-            if mode not in conf_map:
-                return await safe_answer(cb, "Неизвестный режим", True)
-            set_user_field(uid, trade_mode=mode, conf_final=conf_map[mode])
-            await safe_answer(cb, "✅ Режим обновлён")
-            text, kb = screen_portfolio(uid)
-            return await present(chat_id, text, kb, edit_msg=msg)
-
-        if data == "autotrade_menu":
-            await safe_answer(cb, "⛔ Временно недоступно", show_alert=True)
-            await present(chat_id, "⛔ <b>Автоторговля временно недоступна.</b>\n\nПриносим извинения за неудобства. Бот продолжает работать в режиме ручных сигналов и аналитики.", kb_nav(), edit_msg=msg)
-            return
-
-        if data == "autotrade_menu_sel":
-            await safe_answer(cb)
-            return await _show_exchange_menu(chat_id, msg)
-
-        if data == "at:off":
-            set_user_field(uid, auto_trade_enabled=False)
-            await safe_answer(cb, "🔴 Автоторговля выключена")
-            text, kb = screen_portfolio(uid)
-            return await present(chat_id, text, kb, edit_msg=msg)
-
-        if data.startswith("at:ex:"):
-            exchange = data.split(":", 2)[2]
-            if exchange not in ("binance", "bybit", "bingx"):
-                return await safe_answer(cb, "Неизвестная биржа", True)
-            await safe_answer(cb)
-            await state.update_data(exchange=exchange)
-            await state.set_state(AutotradeStates.waiting_for_api_key)
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅ Назад к выбору биржи", callback_data="autotrade_menu_sel")],
-                [InlineKeyboardButton(text="🏠 В портфель",            callback_data="portfolio")],
-            ])
-            return await present(chat_id, _exchange_instructions(exchange), kb, edit_msg=msg)
-        if data == "menu":
-            await state.clear()
-            nav_reset(uid)
-            await safe_answer(cb)
-            return await show_screen(chat_id, uid, ("menu",), msg)
-        if data == "nav:back":
-            await state.clear()
-            await safe_answer(cb)
-            return await show_screen(chat_id, uid, nav_back(uid), msg)
-        if data in simple:
-            await state.clear()
-            await safe_answer(cb, "⏳ Загружаю…" if data == "news_menu" else None)
-            nav_push(uid, simple[data])
-            return await show_screen(chat_id, uid, simple[data], msg)
-        if data.startswith("search_page:") or data.startswith("sig:save_page:"):
-            kind = "search" if data.startswith("search_page:") else "fav_save"
-            screen = (kind, int(data.rsplit(":", 1)[1]))
-            await safe_answer(cb)
-            nav_replace(uid, screen)
-            return await show_screen(chat_id, uid, screen, msg)
-        if data.startswith("sig_list:"):
-            await safe_answer(cb)
-            screen = ("sig_list", data.split(":", 1)[1])
-            nav_push(uid, screen)
-            return await show_screen(chat_id, uid, screen, msg)
-        if data.startswith("stats_list:"):
-            _, t, p = data.split(":")
-            await safe_answer(cb)
-            screen = ("stats_list", t, int(p))
-            nav_replace(uid, screen)
-            return await show_screen(chat_id, uid, screen, msg)
-        if data.startswith("c:"):
-            coin = data.split(":", 1)[1]
-            await safe_answer(cb, "⏳ Анализирую…")
-            nav_push(uid, ("coin", coin))
-            return await show_screen(chat_id, uid, ("coin", coin), msg)
-        if data.startswith("r:"):
-            await safe_answer(cb, "🔄 Пересчитываю…")
-            return await show_screen(chat_id, uid, ("coin", data.split(":", 1)[1]), msg, force=True)
-        if data.startswith("view:"):
-            _, view, coin = data.split(":")
-            res = get_user_res(uid, coin)
-            if not res:
-                return await safe_answer(cb, "Данные устарели, нажмите «Обновить»", True)
-            text = render_details(res) if view == "details" else render_caption(res, uid)
-            await safe_answer(cb)
-            try:
-                if msg.photo:
-                    await bot.edit_message_caption(chat_id=chat_id, message_id=msg.message_id, caption=text, parse_mode="HTML", reply_markup=coin_keyboard(coin, view))
-                else:
-                    await bot.edit_message_text(text, chat_id=chat_id, message_id=msg.message_id, parse_mode="HTML", reply_markup=coin_keyboard(coin, view))
-            except TelegramBadRequest:
-                pass
-            return
-        if data.startswith("sig:view:"):
-            await safe_answer(cb)
-            screen = ("fav_view", data.split(":")[2])
-            nav_push(uid, screen)
-            return await show_screen(chat_id, uid, screen, msg)
-        if data.startswith("sig:do_save:") or data.startswith("sig:quick_save:"):
-            coin = data.split(":")[-1]
-            res = get_user_res(uid, coin)
-            text = render_caption(res, uid) if res and not res.get("price_only") else f"Сигнал {coin}"
-            await asyncio.to_thread(add_user_saved_signal, uid, coin, text, res if res and not res.get("price_only") else None)
-            await safe_answer(cb, f"✅ {coin} сохранён")
-            if data.startswith("sig:do_save:"):
-                nav_reset(uid, ("fav",))
-                await show_screen(chat_id, uid, ("fav",), msg)
-            return
-        if data.startswith("sig:del:"):
-            await asyncio.to_thread(del_user_saved_signal, uid, data.split(":")[2])
-            await safe_answer(cb, "🗑 Удалено")
-            return await show_screen(chat_id, uid, ("fav_del",), msg)
-        if data.startswith("pos:enter:"):
-            coin = data.split(":")[2]
-            res = get_user_res(uid, coin) # ... (твой код получения res)
-            
-            # === ПРОВЕРКА КОРРЕЛЯЦИИ ===
-            open_positions = get_user_open_positions(uid)
-            for op_coin, op_data in open_positions.items():
-                if op_coin == coin: continue
-                if op_data.get("side") == res["side"]:
-                    for group in CORRELATION_GROUPS:
-                        if op_coin in group and coin in group:
-                            await safe_answer(cb, f"⚠️ У вас уже открыт {op_data['side']} по {op_coin}. {coin} сильно коррелирует с ним!", show_alert=True)
-                            return # Блокируем вход
-            # =============================
-            
-            # ... (дальше твой код set_user_open_position)
-                
-            set_user_open_position(uid, coin, {
-                "side": res["side"], 
-                "entry_price": res["entry"], 
-                "created_at": time.time(), # Время выставления ордера
-                "entered_at": time.time(),
-                "tp1": res["tps"][0], 
-                "tp2": res["tps"][1], 
-                "tp3": res["tps"][2], 
-                "sl1": res["sls"][0],
-                "sl2": res["sls"][1], 
-                "risk_pct": get_user_risk_settings(uid)["risk_pct"],
-                "notified_close": False, 
-                "notified_tp": False,
-                "waiting_entry": True # ФЛАГ ОЖИДАНИЯ ЛИМИТКИ
-            })
-            
-            # === СОХРАНЕНИЕ В ИСТОРИЮ ВХОДОВ ===
-            with STATE_LOCK:
-                u = STATE["users"].setdefault(str(uid), {"active": True})
-                th = u.setdefault("trade_history", [])
-                th.append({
-                    "coin": coin,
-                    "side": res["side"],
-                    "entry": res["entry"],
-                    "tp1": res["tps"][0],
-                    "tp2": res["tps"][1],
-                    "tp3": res["tps"][2],
-                    "sl1": res["sls"][0],
-                    "entered_at": time.time()
-                })
-                u["trade_history"] = th[-50:]
-            state_touch()
-            
-            # === АВТОСОХРАНЕНИЕ В ИЗБРАННОЕ ===
-            text_to_save = render_caption(res, uid)
-            await asyncio.to_thread(add_user_saved_signal, uid, coin, text_to_save, res)
-            
-            text = (f"⏳ <b>Лимитный ордер выставлен</b>\n\nМонета: <b>{coin}</b>\nНаправление: <b>{res['side']}</b>\n"
-                    f"Ожидаем откат к цене: <code>{fmt(res['entry'])}</code>\n\n"
-                    f"<i>Бот не открыл сделку по рынку. Теперь он будет ждать, пока цена дойдет до уровня входа.</i>")
-            
-            await safe_answer(cb, f"⏳ Ждем цену входа...")
-            return await present(chat_id, text, fav_view_keyboard(uid, coin), edit_msg=msg)
-        if data.startswith("pos:close:"):
-            coin = data.split(":")[2]
-            set_user_open_position(uid, coin, None)
-            
-            # Убираем сигнал из глобальной истории, чтобы он не висел в "В работе"
-            hist = load_signal_history()
-            for x in hist:
-                if x["coin"] == coin and x.get("status") in ("active", "in_trade"):
-                    x["status"] = "closed_manual"
-            save_signal_history(hist)
-            
-            await safe_answer(cb, "❌ Позиция закрыта")
-            return await show_screen(chat_id, uid, nav_stack.get(uid, [("menu",)])[-1], msg)
-        if data.startswith("pos:status:"):
-            await safe_answer(cb)
-            screen = ("pos_status", data.split(":")[2])
-            nav_push(uid, screen)
-            return await show_screen(chat_id, uid, screen, msg)
-        if data == "export_csv":
-            await safe_answer(cb, "⏳ Формирую CSV…")
-            return await bot.send_document(chat_id, BufferedInputFile(generate_csv_history(), "signals_history.csv"),
-                                           caption="📊 История сигналов бота (CSV)")
-        await safe_answer(cb)
-    except (TelegramForbiddenError, TelegramNotFound):
-        raise
-    except Exception as e:
-        log.error(f"Callback {data}: {e}", exc_info=True)
-        await safe_answer(cb, "⚠ Ошибка, попробуйте ещё раз", True)
-        try:
-            await present(chat_id, "⚠ Что-то пошло не так. Вернитесь в меню и повторите.", kb_nav(back=False), edit_msg=msg)
-        except Exception:
-            pass
-
-
-@dp.message()
-async def fallback_message(m: types.Message):
-    """Всё прочее: стираем сообщение пользователя и показываем меню, чтобы чат оставался чистым."""
-    await safe_delete(m)
-    nav_reset(m.from_user.id)
-    await present(m.chat.id, WELCOME, get_main_keyboard())
-
-
-# =====================================================================
-# АДМИН-БОТ
-# =====================================================================
 if admin_dp:
     @admin_dp.errors()
     async def admin_errors_handler(event: ErrorEvent):
@@ -4607,12 +3925,10 @@ if admin_dp:
     @admin_dp.message(Command("panel", "start", "admin"))
     async def admin_panel(m: types.Message):
         if m.from_user.id not in ADMIN_IDS:
-            return await m.answer(f"⛔ Доступ только для администратора.\n\nВаш ID: <code>{m.from_user.id}</code>", parse_mode="HTML")
+            return await m.answer(f"⛔ Доступ только для администратора.\nВаш ID: <code>{m.from_user.id}</code>", parse_mode="HTML")
         total, active = user_counts()
-        text = f"✅ <b>Админ-панель IXCLY v{VERSION}</b>\n👥 Пользователей: {total} (активных {active})"
-        if total == 0:
-            text += "\n\n⚠ База пуста. Нажмите «📥 Восстановить»."
-        await m.answer(text, reply_markup=admin_keyboard(), parse_mode="HTML")
+        await m.answer(f"✅ <b>Админ-панель IXCLY v{VERSION}</b>\n👥 Пользователей: {total} (активных {active})",
+                       reply_markup=admin_keyboard(), parse_mode="HTML")
 
     @admin_dp.callback_query(F.data.startswith("admin:"))
     async def admin_cb(cb: types.CallbackQuery):
@@ -4632,55 +3948,45 @@ if admin_dp:
         await safe_answer(cb, "⏳ Выполняю…")
         if act == "stats":
             total, active = user_counts()
-            up, ls = int(time.time() - stats["started"]), last_scan_info
-            await cb.message.answer(
-                f"📊 <b>Статистика</b>\nПользователей: {total} (активных {active})\n"
-                f"Аптайм: {up // 3600} ч {up % 3600 // 60} мин\nСигналов: {stats['signals']} · Новостей: {stats['news_sent']}\n"
-                f"Последний скан: {ls['stage1']} → {ls['stage2']} → {ls['final']}", parse_mode="HTML")
-
+            up = int(time.time() - stats["started"])
+            await cb.message.answer(f"📊 Пользователей: {total} (активных {active})\nАптайм: {up // 3600} ч\n"
+                                    f"Скан: {last_scan_info['stage1']} → {last_scan_info['stage2']} → {last_scan_info['final']}")
         elif act == "users":
-            lines = [f"👥 Пользователи ({len(_users())})\n"] + [
-                f"{'✅' if u.get('active', True) else '❌'} <code>{uid}</code> {html.escape(str(u.get('first_name') or u.get('username') or '—')[:18])}"
-                for uid, u in list(_users().items())[-30:]]
+            lines = [f"👥 Пользователи ({len(_users())})"] + [
+                f"{'✅' if u.get('active', True) else '❌'} <code>{uid}</code> {html.escape(str(u.get('first_name') or '—')[:18])}"
+                for uid, u in list(_users().items())[-30:] if isinstance(u, dict)]
             await cb.message.answer("\n".join(lines), parse_mode="HTML")
         elif act == "news_now":
             text, img_url = await prepare_news(force=True)
             if not text:
                 return await cb.message.answer("Свежих новостей нет")
             img = await download_bytes(img_url) if img_url else None
-            kb = kb_nav([[InlineKeyboardButton(text="🗑 Удалить новость", callback_data="del_msg")]], back=False)
-            sent, failed, _ = await broadcast({"text": text, "photo": img, "kb": kb, "nav": []})
-            stats["news_sent"] += sent
-            await cb.message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
+            sent = 0
+            for cid in list(active_chats):
+                try:
+                    await _send_new(cid, text, None, img)
+                    sent += 1
+                except Exception:
+                    pass
+            await cb.message.answer(f"✅ Отправлено: {sent}")
         elif act == "scan_test":
-            await cb.message.answer("🔍 Полный скан без рассылки…")
+            await cb.message.answer("🔍 Скан без рассылки…")
             sigs = await scan_once(send=False)
-            ls = last_scan_info
-            head = f"{ls['stage1']} → {ls['stage2']} → бэктест {ls['backtest_ok']} → итог {ls['final']} ({ls['secs']} с)"
-            await cb.message.answer("🔍 Тест сканера\n" + head + ("\n\n" + "\n".join(f"{'🟢' if s['is_long'] else '🔴'} {s['coin']} · {s['type']} · Conf {s['strength']}%" for s in sigs) if sigs else "\n\nСигналов нет (пороги строгие)."))
-        elif act == "broadcast_now":
-            text, kb = signals_overview()
-            sent, *_ = await broadcast({"text": text, "kb": kb, "nav": [("signals",)]})
-            await cb.message.answer(f"Рассылка: {sent}")
+            await cb.message.answer(f"Итог: {len(sigs)} · " + ", ".join(s["coin"] for s in sigs[:10]) if sigs else "Сигналов нет")
         elif act == "diag":
-            await cb.message.answer(f"🔧 <b>Диагностика</b>\nccxt: {'✅' if ccxt else '❌'} · шифрование: {'✅' if cipher else '❌'}\n"
-                                    f"Чатов: {len(active_chats)} · задержка старта {POLL_START_DELAY} с\n"
-                                    f"Пороги: stage1 {CONF_STAGE1:.0f}, final {CONF_FINAL:.0f}, бэктест ≥{BT_MIN_TRADES} сд, R ≥{BT_MIN_AVG_R}\n\n" + await run_ai_diag(), parse_mode="HTML")
+            await cb.message.answer(f"ccxt: {'✅' if ccxt else '❌'} · шифрование: {'✅' if cipher else '❌'}\n"
+                                    f"Чатов: {len(active_chats)} · WEBAPP: {WEBAPP_URL or 'не задан'}\n"
+                                    f"Пороги: stage1 {CONF_STAGE1:.0f}, final {CONF_FINAL:.0f}")
         elif act == "backup":
-            await cb.message.answer("💾 Полный бэкап отправлен выше." if await telegram_backup("вручную") else "Состояние пусто.")
+            await cb.message.answer("💾 Бэкап отправлен." if await telegram_backup("вручную") else "Бэкап не отправлен.")
         elif act == "restore":
-            await cb.message.answer("Отправьте файл bot_state.json (как документ).")
-        elif act == "csv":
-            await cb.message.answer_document(BufferedInputFile(generate_csv_history(), "signals_history.csv"))
+            await cb.message.answer("Отправьте файл bot_state.json как документ.")
         elif act == "timers":
             now = time.time()
-
-            def ft(sec):
-                return "сейчас" if sec <= 0 else f"через {int(sec // 60)} мин {int(sec % 60)} сек"
-
-            await cb.message.answer("⏳ <b>Таймеры:</b>\n\n" + "\n".join(f"{n}: {ft(next_timers[k] - now)}" for n, k in (
-                ("🤖 Сканер", "scanner"), ("📈 Позиции", "positions"), ("📰 Новости", "news_watcher"),
-                ("📊 Сигналы", "global_signals"), ("🚨 Аномалии", "anomaly"), ("💾 Бэкап", "backup"))), parse_mode="HTML")
+            await cb.message.answer("⏳ <b>Таймеры:</b>\n" + "\n".join(
+                f"{n}: через {max(0, int(next_timers[k] - now))} с" for n, k in (
+                    ("🤖 Сканер", "scanner"), ("📈 Позиции", "positions"), ("📰 Новости", "news_watcher"),
+                    ("📊 Сигналы/live", "global_signals"), ("🚨 Аномалии", "anomaly"), ("💾 Бэкап", "backup"))), parse_mode="HTML")
 
     @admin_dp.message(F.document)
     async def admin_on_document(m: types.Message):
@@ -4692,420 +3998,19 @@ if admin_dp:
             n = restore_state(data, force=True)
             load_active_chats()
             await asyncio.to_thread(flush_state)
-            await m.answer(f"✅ Состояние восстановлено: пользователей {n}, сигналов {len(STATE['signal_history'])}.")
+            await m.answer(f"✅ Восстановлено: пользователей {n}, сигналов {len(STATE['signal_history'])}.")
         except Exception as e:
             await m.answer(f"Ошибка восстановления: {html.escape(str(e))}", parse_mode="HTML")
 
-# =====================================================================
-# MINI APP (Telegram WebApp): ВСТАВИТЬ ЦЕЛИКОМ перед блоком "# ЗАПУСК" (перед async def run_polling)
-# Рядом с bot.py положите webapp.html. На Render задайте WEBAPP_URL = https://ВАШ-СЕРВИС.onrender.com/app
-# =====================================================================
-import hmac
-from urllib.parse import parse_qsl
-from flask import request, Response, send_file
-from aiogram.types import WebAppInfo, MenuButtonWebApp
-
-WEBAPP_URL = clean_key(os.getenv("WEBAPP_URL")) or (
-    os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") + "/app" if os.getenv("RENDER_EXTERNAL_URL") else None)
-MAIN_LOOP = None
-MODE_TYPES = {"aggressive": ("Краткосрочный", "Среднесрочный"), "balanced": ("Среднесрочный", "Долгосрочный"),
-              "conservative": ("Долгосрочный",)}
-MODE_NAMES = {"aggressive": "🟢 Агрессивный", "balanced": "🟡 Сбалансированный", "conservative": "🔴 Консервативный"}
-NOTIFY_NAMES = {"signals": "Сигналы", "news": "Новости", "anomalies": "Аномалии объёма",
-                "pos_updates": "Отчёты по сделкам", "briefing": "Утренний брифинг"}
-
-
-def tg_auth(init):
-    """Проверка подписи initData от Telegram (HMAC-SHA256)."""
-    try:
-        pairs = dict(parse_qsl(init, keep_blank_values=True))
-        got = pairs.pop("hash")
-        check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
-        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
-            return None
-        if time.time() - int(pairs.get("auth_date", 0)) > 86400:
-            return None
-        return json.loads(pairs["user"])
-    except Exception:
-        return None
-
-
-@app.route("/app")
-def mini_page():
-    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp.html"))
-
-
-@app.route("/api/<act>", methods=["POST"])
-def mini_api(act):
-    d = request.get_json(silent=True) or {}
-    u = tg_auth(d.get("initData", ""))
-    if not u:
-        return Response('{"error":"Нет доступа: откройте приложение из Telegram"}', 401, mimetype="application/json")
-    try:
-        out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(100)
-    except Exception as e:
-        log.warning(f"mini_api {act}: {e}")
-        out = {"error": "Ошибка сервера, попробуйте ещё раз"}
-    return Response(json.dumps(out, ensure_ascii=False, default=str), mimetype="application/json")
-
-
-def _sig_item(x):
-    return {k: x.get(k) for k in ("coin", "side", "type", "strength", "entry", "tp1", "sl1", "status", "ts", "max_tp_hit")}
-
-
-async def _tell(uid, text, kb=None):
-    """Уведомление в чат Telegram о действии из приложения."""
-    try:
-        await _send_new(uid, text, kb or kb_nav(back=False), None)
-    except Exception as e:
-        log.info(f"mini notify {uid}: {e}")
-
-
-async def mini_dispatch(uid, u, act, d):
-    if uid not in active_chats:
-        active_chats.add(uid)
-        await asyncio.to_thread(save_user_data, uid, u.get("username"), u.get("first_name"))
-    uu = _users().get(str(uid), {})
-    coin = normalize_ticker(str(d.get("coin", ""))) if d.get("coin") else None
-
-    if act == "me":
-        return {"name": u.get("first_name") or "трейдер", "version": VERSION, "risk": get_user_risk_settings(uid),
-                "mode": uu.get("trade_mode", "balanced"), "notif": get_user_notif_settings(uid),
-                "saved": get_user_saved_signals(uid), "alerts": uu.get("price_alerts", []),
-                "webhook": uu.get("webhook_url", ""), "news": market_bias, "ctx": await get_context(),
-                "coins": POPULAR_COINS[:150]}
-
-    if act == "movers":
-        j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
-        mv = [(x["symbol"][:-4], float(x["priceChangePercent"])) for x in j
-              if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
-        up = sorted([m for m in mv if m[1] > 0], key=lambda m: -m[1])[:20]
-        dn = sorted([m for m in mv if m[1] < 0], key=lambda m: m[1])[:20]
-        return {"up": random.sample(up, min(5, len(up))), "down": random.sample(dn, min(5, len(dn)))}
-
-    if act == "signals":
-        flt, items = d.get("flt", "Все"), get_active_signals()
-        mode = flt.split(":")[1] if flt.startswith("mode:") else (uu.get("trade_mode", "balanced") if flt == "Все" else None)
-        if mode in MODE_TYPES and flt != "Все":
-            items = [x for x in items if x.get("type") in MODE_TYPES[mode]]
-        elif flt not in ("Все",) and not flt.startswith("mode:"):
-            items = [x for x in items if x.get("type") == flt]
-        return {"items": [_sig_item(x) for x in items[:40]]}
-
-    if act == "analyze" and coin:
-        res, err = await analyze_coin(coin, uid=uid, force=bool(d.get("force")))
-        if err:
-            return {"error": strip_tags(err)[:200]}
-        remember_res(uid, coin, res)
-        if res.get("price_only"):
-            return {"price_only": True, "price": res["price"], "coin": coin}
-        out = {k: v for k, v in res.items() if k not in ("img", "text")}
-        out["img"] = ("data:image/png;base64," + base64.b64encode(res["img"]).decode()) if res.get("img") else None
-        s = get_user_risk_settings(uid)
-        out["risk_usdt"] = s["deposit"] * s["risk_pct"] / 100
-        out["pos_usdt"] = out["risk_usdt"] / res["risk_dist"] * res["entry"] if res["risk_dist"] > 0 else 0.0
-        out["in_fav"] = any(x["coin"] == coin for x in get_user_saved_signals(uid))
-        out["position"] = bool(get_open_position(uid, coin))
-        for oc, od in get_user_open_positions(uid).items():
-            if oc != coin and od["side"] == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
-                out["corr"] = f"Уже открыт {od['side']} по {oc}: монеты коррелируют"
-        return out
-
-    if act == "stats":
-        uniq, seen = [], set()
-        for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
-            if f"{x['coin']}_{x['side']}" not in seen:
-                seen.add(f"{x['coin']}_{x['side']}")
-                uniq.append(x)
-        lists = {s: [_sig_item(x) for x in uniq if x.get("status") == s][:30] for s in ("win", "missed", "loss", "expired")}
-        lists["active"] = [_sig_item(x) for x in get_active_signals()][:30]
-        cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("win", "missed", "loss", "expired")}
-        cnt["active"] = len(get_active_signals())
-        closed = cnt["win"] + cnt["loss"]
-        return {"counts": cnt, "lists": lists, "total": len(uniq), "wr": cnt["win"] / closed * 100 if closed else 0.0,
-                "exp_r": (cnt["win"] * 1.5 - cnt["loss"]) / closed if closed else 0.0}
-
-    if act == "news":
-        return {"bias": market_bias, "html": await get_news_batch_text()}
-
-    if act == "portfolio":
-        pos = {}
-        for c, p in get_user_open_positions(uid).items():
-            price = await get_simple_price(c) or p["entry_price"]
-            sign = 1 if p["side"] == "LONG" else -1
-            pos[c] = dict(p, price=price, pnl=sign * (price - p["entry_price"]) / p["entry_price"] * 100)
-        return {"risk": get_user_risk_settings(uid), "open_risk": calculate_portfolio_risk(uid), "mode": uu.get("trade_mode", "balanced"),
-                "positions": pos, "saved": get_user_saved_signals(uid), "history": uu.get("trade_history", [])[-15:]}
-
-    if act == "toggle" and d.get("key") in NOTIFY_NAMES:
-        k = d["key"]
-        new = not uu.get(f"notify_{k}", True)
-        set_user_field(uid, **{f"notify_{k}": new})
-        return {"msg": f"{NOTIFY_NAMES[k]}: {'вкл' if new else 'выкл'}"}
-
-    if act == "set_deposit":
-        v = float(d.get("value", 0))
-        if v <= 0:
-            return {"error": "Депозит должен быть больше 0"}
-        set_user_field(uid, deposit=v)
-        await _tell(uid, f"💰 <b>Депозит обновлён из приложения:</b> ${v:g}")
-        return {"msg": "Депозит сохранён"}
-
-    if act == "set_risk":
-        v = float(d.get("value", 0))
-        if not 0.1 <= v <= 10:
-            return {"error": "Риск от 0.1 до 10%"}
-        set_user_field(uid, risk_pct=v)
-        await _tell(uid, f"📉 <b>Риск на сделку:</b> {v:g}%")
-        return {"msg": "Риск сохранён"}
-
-    if act == "set_mode" and d.get("value") in MODE_NAMES:
-        m = d["value"]
-        set_user_field(uid, trade_mode=m, conf_final={"aggressive": 60, "balanced": 66, "conservative": 80}[m])
-        await _tell(uid, f"⚙️ <b>Режим торговли:</b> {MODE_NAMES[m]}")
-        return {"msg": "Режим обновлён"}
-
-    if act == "fav_add" and coin:
-        res = get_user_res(uid, coin)
-        if not res or res.get("price_only"):
-            return {"error": "Сначала откройте анализ монеты"}
-        await asyncio.to_thread(add_user_saved_signal, uid, coin, render_caption(res, uid), res)
-        await _tell(uid, f"⭐ <b>{coin}</b> сохранён в избранное.", kb_nav([[InlineKeyboardButton(text="📈 Анализ", callback_data=f"c:{coin}")]], back=False))
-        return {"msg": f"{coin} сохранён"}
-
-    if act == "fav_del" and coin:
-        await asyncio.to_thread(del_user_saved_signal, uid, coin)
-        return {"msg": "Удалено"}
-
-    if act == "pos_enter" and coin:
-        res = get_user_res(uid, coin)
-        if not res or res.get("price_only"):
-            return {"error": "Данные устарели, обновите анализ"}
-        for oc, od in get_user_open_positions(uid).items():
-            if oc != coin and od.get("side") == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
-                return {"error": f"Уже открыт {od['side']} по {oc}: {coin} сильно коррелирует"}
-        set_user_open_position(uid, coin, {
-            "side": res["side"], "entry_price": res["entry"], "created_at": time.time(), "entered_at": time.time(),
-            "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
-            "risk_pct": get_user_risk_settings(uid)["risk_pct"], "notified_close": False, "notified_tp": False,
-            "waiting_entry": True})
-        with STATE_LOCK:
-            th = STATE["users"].setdefault(str(uid), {"active": True}).setdefault("trade_history", [])
-            th.append({"coin": coin, "side": res["side"], "entry": res["entry"], "tp1": res["tps"][0], "tp2": res["tps"][1],
-                       "tp3": res["tps"][2], "sl1": res["sls"][0], "entered_at": time.time()})
-            STATE["users"][str(uid)]["trade_history"] = th[-50:]
-        state_touch()
-        await asyncio.to_thread(add_user_saved_signal, uid, coin, render_caption(res, uid), res)
-        await _tell(uid, f"⏳ <b>Лимитный ордер выставлен</b>\n\nМонета: <b>{coin}</b> · {res['side']}\nЖдём откат к: <code>{fmt(res['entry'])}</code>\n\n"
-                         f"<i>Бот сообщит, когда ордер сработает, и будет вести сделку: безубыток, TP1-3, трейлинг.</i>",
-                    kb_nav([[InlineKeyboardButton(text="📈 Статус", callback_data=f"pos:status:{coin}")]], back=False))
-        return {"msg": "Ордер выставлен, ждём вход"}
-
-    if act == "pos_close" and coin:
-        set_user_open_position(uid, coin, None)
-        hist = load_signal_history()
-        for x in hist:
-            if x["coin"] == coin and x.get("status") in ("active", "in_trade"):
-                x["status"] = "closed_manual"
-        save_signal_history(hist)
-        await _tell(uid, f"❌ Позиция <b>{coin}</b> закрыта вручную.")
-        return {"msg": "Позиция закрыта"}
-
-    if act == "alert_add" and coin:
-        price = float(d.get("price", 0))
-        if price <= 0:
-            return {"error": "Неверная цена"}
-        cur = await get_simple_price(coin)
-        op = d.get("op") or (">" if cur is None or price >= cur else "<")
-        with STATE_LOCK:
-            lst = STATE["users"].setdefault(str(uid), {"active": True}).setdefault("price_alerts", [])
-            if len(lst) >= 20:
-                return {"error": "Максимум 20 алертов"}
-            lst.append({"coin": coin, "op": op, "price": price})
-        state_touch()
-        await _tell(uid, f"🔔 <b>Алерт создан:</b> {coin} {op} <code>{fmt(price)}</code>")
-        return {"msg": "Алерт создан"}
-
-    if act == "alert_del":
-        with STATE_LOCK:
-            lst = STATE["users"].get(str(uid), {}).get("price_alerts", [])
-            i = int(d.get("idx", -1))
-            if 0 <= i < len(lst):
-                lst.pop(i)
-        state_touch()
-        return {"msg": "Удалено"}
-
-    if act == "webhook":
-        url = str(d.get("url", "")).strip()
-        if url and not url.startswith("http"):
-            return {"error": "Ссылка должна начинаться с http"}
-        set_user_field(uid, webhook_url=url)
-        return {"msg": "Вебхук сохранён" if url else "Вебхук отключён"}
-
-    if act == "csv":
-        await bot.send_document(uid, BufferedInputFile(generate_csv_history(), "signals_history.csv"), caption="📊 История сигналов (CSV)")
-        return {"msg": "Отправил файл в чат"}
-
-    return {"error": "Неизвестное действие"}
-
 
 # =====================================================================
-# ИЗМЕНЕНИЯ В СУЩЕСТВУЮЩЕМ КОДЕ (3 правки)
+# ОБСЛУЖИВАНИЕ ПАМЯТИ, ЗАПУСК
 # =====================================================================
-# 1) В get_main_keyboard(): ПЕРВОЙ строкой списка inline_keyboard добавьте кнопку приложения:
-#        *([[B(text="🚀  Открыть IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL))]] if WEBAPP_URL else []),
-#    (WEBAPP_URL объявлена выше этого блока, поэтому блок нужно вставить ДО get_main_keyboard
-#     либо перенести две строки с WEBAPP_URL и импортом WebAppInfo в начало файла.)
-#
-# 2) В main(), сразу после `news_lock, scan_lock = ...` добавьте:
-#        global MAIN_LOOP
-#        MAIN_LOOP = asyncio.get_running_loop()
-#
-# 3) В main(), в блоке try рядом с set_my_commands, добавьте:
-#        if WEBAPP_URL:
-#            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL)))
-
-
-# =====================================================================
-# ЗАПУСК
-# =====================================================================
-async def run_polling(dispatcher, tg_bot, name, stop_event):
-    attempt = 0
-    while not stop_event.is_set():
-        try:
-            attempt += 1
-            log.info(f"{name}: запуск поллинга (попытка {attempt})")
-            try:
-                await tg_bot.delete_webhook(drop_pending_updates=(attempt == 1))
-            except Exception:
-                pass
-            
-            # Ключевое исправление: явная обработка разрыва соединения
-            try:
-                await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=30)
-            except Exception as poll_err:
-                log.warning(f"{name}: Ошибка поллинга: {poll_err}")
-                raise poll_err
-
-            if not stop_event.is_set():
-                log.warning(f"{name}: поллинг завершился, перезапуск через 5 сек")
-                await asyncio.sleep(5)
-                attempt = 0
-        except asyncio.CancelledError:
-            raise
-        except (TelegramNetworkError, aiohttp.ClientError, ConnectionError) as e:
-            log.warning(f"{name}: сетевая ошибка ({e}), повтор через {min(2 ** attempt, 60)} сек")
-            await asyncio.sleep(min(2 ** attempt, 60))
-        except TelegramConflictError:
-            await asyncio.sleep(min(2 ** attempt, 30))
-        except Exception as e:
-            log.error(f"{name}: непредвиденная ошибка: {e}")
-            await asyncio.sleep(10)
-
-async def morning_briefing_loop():
-    await asyncio.sleep(15)
-    while True:
-        now_utc = datetime.now(timezone.utc)
-        msk_now = now_utc.astimezone(timezone(timedelta(hours=3)))
-        
-        # Устанавливаем цель на 8:00 утра МСК
-        target = msk_now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if msk_now >= target:
-            target += timedelta(days=1)
-            
-        sleep_secs = (target - msk_now).total_seconds()
-        await asyncio.sleep(sleep_secs)
-        
-        try:
-            ctx = await get_context(force=True)
-            btc_txt = ctx.get("btc_txt", "нет данных")
-            fng = ctx.get("fng")
-            fng_txt = ctx.get("fng_txt", "")
-            
-            # Берем актуальные сигналы на момент утра
-            active_sigs = len(get_active_signals())
-            
-            gainers_txt = "нет данных"
-            try:
-                j = await http_json("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=10)
-                movers = [x for x in j if x["symbol"].endswith("USDT") and x["symbol"][:-4] in POPULAR_COINS]
-                gainers = sorted([x for x in movers if float(x["priceChangePercent"]) > 0], key=lambda x: float(x["priceChangePercent"]), reverse=True)[:3]
-                gainers_txt = ", ".join([f"{x['symbol'][:-4]} (+{float(x['priceChangePercent']):.1f}%)" for x in gainers]) or "нет"
-            except Exception:
-                pass
-            
-            fng_str = f"{fng} ({fng_txt})" if fng is not None else "нет данных"
-            
-            text = (
-                f"☀️ <b>Доброе утро!</b>\n\n"
-                f"🌍 <b>BTC:</b> {btc_txt}\n"
-                f"😨 <b>F&G:</b> {fng_str}\n"
-                f"🔥 <b>Активных сигналов:</b> {active_sigs}\n"
-                f"🚀 <b>Топ роста:</b> {gainers_txt}\n\n"
-                f"<i>Удачной торговли сегодня!</i>"
-            )
-            
-            kb = kb_nav([[InlineKeyboardButton(text="🔥 Сигналы", callback_data="last_signals")]], back=False)
-            await broadcast({"text": text, "kb": kb, "nav": [("menu",)]}, only_ids=active_chats, notif_type="briefing")
-        except Exception as e:
-            log.error(f"Ошибка утреннего брифинга: {e}")
-        await asyncio.sleep(60) # Пауза после отправки
-
-async def price_alerts_loop():
-    """Цикл проверки алертов по цене (раз в 2 минуты)"""
-    await asyncio.sleep(60)
-    while True:
-        try:
-            for uid_str, u in list(_users().items()):
-                alerts = u.get("price_alerts", [])
-                if not alerts:
-                    continue
-                
-                triggered = []
-                for alert in alerts:
-                    coin = alert["coin"]
-                    price = await get_simple_price(coin)
-                    if not price:
-                        continue
-                    
-                    op = alert["op"]
-                    target = alert["price"]
-                    
-                    is_hit = (op == ">" and price >= target) or (op == "<" and price <= target)
-                    if is_hit:
-                        triggered.append(alert)
-                        text = (f"🔔 <b>Алерт сработал!</b>\n\n"
-                                f"Монета: <b>{coin}</b>\n"
-                                f"Условие: <code>{op} {fmt(target)}</code>\n"
-                                f"Текущая цена: <code>{fmt(price)}</code>")
-                        kb = kb_nav([[InlineKeyboardButton(text="📈 Анализ", callback_data=f"c:{coin}")]], back=False)
-                        try:
-                            await _send_new(int(uid_str), text, kb, None)
-                        except Exception:
-                            pass
-                
-                if triggered:
-                    with STATE_LOCK:
-                        u["price_alerts"] = [a for a in alerts if a not in triggered]
-                    state_touch()
-                    
-        except Exception as e:
-            log.error(f"price_alerts_loop: {e}")
-        await asyncio.sleep(120)
-
-
-async def heartbeat_loop():
-    while True:
-        await asyncio.sleep(600)
-        log.info("♥ аптайм %d мин, пик RAM %s МБ, получателей %d, сигналов в истории %d",
-                 (time.time() - stats["started"]) // 60, _rss_mb(), len(active_chats), len(STATE["signal_history"]))
-
 def _release_memory():
     gc.collect()
     try:
         import ctypes
-        ctypes.CDLL("libc.so.6").malloc_trim(0)  # возвращает память системе (Linux/Render)
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
 
@@ -5121,7 +4026,9 @@ async def memory_janitor_loop():
                     d.pop(c, None)
                 if not d:
                     user_res.pop(uid, None)
-            for c in [c for c, v in analysis_cache.items() if now - v[0] > max(v[1], 600)]:
+            for c in [c for c, v in list(LIVE.items()) if now - v["ts"] > 1800]:
+                LIVE.pop(c, None)
+            for c in [c for c, v in analysis_cache.items() if now - v[0] > 600]:
                 analysis_cache.pop(c, None)
             for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600)):
                 for k in [k for k, v in store.items() if now - v[0] > ttl]:
@@ -5129,82 +4036,57 @@ async def memory_janitor_loop():
             for store in (scan_skip, exchange_bans, BAD_MODELS):
                 for k in [k for k, t in store.items() if t < now]:
                     store.pop(k, None)
-            for store, ttl in ((signal_sent_at, 2 * 86400), (anomaly_sent_at, 86400)):
-                for k in [k for k, t in store.items() if now - t > ttl]:
-                    store.pop(k, None)
-            if len(fetch_errors) > 100: fetch_errors.clear()
-            if len(nav_stack) > 1000: nav_stack.clear()
-            if len(preferred_source) > 600: preferred_source.clear()
+            if len(fetch_errors) > 100:
+                fetch_errors.clear()
+            if len(nav_stack) > 1000:
+                nav_stack.clear()
             await asyncio.to_thread(_release_memory)
         except Exception as e:
             log.warning(f"janitor: {e}")
         await asyncio.sleep(600)
 
 
+async def heartbeat_loop():
+    while True:
+        await asyncio.sleep(600)
+        log.info("♥ аптайм %d мин, RAM %s МБ, получателей %d, сигналов %d, live %d",
+                 (time.time() - stats["started"]) // 60, _rss_mb(), len(active_chats), len(STATE["signal_history"]), len(LIVE))
 
-async def invalidate_flipped_signals():
-    hist = load_signal_history()
-    changed = False
-    for x in hist:
-        if x.get("status") != "active":
-            continue
-        try:
-            tf2, _ = await get_market_data_light(x["coin"], ("4h", "1d"))
-        except Exception:
-            continue
-        p = (tf2["4h"]["long_prob"] + tf2["1d"]["long_prob"]) / 2
-        if (x["side"] == "LONG" and p < 47) or (x["side"] == "SHORT" and p > 53):
-            x["status"], changed = "cancelled", True
-            for uid_str, u in list(_users().items()):
-                pos = (u.get("open_positions") or {}).get(x["coin"])
-                if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
-                    set_user_open_position(int(uid_str), x["coin"], None)
-                    try:
-                        await _send_new(int(uid_str),
-                                        f"🚫 <b>Идея отменена: {x['coin']} ({x['side']})</b>\n\nРынок развернулся до входа. "
-                                        f"Лимитный ордер снят, не входите.", kb_nav(back=False), None)
-                    except Exception:
-                        pass
-    if changed:
-        save_signal_history(hist)
 
-async def invalidate_flipped_signals():
-    hist = load_signal_history()
-    changed = False
-    for x in hist:
-        if x.get("status") != "active":
-            continue
+async def run_polling(dispatcher, tg_bot, name, stop_event):
+    attempt = 0
+    while not stop_event.is_set():
         try:
-            tf2, _ = await get_market_data_light(x["coin"], ("4h", "1d"))
-        except Exception:
-            continue
-        p = (tf2["4h"]["long_prob"] + tf2["1d"]["long_prob"]) / 2
-        if (x["side"] == "LONG" and p < 47) or (x["side"] == "SHORT" and p > 53):
-            x["status"], changed = "cancelled", True
-            for uid_str, u in list(_users().items()):
-                pos = (u.get("open_positions") or {}).get(x["coin"])
-                if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
-                    set_user_open_position(int(uid_str), x["coin"], None)
-                    try:
-                        await _send_new(int(uid_str),
-                                        f"🚫 <b>Идея отменена: {x['coin']} ({x['side']})</b>\n\nРынок развернулся до входа. "
-                                        f"Лимитный ордер снят, не входите.", kb_nav(back=False), None)
-                    except Exception:
-                        pass
-    if changed:
-        save_signal_history(hist)
-      
-# ... (остальной код)
+            attempt += 1
+            log.info(f"{name}: запуск поллинга (попытка {attempt})")
+            try:
+                await tg_bot.delete_webhook(drop_pending_updates=(attempt == 1))
+            except Exception:
+                pass
+            await dispatcher.start_polling(tg_bot, handle_signals=False, close_bot_session=False, polling_timeout=30)
+            if not stop_event.is_set():
+                log.warning(f"{name}: поллинг завершился, перезапуск через 5 сек")
+                await asyncio.sleep(5)
+                attempt = 0
+        except asyncio.CancelledError:
+            raise
+        except (TelegramNetworkError, aiohttp.ClientError, ConnectionError) as e:
+            log.warning(f"{name}: сетевая ошибка ({e}), повтор через {min(2 ** attempt, 60)} сек")
+            await asyncio.sleep(min(2 ** attempt, 60))
+        except TelegramConflictError:
+            await asyncio.sleep(min(2 ** attempt, 30))
+        except Exception as e:
+            log.error(f"{name}: непредвиденная ошибка: {e}")
+            await asyncio.sleep(10)
+
+
 
 async def main():
     global http, news_lock, scan_lock, MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
-    
-    # СРАЗУ ЗАПУСКАЕМ ВЕБ-СЕРВЕР (чтобы Render увидел порт и не убил бота)
     keep_alive()
-
     news_lock, scan_lock = asyncio.Lock(), asyncio.Lock()
-    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.0"})
+    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.1"})
     load_state_file()
 
     stop = asyncio.Event()
@@ -5217,23 +4099,24 @@ async def main():
 
     background, pollers = [], []
     try:
-        # --- БЛОК ИНИЦИАЛИЗАЦИИ ---
         for tg_bot, key in ((bot, "main_bot"), (admin_bot, "admin_bot")):
             if tg_bot:
                 try:
                     runtime[key] = f"@{(await tg_bot.get_me()).username}"
                 except Exception as e:
                     log.error(f"get_me ({key}): {e}")
-
-        await bot.delete_webhook(drop_pending_updates=True)
-        if admin_bot:
-            await admin_bot.delete_webhook(drop_pending_updates=True)
-        await bot.set_my_commands([types.BotCommand(command="menu", description="🚀 Меню")])
-        if WEBAPP_URL:
-            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=WEBAPP_URL)))
-            log.info(f"Mini App: {WEBAPP_URL}")
-        else:
-            log.warning("WEBAPP_URL не задан: кнопка Mini App не появится")
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            if admin_bot:
+                await admin_bot.delete_webhook(drop_pending_updates=True)
+            await bot.set_my_commands([types.BotCommand(command="start", description="🚀 Открыть IXCLY")])
+            if WEBAPP_URL:
+                await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=webapp_link())))
+                log.info(f"Mini App: {WEBAPP_URL}")
+            else:
+                log.warning("WEBAPP_URL не задан: мини-приложение недоступно из бота")
+        except Exception as e:
+            log.warning(f"Инициализация бота: {e}")
 
         if POLL_START_DELAY > 0:
             log.info(f"Ждём {POLL_START_DELAY} с, пока остановится предыдущий экземпляр…")
@@ -5242,38 +4125,30 @@ async def main():
             except asyncio.TimeoutError:
                 pass
         if stop.is_set():
-            log.warning("⚠️ Получен сигнал остановки во время ожидания. Завершаю работу.")
             return
 
-        # --- БЛОК ЗАПУСКА ---
         restored = await telegram_restore()
         if restored:
             log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
         load_active_chats()
         gc.freeze()
         asyncio.create_task(discover_models())
-        
-        background, pollers = [], []
 
-        background += [asyncio.create_task(c()) for c in (
-            scanner_loop, position_monitor_loop, position_update_loop, global_signal_monitor_loop, news_watcher_loop, backup_loop,
-            anomaly_scanner_loop, state_flush_loop, heartbeat_loop, morning_briefing_loop,
-            price_alerts_loop, memory_janitor_loop)]
-
+        background = [asyncio.create_task(c()) for c in (
+            scanner_loop, live_monitor_loop, global_signal_monitor_loop, position_monitor_loop,
+            news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop,
+            anomaly_scanner_loop, state_flush_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
         background.append(asyncio.create_task(update_market_bias()))
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
         if admin_bot and admin_dp:
             pollers.append(asyncio.create_task(run_polling(admin_dp, admin_bot, "админ-бот", stop)))
-        
-        log.info(f"🚀 IXCLY PRO v{VERSION} запущен и ожидает сигналы")
+        log.info(f"🚀 IXCLY PRO v{VERSION} запущен")
         waiter = asyncio.create_task(stop.wait())
         await asyncio.wait(pollers + [waiter], return_when=asyncio.FIRST_COMPLETED)
         waiter.cancel()
-        
     except Exception as e:
-        log.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
-        
+        log.error(f"Критическая ошибка при запуске: {e}", exc_info=True)
     finally:
         log.info("Останавливаю бота…")
         for t in pollers:
@@ -5286,7 +4161,6 @@ async def main():
         for t in background:
             t.cancel()
         await asyncio.gather(*background, return_exceptions=True)
-        
         for tg_bot in (bot, admin_bot):
             if tg_bot:
                 try:
@@ -5300,4 +4174,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
+        log.info("Бот остановлен")
         log.info("Бот остановлен")
