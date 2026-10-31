@@ -4182,7 +4182,7 @@ ANALYZE_SEM = None
 DOCS_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-IXCLY-PRO-10-31"
 DOCS_OFFER = "https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31"
 DISCOUNT_OFFERS = {}
-CRITICAL_NEWS = re.compile(r"hack|exploit|\bsec\b|lawsuit|delist|halt|bankrupt|arrest|sanction|взлом|запрет")
+CRITICAL_NEWS = re.compile(r"hack|exploit|\bsec\b|lawsuit|delist|halt|bankrupt|arrest|sanction|взлом|запрет|хакеры|скам|суд|иск|ликвидация")
 
 
 @dp.message(Command("start", "menu"))
