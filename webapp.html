@@ -35,8 +35,17 @@ input{width:100%;background:var(--c2);border:1px solid var(--ln);color:var(--t);
 .ld{display:grid;place-items:center;height:50vh}.ld i{width:34px;height:34px;border-radius:50%;border:3px solid var(--ln);border-top-color:var(--up);animation:r .8s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
 img.ch{width:100%;border-radius:12px;display:block}.lst{cursor:pointer}
 .eq{display:flex;align-items:flex-end;gap:2px;height:70px;margin-top:8px}.eq i{flex:1;border-radius:2px 2px 0 0;min-height:3px}
+#sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);opacity:0;pointer-events:none;transition:.2s;z-index:20}
+#sheet-bg.on{opacity:1;pointer-events:auto}
+#sheet{position:fixed;left:0;right:0;bottom:0;transform:translateY(105%);transition:.25s;background:var(--c);border-top:1px solid var(--ln);border-radius:20px 20px 0 0;padding:12px 16px calc(16px + env(safe-area-inset-bottom));z-index:21}
+#sheet.on{transform:translateY(0)}.grab{width:40px;height:4px;border-radius:4px;background:var(--ln);margin:0 auto 12px}
+#sheet h3{font:800 16px "Trebuchet MS",sans-serif}
 </style></head><body>
-<div id="toast"></div><div id="v"><div class="ld"><i></i></div></div>
+<div id="toast"></div>
+<div id="sheet-bg" onclick="closeSheet()"></div>
+<div id="sheet"><div class="grab"></div><h3 id="sh-title"></h3><small id="sh-sub"></small>
+<input id="sh-val" type="text" inputmode="decimal" placeholder="Цена" style="margin-top:10px">
+<div class="g" style="margin-top:12px"><button class="btn s" onclick="closeSheet()">Отмена</button><button class="btn" onclick="submitSheet()">Создать алерт</button></div></div><div id="v"><div class="ld"><i></i></div></div>
 <div class="tb">
 <b data-t="signals" class="on" onclick="tab('signals')"><span>🔥</span>Сигналы</b>
 <b data-t="coin" onclick="tab('coin')"><span>📈</span>Монета</b>
@@ -53,14 +62,30 @@ const q=new URLSearchParams(location.search);
 const P={};
 let S={},CUR=null,STACK=[],SF='Все',LIVE_T=null,CUR_COIN=null,REFRESH_T=null;
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
-async function api(a,p){try{const r=await fetch('/api/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({},p,{initData:tg.initData}))});const j=await r.json();if(j.error)toast('⚠ '+j.error);return j}catch(e){toast('Нет связи с сервером');return{error:1}}}
+async function api(a,p,tries=2){
+for(let i=0;i<tries;i++){
+  try{
+    const r=await fetch('/api/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({},p,{initData:tg.initData}))});
+    if(r.status>=500) throw new Error('http '+r.status);
+    const j=await r.json(); if(j.error) toast('⚠ '+j.error); return j;
+  }catch(e){
+    if(i===tries-1){toast('Нет связи с сервером');return{error:1}}
+    toast('Ошибка сети, повторяю…'); await new Promise(res=>setTimeout(res,1200));
+  }
+}
+return{error:1};
+}
 const loading=()=>V().innerHTML='<div class="ld"><i></i></div>';
 const side=s=>`<span class="tag ${s=='LONG'?'L':'S'}">${s}</span>`;
 const TI={'Краткосрочный':'⚡','Среднесрочный':'⏳','Долгосрочный':'🛡'};
-function stopLive(){clearInterval(LIVE_T);LIVE_T=null}
+let ES=null;
+function stopLive(){clearInterval(LIVE_T);LIVE_T=null;if(ES){ES.close();ES=null}}
+function startPollFallback(c){clearInterval(LIVE_T);LIVE_T=setInterval(async()=>{if(CUR_COIN!==c||!CUR||CUR[0]!='coin')return stopLive();
+const l=await api('live',{coin:c});if(!l.live)return;const pe=$('#lp');if(pe)pe.textContent=f(l.live.price)},15000)}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopLive()});
 async function go(p,a,back){if(!back&&CUR)STACK.push(CUR);CUR=[p,a];hap();document.querySelectorAll('.tb b').forEach(b=>b.classList.toggle('on',b.dataset.t===p||(p=='coin_home'&&b.dataset.t=='coin')));
 if(STACK.length)tg.BackButton.show();else tg.BackButton.hide();if(p!='coin')stopLive();scrollTo(0,0);loading();await P[p](a)}
-function tab(t){STACK=[];CUR=null;go(t==='coin'&&!CUR_COIN?'coin_home':t)}
+function tab(t){stopLive();closeSheet();STACK=[];CUR=null;go(t==='coin'&&!CUR_COIN?'coin_home':t)}
 tg.BackButton.onClick(()=>{const p=STACK.pop();if(p)go(p[0],p[1],true)});
 
 /* ---------- Сигналы ---------- */
@@ -98,6 +123,7 @@ ${r.img?`<div class="card" style="padding:6px"><img class="ch" src="${r.img}"></
 ${r.fake_breakout?'<small class="dn" style="display:block">⚠ Ложный пробой (тонкий объём)</small>':''}${r.corr?`<small class="dn" style="display:block">⚠ ${esc(r.corr)}</small>`:''}</div>
 <div class="card"><div class="lv"><span>📥 Вход (только лимит)</span><b class="num">${f(r.entry)}</b></div>
 ${r.tps.map((p,i)=>`<div class="lv"><span>🎯 TP${i+1}</span><b class="num up">${f(p)} <small>${pc(p,r.entry)}</small></b></div>`).join('')}
+${r.current_sl!=null?`<div class="lv"><span>🛡 Стоп сейчас${r.trailing?' (трейлинг)':''}</span><b class="num dn" id="cursl">${f(r.current_sl)}</b></div>`:''}
 ${r.sls.map((p,i)=>`<div class="lv"><span>🛡 SL${i+1}</span><b class="num dn">${f(p)} <small>${pc(p,r.entry)}</small></b></div>`).join('')}</div>
 <div class="card"><small>⚖ ${esc(r.leverage)}</small><div class="lv"><span>Размер позиции</span><b class="num">$${(r.pos_usdt||0).toFixed(0)}</b></div>
 <div class="lv"><span>Риск на сделку</span><b class="num">$${(r.risk_usdt||0).toFixed(0)}</b></div><div class="lv"><span>Ликвидация при x20</span><b class="num dn">${f(r.liq_x20)}</b></div>
@@ -111,12 +137,20 @@ ${r.position?`<button class="btn d" onclick="act('pos_close','${r.coin}')">❌ �
 P.coin=async(c,force)=>{CUR_COIN=c;const r=await api('coin',{coin:c,force:!!force});if(r.error){V().innerHTML=`<div class="card">${esc(r.error)}</div>`;return}
 if(r.price_only){V().innerHTML=`<h1>${c}</h1><div class="card">💰 Цена: <b class="num">${f(r.price)}</b><br><small>Свечи недоступны, анализ невозможен.</small></div>`;return}
 V().innerHTML=`<div id="cbox">${drawCoin(r)}</div>`;stopLive();
-// живое обновление цены и вероятностей каждые 20 с; полный пересчёт выполняет сервер каждую минуту
-LIVE_T=setInterval(async()=>{if(CUR_COIN!==c||!CUR||CUR[0]!='coin')return stopLive();
-const l=await api('live',{coin:c});if(!l.live)return;const pe=$('#lp');if(pe)pe.textContent=f(l.live.price);},20000)};
+// цена приходит потоком Server-Sent Events раз в 3 с; при ошибке — опрос каждые 15 с
+try{
+  ES=new EventSource('/stream?coin='+encodeURIComponent(c)+'&initData='+encodeURIComponent(tg.initData));
+  ES.onmessage=(e)=>{const d=JSON.parse(e.data);if(CUR_COIN!==c)return;
+    if(d.price!=null){const pe=$('#lp');if(pe)pe.textContent=f(d.price)}
+    if(d.sl!=null){const cs=$('#cursl');if(cs)cs.textContent=f(d.sl)}};
+  ES.onerror=()=>{if(ES){ES.close();ES=null}if(!LIVE_T)startPollFallback(c)};
+}catch(err){startPollFallback(c)}}
 async function act(a,c){hap();const j=await api(a,{coin:c});if(j.error)return;toast(j.msg||'Готово');
 if(CUR&&CUR[0]=='coin')P.coin(c);else if(CUR)go(CUR[0],CUR[1],1)}
-async function alertFor(c,p){const t=prompt('Уведомить, когда цена '+c+' достигнет (сейчас '+f(p)+'):',f(p));if(!t)return;const v=parseFloat(t.replace(',','.').replace(/\s/g,''));if(!(v>0))return toast('Введите число');const j=await api('alert_add',{coin:c,price:v});if(!j.error)toast(j.msg)}
+let SHEET_COIN=null;
+function alertFor(c,p){SHEET_COIN=c;$('#sh-title').textContent='Алерт на цену: '+c;$('#sh-sub').textContent='Сейчас '+f(p)+'. Сообщу, когда цена пересечёт уровень.';$('#sh-val').value=String(+p);$('#sheet-bg').classList.add('on');$('#sheet').classList.add('on')}
+function closeSheet(){$('#sheet-bg').classList.remove('on');$('#sheet').classList.remove('on')}
+async function submitSheet(){let v=($('#sh-val').value||'').replace(/\s/g,'');v=v.includes('.')?v.replace(/,/g,''):v.replace(',','.');const n=parseFloat(v);if(!(n>0))return toast('Введите число');const j=await api('alert_add',{coin:SHEET_COIN,price:n});if(!j.error){toast(j.msg);closeSheet()}}
 function searchBox(){return `<div class="row" style="margin:10px 0"><input id="q" placeholder="Тикер, например SOL" autocapitalize="characters" onkeydown="if(event.key=='Enter')sq()"><button class="btn" style="width:96px" onclick="sq()">Найти</button></div>`}
 function sq(){const v=$('#q').value.toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/USDT$/,'');if(v)go('coin',v)}
 P.coin_home=async()=>{V().innerHTML=`<h1>Анализ <span>монеты</span></h1>${searchBox()}<div class="chips" style="display:flex;flex-wrap:wrap;gap:6px">${(S.coins||[]).slice(0,60).map(c=>`<div class="pill lst" onclick="go('coin','${c}')">${c}</div>`).join('')}</div>`};
