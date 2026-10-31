@@ -180,6 +180,8 @@ def make_cipher():
     if not Fernet:
         return None
     raw = clean_key(os.getenv("FERNET_KEY"))
+    if not raw:
+        log.warning("FERNET_KEY не задан: ключи шифруются от BOT_TOKEN. Задайте FERNET_KEY в переменных Render.")
     if raw:
         try:
             return Fernet(raw.encode())
@@ -2461,6 +2463,9 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
     agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
     squeeze4 = bool(info.get("squeeze"))
     atr_cap = 0.09 if squeeze4 else 0.06  # высокий ATR после сжатия — ещё не перегрев
+    ichi_now = int(info["df"].iloc[-1]["ichi_pos"]) if info.get("df") is not None else 0
+    if not reject and info["adx"] < 18 and ichi_now == 0:
+        reject = f"Пила: слабый тренд (ADX {info['adx']:.0f}) внутри облака Ишимоку"
     if not reject and info["adx"] < 15:
         reject = f"Вялый рынок (ADX {info['adx']:.0f})"
     if not reject and agree < min(3, len(tfs)):
@@ -3222,6 +3227,7 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
         rest -= 0.3
     parts.append((rest, pnl_at(exit_price)))
     pnl = sum(w * p for w, p in parts) - FEE_PCT
+    pnl -= (max(0.0, time.time() - pos.get("entered_at", time.time())) / 3600 / 8) * 0.01  # средний фандинг, оценка
     dist = abs(entry - pos.get("sl_orig", pos["sl1"])) / entry * 100
     r = pnl / dist if dist > 0 else 0.0
     s = get_user_risk_settings(uid)
@@ -3344,6 +3350,14 @@ async def check_position(user_id, coin, pos):
     pnl = sign * (price - entry) / entry * 100
 
     if pos.get("waiting_entry"):
+        newer = next((x for x in get_active_signals() if x["coin"] == coin and x["side"] == side
+                      and abs(x["entry"] - entry) / entry > 0.003), None)
+        if newer and pos.get("warned_entry") != round(newer["entry"], 8):
+            pos["warned_entry"] = round(newer["entry"], 8)
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"⚠ <b>Лимит сдвинулся: {coin} ({side})</b>\nВаш ордер: <code>{fmt(entry)}</code>\n"
+                                 f"Новый сигнал по монете: вход <code>{fmt(newer['entry'])}</code>.\n"
+                                 f"Ваш ордер не обновлён автоматически: проверьте его на бирже.")
         if sign * (price - entry) <= 0:
             pos["waiting_entry"] = False
             pos["entered_at"] = time.time()
@@ -3532,6 +3546,10 @@ async def news_watcher_loop():
                     last_news_link = link
                     state_touch(False)
                     await update_market_bias(force=True)
+                    ttl_news = (getattr(entries[0], "title", "") or "")
+                    if CRITICAL_NEWS.search(ttl_news.lower()):
+                        set_blackout(3600)
+                        await notify_admin(f"🚨 Критичная новость: сигналы на паузу 1 час.\n{ttl_news}")
                     await check_news_conflicts_with_signals()
                     if bot_flags["news_enabled"] and active_chats:
                         text, img_url = await prepare_news()
@@ -3798,7 +3816,11 @@ def _enrich_user_positions(uid):
 
 
 async def coin_payload(uid, coin, force=False):
-    res, err = await analyze_coin(coin, uid=uid, force=force)
+    if ANALYZE_SEM is not None:
+        async with ANALYZE_SEM:
+            res, err = await analyze_coin(coin, uid=uid, force=force)
+    else:
+        res, err = await analyze_coin(coin, uid=uid, force=force)
     if err:
         return {"error": strip_tags(err)[:300]}
     remember_res(uid, coin, res)
@@ -3827,6 +3849,7 @@ async def coin_payload(uid, coin, force=False):
 
 
 async def mini_dispatch(uid, u, act, d):
+    _users().setdefault(str(uid), {"active": True})["last_seen"] = time.time()
     if act not in FREE_ACTS and not has_access(uid):
         return {"error": access_closed_text(uid), "closed": True, "access": access_payload(uid),
                 "bot": runtime["main_bot"], "ads_support": ads_get()["support"]}
@@ -3872,6 +3895,10 @@ async def mini_dispatch(uid, u, act, d):
             out["sl"] = pos.get("sl1")
             out["trailing"] = abs(pos.get("sl1", 0) - pos.get("sl_orig", pos.get("sl1", 0))) > 1e-12
         return out
+
+    if act == "ref_link":
+        cnt = sum(1 for x in _users().values() if isinstance(x, dict) and x.get("referrer") == uid)
+        return {"link": f"https://t.me/{runtime['main_bot'].lstrip('@')}?start=ref_{uid}", "count": cnt}
 
     if act == "promo_apply":
         return {"msg": apply_promo(uid, str(d.get("code", "")))}
@@ -4038,10 +4065,20 @@ def notif_keyboard(uid):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+ANALYZE_SEM = None
+DISCOUNT_OFFERS = {}
+CRITICAL_NEWS = re.compile(r"hack|exploit|\bsec\b|lawsuit|delist|halt|bankrupt|arrest|sanction|взлом|запрет")
+
+
 @dp.message(Command("start", "menu"))
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
     uid = m.from_user.id
+    parts = (m.text or "").split()
+    if len(parts) > 1 and parts[1].startswith("ref_") and parts[1][4:].isdigit():
+        ref = int(parts[1][4:])
+        if ref != uid and "referrer" not in _users().get(str(uid), {}):
+            set_user_field(uid, referrer=ref)
     await asyncio.to_thread(save_user_data, uid, m.from_user.username, m.from_user.first_name)
     active_chats.add(m.chat.id)
     try:
@@ -4603,7 +4640,7 @@ from aiogram.types import LabeledPrice
 # ДОСТУП: пробный период, подписка (Telegram Stars), промокоды, бесплатный доступ, реклама
 # =====================================================================
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))
-PLANS = {30: 500, 90: 1300, 365: 4000}  # дни: цена в Telegram Stars (XTR)
+PLANS = {30: 399, 90: 1000, 365: 3500}  # дни: цена в Telegram Stars (XTR)
 PLAN_TITLE = {30: "Месяц", 90: "3 месяца", 365: "Год"}
 FEE_PCT = 0.1                            # комиссия туда-обратно, % от позиции
 FREE_ACTS = {"me", "access", "promo_apply", "support"}
@@ -4642,9 +4679,17 @@ def grant_days(uid, days, kind):
     with STATE_LOCK:
         u = STATE["users"].setdefault(str(uid), {"active": True})
         a = u.setdefault("access", {"until": 0, "kind": kind, "free": False, "paid_ever": False})
-        base = max(time.time(), a.get("until", 0))
-        a["until"] = base + days * 86400
-        a["kind"] = kind
+        if days >= 36500 or days == -1:
+            a["until"] = 9999999999
+            a["kind"] = "lifetime"
+            a["free"] = True
+        elif a.get("until", 0) > 9000000000:
+            pass
+        else:
+            base = max(time.time(), a.get("until", 0))
+            a["until"] = base + days * 86400
+            a["kind"] = kind
+            a["free"] = False
         if kind == "paid":
             a["paid_ever"] = True
     state_touch()
@@ -4653,15 +4698,20 @@ def grant_days(uid, days, kind):
 def access_payload(uid):
     a = _users().get(str(uid), {}).get("access") or {}
     ok = has_access(uid)
-    left = max(0, a.get("until", 0) - time.time())
-    if a.get("free") or int(uid) in ADMIN_IDS:
-        status = "бесплатно"
+    until = a.get("until", 0)
+    left = max(0, until - time.time())
+    if int(uid) in ADMIN_IDS:
+        status, days_left = "Админ", 9999
+    elif until > 9000000000 or a.get("free"):
+        status, days_left = "Навсегда", 9999
     elif ok:
         status = "пробный период" if a.get("kind") == "trial" else "подписка"
+        days_left = int(-(-left // 86400))
     else:
-        status = "закрыт"
-    return {"ok": ok, "status": status, "days_left": int(-(-left // 86400)), "hours_left": int(left // 3600) % 24,
-            "until": a.get("until", 0), "free": bool(a.get("free")), "plans": [{"days": d, "stars": s, "title": PLAN_TITLE[d]} for d, s in PLANS.items()],
+        status, days_left = "закрыт", 0
+    return {"ok": ok, "status": status, "days_left": days_left, "hours_left": int(left // 3600) % 24,
+            "until": until, "free": bool(a.get("free")),
+            "plans": [{"days": d, "stars": s, "title": PLAN_TITLE[d]} for d, s in PLANS.items()],
             "support": ads_get()["support"], "ad": ads_get()["text"] if ads_get()["on"] else ""}
 
 
@@ -4690,10 +4740,14 @@ def paywall_kb():
 async def send_plan_invoice(uid, days):
     if days not in PLANS:
         return
+    off = DISCOUNT_OFFERS.get(uid)
+    stars = PLANS[days]
+    if off and time.time() < off["until"]:
+        stars = max(1, round(stars * (100 - off["pct"]) / 100))
     await bot.send_invoice(chat_id=uid, title=f"IXCLY PRO · {PLAN_TITLE[days]}",
                            description=f"Доступ к сигналам, сопровождению сделок и аналитике на {days} дн.",
                            payload=f"plan:{days}", currency="XTR",
-                           prices=[LabeledPrice(label=f"{PLAN_TITLE[days]}", amount=PLANS[days])], provider_token="")
+                           prices=[LabeledPrice(label=f"{PLAN_TITLE[days]}", amount=stars)], provider_token="")
 
 
 def hourly_rows_cached_key(coin):
@@ -4770,7 +4824,14 @@ async def on_paid(m: types.Message):
         days = int(m.successful_payment.invoice_payload.split(":")[1])
     except Exception:
         days = 30
+    buyer = _users().get(str(m.from_user.id), {})
+    first_payment = not (buyer.get("access") or {}).get("paid_ever")
     grant_days(m.from_user.id, days, "paid")
+    DISCOUNT_OFFERS.pop(m.from_user.id, None)
+    ref = buyer.get("referrer")
+    if ref and first_payment:
+        grant_days(ref, 7, "referral")
+        await _tell(ref, "🎁 Ваш друг оплатил подписку. <b>+7 дней</b> начислено вам.")
     await _send_new(m.chat.id, f"✅ <b>Оплата получена.</b> Доступ продлён на {days} дн.\n"
                                f"Откройте приложение, сигналы уже доступны.", kb_nav(back=False), None)
     for aid in ADMIN_IDS:
@@ -4845,6 +4906,17 @@ if admin_dp:
             await m.answer(f"✅ Пользователю {uid} добавлено {days} дн.")
         except ValueError:
             await m.answer("Формат: <code>/grant UID ДНИ</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("lifetime", "forever"))
+    async def adm_lifetime(m: types.Message):
+        if not _is_admin(m):
+            return
+        try:
+            uid = int(m.text.split()[1])
+            grant_days(uid, -1, "lifetime")
+            await m.answer(f"✅ Пользователю {uid} выдан доступ НАВСЕГДА.")
+        except (ValueError, IndexError):
+            await m.answer("Формат: <code>/lifetime UID</code>", parse_mode="HTML")
 
     @admin_dp.message(Command("revoke"))
     async def adm_revoke(m: types.Message):
@@ -5250,6 +5322,33 @@ async def memory_janitor_loop():
         await asyncio.sleep(600)
 
 
+async def churn_offer_loop():
+    """Раз в сутки в 10:00 МСК: тем, кто скоро уйдёт и давно не заходил, — скидка 30% на 24 часа."""
+    while True:
+        msk = datetime.now(timezone(timedelta(hours=3)))
+        target = msk.replace(hour=10, minute=0, second=0, microsecond=0)
+        if msk >= target:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - msk).total_seconds())
+        now = time.time()
+        for uid_str, u in list(_users().items()):
+            try:
+                if not isinstance(u, dict) or not uid_str.isdigit():
+                    continue
+                uid = int(uid_str)
+                a = u.get("access") or {}
+                if a.get("free") or uid in ADMIN_IDS:
+                    continue
+                left = a.get("until", 0) - now
+                idle = now - u.get("last_seen", 0)
+                if -3 * 86400 < left <= 86400 and idle > 3 * 86400:
+                    DISCOUNT_OFFERS[uid] = {"pct": 30, "until": now + 86400}
+                    await _tell(uid, "🎁 <b>Скучаем!</b> Скидка 30% на продление — 24 часа.\nВыберите тариф в /buy.", paywall_kb())
+                    await asyncio.sleep(0.05)
+            except Exception as e:
+                log.info(f"churn {uid_str}: {e}")
+
+
 async def heartbeat_loop():
     while True:
         await asyncio.sleep(600)
@@ -5318,11 +5417,12 @@ async def price_feed_loop():
 
 
 async def main():
-    global http, news_lock, scan_lock, MAIN_LOOP, TG_SEM
+    global http, news_lock, scan_lock, MAIN_LOOP, TG_SEM, ANALYZE_SEM
     MAIN_LOOP = asyncio.get_running_loop()
     keep_alive()
     news_lock, scan_lock = asyncio.Lock(), asyncio.Lock()
     TG_SEM = asyncio.Semaphore(20)
+    ANALYZE_SEM = asyncio.Semaphore(3)
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.1"})
     load_state_file()
 
@@ -5378,7 +5478,7 @@ async def main():
         background = [asyncio.create_task(c()) for c in (
             scanner_loop, live_monitor_loop, price_feed_loop, global_signal_monitor_loop, position_monitor_loop,
             news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
-            anomaly_scanner_loop, state_flush_loop, access_reminder_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
+            anomaly_scanner_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
         background.append(asyncio.create_task(update_market_bias()))
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
