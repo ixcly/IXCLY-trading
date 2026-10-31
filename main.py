@@ -218,12 +218,12 @@ MODE_CONF = {"aggressive": 60, "balanced": 66, "conservative": 80}
 NOTIFY_NAMES = {"signals": "Сигналы", "news": "Новости", "anomalies": "Аномалии объёма",
                 "pos_updates": "Отчёты по сделкам", "briefing": "Утренний брифинг"}
 
-bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=30.0))
+bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=60.0))
 dp = Dispatcher()
 admin_bot = None
 admin_dp = None
 if INPUT_BOT_TOKEN and INPUT_BOT_TOKEN != BOT_TOKEN:
-    admin_bot = Bot(token=INPUT_BOT_TOKEN, session=AiohttpSession(timeout=30.0))
+    admin_bot = Bot(token=INPUT_BOT_TOKEN, session=AiohttpSession(timeout=60.0))
     admin_dp = Dispatcher()
 elif INPUT_BOT_TOKEN:
     log.warning("INPUT_BOT_TOKEN совпадает с BOT_TOKEN: админ-бот выключен")
@@ -305,11 +305,11 @@ news_blackout_until = 0.0
 # =====================================================================
 STATE_FILE = "bot_state.json"
 STATE_LOCK = threading.RLock()
-STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}}
+STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}}
 state_dirty = False
 backup_dirty = False
 last_backup_ts = 0.0
-STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist")
+STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads")
 
 
 def state_touch(important=True):
@@ -421,6 +421,7 @@ def save_user_data(user_id, username, first_name):
         new = key not in STATE["users"]
         u = STATE["users"].setdefault(key, {"joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         u.update({"username": username, "first_name": first_name, "active": True})
+    _init_trial(user_id)
     state_touch(new)
 
 
@@ -803,6 +804,13 @@ async def purge_chat(chat_id, upto_id, count=100):
 
 
 async def _send_new(chat_id, text, kb, photo):
+    if TG_SEM is None:
+        return await _send_new_raw(chat_id, text, kb, photo)
+    async with TG_SEM:
+        return await _send_new_raw(chat_id, text, kb, photo)
+
+
+async def _send_new_raw(chat_id, text, kb, photo):
     try:
         if photo:
             return await bot.send_photo(chat_id, BufferedInputFile(photo, "chart.png"), caption=trim_html(text, 1024),
@@ -1387,6 +1395,7 @@ async def get_market_data_light(coin, tfs=tuple(TFS)):
 
 
 async def fetch_history(coin, tf="4h", limit=1000, min_rows=300):
+    """Свечи с первой ответившей биржи. Запросы параллельно, не больше 3 одновременно, 429 → бан биржи."""
     order, seen = [], set()
     pref = preferred_source.get(coin)
     if pref:
@@ -1396,15 +1405,31 @@ async def fetch_history(coin, tf="4h", limit=1000, min_rows=300):
     for ex in EXCHANGES:
         for cand in SYMBOL_ALIASES.get(coin, [coin]):
             order.append((cand, ex))
-    for cand, ex in order:
-        if (cand, ex["name"]) in seen or time.time() < exchange_bans.get(ex["name"], 0):
-            continue
-        seen.add((cand, ex["name"]))
-        try:
-            return await _fetch_klines(ex, cand, tf, limit, min_rows=min_rows)
-        except Exception:
-            continue
-    return None
+    order = [(c, ex) for c, ex in order
+             if (c, ex["name"]) not in seen and not seen.add((c, ex["name"])) and time.time() >= exchange_bans.get(ex["name"], 0)]
+    sem = asyncio.Semaphore(3)
+
+    async def one(cand, ex):
+        async with sem:
+            try:
+                return await _fetch_klines(ex, cand, tf, limit, min_rows=min_rows)
+            except Exception as err:
+                if any(code in str(err) for code in ("429", "418", "403", "451")):
+                    exchange_bans[ex["name"]] = time.time() + 300
+                raise
+
+    tasks = [asyncio.create_task(one(c, ex)) for c, ex in order]
+    try:
+        for coro in asyncio.as_completed(tasks):
+            try:
+                return await coro
+            except Exception:
+                continue
+        return None
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def get_simple_price(coin):
@@ -2258,7 +2283,12 @@ async def oi_price_state(coin):
 async def order_book_imbalance(coin, price):
     """Перевес сил в стакане: доля бидов в ±2% от цены, ближние уровни весят больше (меньше спуфинга)."""
     try:
-        j = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol": f"{coin}USDT", "limit": 100}, timeout=5)
+        ent = _ob_cache.get(coin)
+        if ent and time.time() - ent[0] < 30:
+            j = ent[1]
+        else:
+            j = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol": f"{coin}USDT", "limit": 100}, timeout=5)
+            _ob_cache[coin] = (time.time(), j)
     except Exception as e:
         log.info(f"Стакан {coin}: {e}")
         return None
@@ -2347,7 +2377,7 @@ def session_info(now_msk):
 
 async def chandelier_stop(coin, is_long):
     """Chandelier Exit: максимум (минимум) 22 часовых свечей минус (плюс) 3 ATR."""
-    rows = await fetch_history(coin, "1h", 60, min_rows=30)
+    rows = await hourly_rows(coin)
     if not rows:
         return None
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
@@ -2810,7 +2840,7 @@ async def check_macro_calendar():
 def signal_recipients(coin, side):
     """Кому отправлять уведомления о сигнале: включивших сигналы."""
     return [int(uid) for uid, u in list(_users().items())
-            if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True)]
+            if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True) and has_access(int(uid))]
 
 
 async def scan_once(send=True):
@@ -2956,7 +2986,7 @@ async def scan_once(send=True):
 
 
 def webapp_link(coin=None, tab=None):
-    base = WEBAPP_URL or ""
+    base = WEBAPP_URL or f"https://t.me/{(runtime['main_bot'] or '').lstrip('@') or 'ixcly'}"
     q = []
     if coin:
         q.append(f"coin={coin}")
@@ -3052,7 +3082,7 @@ LIVE = {}
 
 
 async def live_monitor_loop():
-    """Каждые 60 с: обновляет данные по каждой активной монете и проверяет ликвидность сигналов."""
+    """Каждые 30 с: обновляет данные по каждой активной монете и проверяет ликвидность сигналов."""
     await asyncio.sleep(40)
     while True:
         try:
@@ -3084,8 +3114,8 @@ async def live_monitor_loop():
                 save_signal_history(hist)
         except Exception as e:
             log.error(f"live_monitor: {e}", exc_info=True)
-        next_timers["global_signals"] = time.time() + 60
-        await asyncio.sleep(60)
+        next_timers["global_signals"] = time.time() + 30
+        await asyncio.sleep(30)
 
 
 async def scanner_loop():
@@ -3134,7 +3164,7 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
         parts.append((0.3, pnl_at(pos["tp2"])))
         rest -= 0.3
     parts.append((rest, pnl_at(exit_price)))
-    pnl = sum(w * p for w, p in parts)
+    pnl = sum(w * p for w, p in parts) - FEE_PCT
     dist = abs(entry - pos.get("sl_orig", pos["sl1"])) / entry * 100
     r = pnl / dist if dist > 0 else 0.0
     s = get_user_risk_settings(uid)
@@ -3355,6 +3385,8 @@ async def position_monitor_loop():
     while True:
         try:
             for uid_str, u in list(_users().items()):
+                if not has_access(int(uid_str)):
+                    continue
                 for coin, pos in list((u.get("open_positions") or {}).items()):
                     try:
                         await check_position(int(uid_str), coin, pos)
@@ -3501,7 +3533,7 @@ async def morning_briefing_loop():
             fng = ctx.get("fng")
             text = (f"☀️ <b>Доброе утро!</b>\n\n🌍 <b>BTC:</b> {ctx.get('btc_txt')}\n"
                     f"😨 <b>F&G:</b> {fng if fng is not None else '—'} {ctx.get('fng_txt', '')}\n"
-                    f"🔥 <b>Активных сигналов:</b> {len(get_active_signals())}\n\n<i>Удачной торговли!</i>")
+                    f"🔥 <b>Активных сигналов:</b> {len(get_active_signals())}\n\n<i>Удачной торговли!</i>" + ad_block())
             for cid in list(active_chats):
                 if get_user_notif_settings(cid)["briefing"]:
                     try:
@@ -3656,6 +3688,8 @@ def mini_api(act):
         return Response('{"error":"Откройте приложение из Telegram"}', 401, mimetype="application/json")
     try:
         out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(120)
+    except (ValueError, TypeError):
+        out = {"error": "Проверьте введённые данные"}
     except Exception as e:
         log.warning(f"mini_api {act}: {e}")
         out = {"error": "Ошибка сервера, попробуйте ещё раз"}
@@ -3703,6 +3737,12 @@ async def coin_payload(uid, coin, force=False):
     out["in_fav"] = any(x["coin"] == coin for x in get_user_saved_signals(uid))
     out["position"] = bool(get_open_position(uid, coin))
     out["live"] = LIVE.get(coin)
+    pos_now = get_open_position(uid, coin)
+    sig_now = next((x for x in get_active_signals() if x["coin"] == coin), None)
+    cur_sl = (pos_now or {}).get("sl1") or (sig_now or {}).get("sl1")
+    orig_sl = (pos_now or {}).get("sl_orig") or (sig_now or {}).get("sl1")
+    out["current_sl"] = cur_sl
+    out["trailing"] = bool(cur_sl and orig_sl and abs(cur_sl - orig_sl) > 1e-12)
     out["signal_active"] = any(x["coin"] == coin for x in get_active_signals())
     out["corr"] = None
     for oc, od in get_user_open_positions(uid).items():
@@ -3712,6 +3752,8 @@ async def coin_payload(uid, coin, force=False):
 
 
 async def mini_dispatch(uid, u, act, d):
+    if act not in FREE_ACTS and not has_access(uid):
+        return {"error": access_closed_text(uid), "closed": True}
     if uid not in active_chats:
         active_chats.add(uid)
         await asyncio.to_thread(save_user_data, uid, u.get("username"), u.get("first_name"))
@@ -3724,7 +3766,7 @@ async def mini_dispatch(uid, u, act, d):
                 "mode": mode, "conf": MODE_CONF.get(mode, CONF_FINAL), "notif": get_user_notif_settings(uid),
                 "saved": [_sig_item(s, False) for s in get_user_saved_signals(uid)],
                 "alerts": uu.get("price_alerts", []), "webhook": uu.get("webhook_url", ""),
-                "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150],
+                "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150], "access": access_payload(uid),
                 "counts": {"signals": len(signals_for(uid)), "saved": len(get_user_saved_signals(uid)),
                            "positions": len(get_user_open_positions(uid))}}
 
@@ -3744,6 +3786,10 @@ async def mini_dispatch(uid, u, act, d):
         return dict(refresh_job)
 
     if act == "coin" and coin:
+        if d.get("force") and time.time() - COIN_RL.get(uid, 0) < 5:
+            return {"error": "Подождите 5 секунд перед пересчётом"}
+        if d.get("force"):
+            COIN_RL[uid] = time.time()
         return await coin_payload(uid, coin, force=bool(d.get("force")))
 
     if act == "live" and coin:
@@ -3911,7 +3957,7 @@ async def cmd_start(m: types.Message, state: FSMContext):
         await m.delete()
     except Exception:
         pass
-    await bot.send_message(m.chat.id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
+    await welcome_for(m.chat.id, m.from_user.id)
 
 
 from PIL import ImageFilter, ImageChops
@@ -4061,7 +4107,7 @@ def signal_caption(x, uid, title="СИГНАЛ"):
             f"📥 Вход <b>лимит</b> <code>{fmt(x['entry'])}</code>\n"
             f"🎯 TP1 <code>{fmt(x['tp1'])}</code> · TP2 <code>{fmt(x['tp2'])}</code> · TP3 <code>{fmt(x['tp3'])}</code>\n"
             f"🛡 Отмена <code>{fmt(x['sl1'])}</code> (−{dist:.2f}%)\n"
-            f"💼 Для вашего депозита: позиция ~<b>${pos:,.0f}</b>, риск <b>${risk_usd:.0f}</b>\n"
+            f"💼 Для вашего депозита: позиция ~<b>${pos:,.0f}</b> (≈ {pos / x['entry']:.4g} {html.escape(x['coin'])}), риск <b>${risk_usd:.0f}</b>\n"
             f"<i>Не финансовая рекомендация. Вход только лимитом.</i>")
 
 
@@ -4140,15 +4186,16 @@ def signal_r(status, max_tp):
     return 0.0
 
 
-def excursion(x, rows):
-    """Максимум в пользу и против входа, в единицах риска (R), с момента сигнала."""
+def excursion(x, rows, end_ms=None):
+    """MFE/MAE в R с момента сигнала, но не позже момента закрытия (end_ms, мс)."""
     risk = abs(x["entry"] - x["sl1"]) or 1e-9
+    is_long = x.get("is_long", x.get("side") == "LONG")
     t0 = x["ts"] * 1000
     mfe = mae = 0.0
     for ts, _o, h, l, _c, _v in rows:
-        if ts < t0:
+        if ts < t0 or (end_ms is not None and ts > end_ms):
             continue
-        if x["is_long"]:
+        if is_long:
             mfe = max(mfe, (h - x["entry"]) / risk)
             mae = min(mae, (l - x["entry"]) / risk)
         else:
@@ -4189,11 +4236,12 @@ async def global_signal_monitor_loop():
                 rows = rows_cache[coin]
                 if not rows:
                     continue
-                mfe, mae = excursion(x, rows)
+                status, max_tp, hit_sl = simulate_signal(x, rows)
+                end_ms = time.time() * 1000 if status in ("win", "loss", "missed", "expired") else None
+                mfe, mae = excursion(x, rows, end_ms)
                 if mfe > x.get("mfe", 0) or mae < x.get("mae", 0):
                     x["mfe"], x["mae"] = max(mfe, x.get("mfe", 0)), min(mae, x.get("mae", 0))
                     changed = True
-                status, max_tp, hit_sl = simulate_signal(x, rows)
                 prev_status, prev_tp = x["status"], x.get("max_tp_hit", 0)
                 if (status, max_tp, hit_sl) == (prev_status, prev_tp, x.get("hit_sl", 0)):
                     continue
@@ -4458,6 +4506,374 @@ async def cmd_analytics(m: types.Message):
 
 
 
+from aiogram.types import LabeledPrice
+
+# =====================================================================
+# ДОСТУП: пробный период, подписка (Telegram Stars), промокоды, бесплатный доступ, реклама
+# =====================================================================
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))
+PLANS = {30: 500, 90: 1300, 365: 4000}  # дни: цена в Telegram Stars (XTR)
+PLAN_TITLE = {30: "Месяц", 90: "3 месяца", 365: "Год"}
+FEE_PCT = 0.1                            # комиссия туда-обратно, % от позиции
+FREE_ACTS = {"me", "access", "promo_apply", "support"}
+TG_SEM = None                            # создаётся в main (не привязано к event loop при импорте)
+COIN_RL = {}                             # uid -> ts последнего пересчёта монеты
+_ob_cache = {}
+_hourly_cache = {}
+ADS_DEFAULT = {"on": False, "text": "", "url": "", "contact": "@ixcly", "support": "@ixcly"}
+
+
+def ads_get():
+    a = dict(ADS_DEFAULT)
+    a.update(STATE.get("ads") or {})
+    return a
+
+
+def _init_trial(uid):
+    """Новому пользователю — пробный период; старым (до обновления) тоже даём, если доступа ещё не было."""
+    with STATE_LOCK:
+        u = STATE["users"].setdefault(str(uid), {"active": True})
+        if "access" not in u:
+            u["access"] = {"until": time.time() + TRIAL_DAYS * 86400, "kind": "trial", "free": False, "paid_ever": False}
+    state_touch(False)
+
+
+def has_access(uid):
+    if int(uid) in ADMIN_IDS:
+        return True
+    a = _users().get(str(uid), {}).get("access") or {}
+    if a.get("free"):
+        return True
+    return time.time() < a.get("until", 0)
+
+
+def grant_days(uid, days, kind):
+    with STATE_LOCK:
+        u = STATE["users"].setdefault(str(uid), {"active": True})
+        a = u.setdefault("access", {"until": 0, "kind": kind, "free": False, "paid_ever": False})
+        base = max(time.time(), a.get("until", 0))
+        a["until"] = base + days * 86400
+        a["kind"] = kind
+        if kind == "paid":
+            a["paid_ever"] = True
+    state_touch()
+
+
+def access_payload(uid):
+    a = _users().get(str(uid), {}).get("access") or {}
+    ok = has_access(uid)
+    left = max(0, a.get("until", 0) - time.time())
+    if a.get("free") or int(uid) in ADMIN_IDS:
+        status = "бесплатно"
+    elif ok:
+        status = "пробный период" if a.get("kind") == "trial" else "подписка"
+    else:
+        status = "закрыт"
+    return {"ok": ok, "status": status, "days_left": int(-(-left // 86400)), "hours_left": int(left // 3600) % 24,
+            "until": a.get("until", 0), "free": bool(a.get("free")), "plans": [{"days": d, "stars": s, "title": PLAN_TITLE[d]} for d, s in PLANS.items()],
+            "support": ads_get()["support"], "ad": ads_get()["text"] if ads_get()["on"] else ""}
+
+
+def access_closed_text(uid):
+    a = access_payload(uid)
+    if a["status"] == "закрыт" or not a["ok"]:
+        return "🔒 Доступ закрыт. Оплатите подписку в боте: /buy"
+    return "Доступ закрыт"
+
+
+def ad_block():
+    a = ads_get()
+    if not a["on"] or not a["text"]:
+        return ""
+    link = f"\n🔗 {html.escape(a['url'])}" if a["url"] else ""
+    return f"\n\n📢 <i>{html.escape(a['text'])}</i>{link}\nРеклама: {html.escape(a['contact'])}"
+
+
+def paywall_kb():
+    rows = [[InlineKeyboardButton(text=f"💳 {PLAN_TITLE[d]} · {s}⭐", callback_data=f"buy:{d}")] for d, s in PLANS.items()]
+    rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:help")])
+    rows.append([InlineKeyboardButton(text=f"🆘 Поддержка {ads_get()['support']}", url=f"https://t.me/{ads_get()['support'].lstrip('@')}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_plan_invoice(uid, days):
+    if days not in PLANS:
+        return
+    await bot.send_invoice(chat_id=uid, title=f"IXCLY PRO · {PLAN_TITLE[days]}",
+                           description=f"Доступ к сигналам, сопровождению сделок и аналитике на {days} дн.",
+                           payload=f"plan:{days}", currency="XTR",
+                           prices=[LabeledPrice(label=f"{PLAN_TITLE[days]}", amount=PLANS[days])], provider_token="")
+
+
+def hourly_rows_cached_key(coin):
+    return coin
+
+
+async def hourly_rows(coin):
+    """1h свечи для Chandelier: кэш на 60 секунд, чтобы не бить по бирже на каждую сделку."""
+    ent = _hourly_cache.get(coin)
+    if ent and time.time() - ent[0] < 60:
+        return ent[1]
+    rows = await fetch_history(coin, "1h", 60, min_rows=30)
+    _hourly_cache[coin] = (time.time(), rows)
+    return rows
+
+
+def normalize_signals():
+    """Старые сигналы без поля is_long (до обновления) — дополняем, чтобы монитор не падал."""
+    with STATE_LOCK:
+        for x in STATE["signal_history"]:
+            if isinstance(x, dict):
+                x.setdefault("is_long", x.get("side") == "LONG")
+                x.setdefault("sl1", x.get("sl1", 0.0))
+
+
+async def access_reminder_loop():
+    """Напоминания об оплате в 12:00 и 20:00 МСК: пробный период и просроченный доступ (тем, кто не платил)."""
+    while True:
+        msk = datetime.now(timezone(timedelta(hours=3)))
+        slots = [msk.replace(hour=h, minute=0, second=0, microsecond=0) for h in (12, 20)]
+        nxt = next((t for t in slots if t > msk), slots[0] + timedelta(days=1))
+        await asyncio.sleep((nxt - msk).total_seconds())
+        for uid_str, u in list(_users().items()):
+            try:
+                uid = int(uid_str)
+                if not isinstance(u, dict) or uid in ADMIN_IDS:
+                    continue
+                a = u.get("access") or {}
+                if a.get("free"):
+                    continue
+                left = a.get("until", 0) - time.time()
+                if a.get("kind") == "trial":
+                    if 0 < left <= 2 * 86400:
+                        text = f"⏳ <b>Пробный доступ заканчивается через {int(left // 3600)} ч.</b>\nОплатите подписку, чтобы сигналы не прерывались."
+                    elif left <= 0:
+                        text = "🔒 <b>Пробный доступ закончился.</b> Сигналы и сопровождение отключены. Оплатите подписку, чтобы вернуть доступ."
+                    else:
+                        continue
+                elif left <= 0 and not a.get("paid_ever"):
+                    text = "🔒 <b>Доступ закрыт.</b> Оплатите подписку, чтобы вернуть сигналы."
+                else:
+                    continue
+                await _tell(uid, text, paywall_kb())
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                log.info(f"reminder {uid_str}: {e}")
+
+
+async def pre_checkout_handler(q: types.PreCheckoutQuery):
+    try:
+        await q.answer(ok=True)
+    except Exception as e:
+        log.warning(f"pre_checkout: {e}")
+
+
+@dp.pre_checkout_query()
+async def on_pre_checkout(q: types.PreCheckoutQuery):
+    await pre_checkout_handler(q)
+
+
+@dp.message(F.successful_payment)
+async def on_paid(m: types.Message):
+    try:
+        days = int(m.successful_payment.invoice_payload.split(":")[1])
+    except Exception:
+        days = 30
+    grant_days(m.from_user.id, days, "paid")
+    await _send_new(m.chat.id, f"✅ <b>Оплата получена.</b> Доступ продлён на {days} дн.\n"
+                               f"Откройте приложение, сигналы уже доступны.", kb_nav(back=False), None)
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(aid, f"💰 Оплата: {m.from_user.id} · {days} дн. · {m.successful_payment.total_amount}⭐")
+        except Exception:
+            pass
+
+
+@dp.message(Command("buy"))
+async def cmd_buy(m: types.Message):
+    try:
+        await m.delete()
+    except Exception:
+        pass
+    a = access_payload(m.from_user.id)
+    await _send_new(m.chat.id, f"💳 <b>Подписка IXCLY PRO</b>\nСтатус: <b>{a['status']}</b>"
+                               f"{' · осталось ' + str(a['days_left']) + ' дн.' if a['ok'] and not a['free'] else ''}\n\n"
+                               f"Оплата звёздами Telegram (⭐). Выберите срок:", paywall_kb(), None)
+
+
+@dp.message(Command("promo"))
+async def cmd_promo(m: types.Message):
+    try:
+        await m.delete()
+    except Exception:
+        pass
+    parts = (m.text or "").split()
+    if len(parts) < 2:
+        return await _send_new(m.chat.id, "🎟 Введите: <code>/promo КОД</code>", kb_nav(back=False), None)
+    code = parts[1].upper()
+    with STATE_LOCK:
+        promo = STATE["promos"].get(code)
+        if not promo or promo.get("uses_left", 0) <= 0 or (promo.get("expires") and time.time() > promo["expires"]):
+            text = "❌ Промокод не найден или закончился."
+        elif m.from_user.id in promo.get("used", []):
+            text = "ℹ Вы уже использовали этот промокод."
+        else:
+            promo["uses_left"] -= 1
+            promo.setdefault("used", []).append(m.from_user.id)
+            text = None
+    if text is None:
+        grant_days(m.from_user.id, promo["days"], "promo")
+        text = f"🎉 Промокод активирован: +{promo['days']} дн. доступа."
+        state_touch()
+    await _send_new(m.chat.id, text, kb_nav(back=False), None)
+
+
+if admin_dp:
+    def _is_admin(m):
+        return m.from_user.id in ADMIN_IDS
+
+    @admin_dp.message(Command("grant"))
+    async def adm_grant(m: types.Message):
+        if not _is_admin(m):
+            return
+        try:
+            _, uid, days = m.text.split()
+            grant_days(int(uid), int(days), "grant")
+            await m.answer(f"✅ Пользователю {uid} добавлено {days} дн.")
+        except ValueError:
+            await m.answer("Формат: <code>/grant UID ДНИ</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("revoke"))
+    async def adm_revoke(m: types.Message):
+        if not _is_admin(m):
+            return
+        try:
+            uid = int(m.text.split()[1])
+            with STATE_LOCK:
+                u = STATE["users"].setdefault(str(uid), {"active": True})
+                u["access"] = {"until": 0, "kind": "trial", "free": False, "paid_ever": (u.get("access") or {}).get("paid_ever", False)}
+            state_touch()
+            await m.answer(f"⛔ Доступ пользователя {uid} закрыт.")
+        except (ValueError, IndexError):
+            await m.answer("Формат: <code>/revoke UID</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("free"))
+    async def adm_free(m: types.Message):
+        """/free UID on|off — бесплатный доступ без подписки (без срока)."""
+        if not _is_admin(m):
+            return
+        try:
+            _, uid, mode = m.text.split()
+            with STATE_LOCK:
+                a = STATE["users"].setdefault(str(int(uid)), {"active": True}).setdefault("access", {"until": 0, "kind": "grant", "free": False, "paid_ever": False})
+                a["free"] = mode.lower() == "on"
+            state_touch()
+            await m.answer(f"{'🆓' if a['free'] else '🔒'} Бесплатный доступ {uid}: {'включён' if a['free'] else 'выключен'}")
+        except ValueError:
+            await m.answer("Формат: <code>/free UID on|off</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("promo_add"))
+    async def adm_promo_add(m: types.Message):
+        """/promo_add КОД ДНИ ИСПОЛЬЗОВАНИЙ [ДНЕЙ_ДО_ИСТЕЧЕНИЯ]"""
+        if not _is_admin(m):
+            return
+        try:
+            parts = m.text.split()
+            code, days, uses = parts[1].upper(), int(parts[2]), int(parts[3])
+            exp = time.time() + int(parts[4]) * 86400 if len(parts) > 4 else None
+            with STATE_LOCK:
+                STATE["promos"][code] = {"days": days, "uses_left": uses, "expires": exp, "used": []}
+            state_touch()
+            await m.answer(f"🎟 Промокод {code}: {days} дн., использований {uses}" + (f", до {int(parts[4])} дн." if exp else ""))
+        except (ValueError, IndexError):
+            await m.answer("Формат: <code>/promo_add КОД ДНИ ИСПОЛЬЗОВАНИЙ [ДНЕЙ_ДО_ИСТЕЧЕНИЯ]</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("promo_del"))
+    async def adm_promo_del(m: types.Message):
+        if not _is_admin(m):
+            return
+        code = (m.text.split()[1] if len(m.text.split()) > 1 else "").upper()
+        with STATE_LOCK:
+            ok = STATE["promos"].pop(code, None) is not None
+        state_touch()
+        await m.answer("🗑 Удалён." if ok else "Не найден.")
+
+    @admin_dp.message(Command("promos"))
+    async def adm_promos(m: types.Message):
+        if not _is_admin(m):
+            return
+        lines = [f"{k}: {v['days']} дн., осталось {v['uses_left']}" for k, v in STATE["promos"].items()] or ["Промокодов нет"]
+        await m.answer("🎟 <b>Промокоды</b>\n" + "\n".join(lines), parse_mode="HTML")
+
+    @admin_dp.message(Command("ad_set"))
+    async def adm_ad_set(m: types.Message):
+        """/ad_set текст | ссылка(необязательно)"""
+        if not _is_admin(m):
+            return
+        body = m.text.split(" ", 1)[1] if " " in m.text else ""
+        text, _, url = body.partition("|")
+        with STATE_LOCK:
+            STATE["ads"] = dict(ads_get(), on=True, text=text.strip(), url=url.strip())
+        state_touch()
+        await m.answer("📢 Реклама включена и будет показана в приложении и утреннем брифинге.")
+
+    @admin_dp.message(Command("ad_off"))
+    async def adm_ad_off(m: types.Message):
+        if not _is_admin(m):
+            return
+        with STATE_LOCK:
+            STATE["ads"] = dict(ads_get(), on=False)
+        state_touch()
+        await m.answer("📢 Реклама выключена.")
+
+    @admin_dp.message(Command("contact"))
+    async def adm_contact(m: types.Message):
+        """/contact ads|support @ник — кому писать по рекламе и в поддержку"""
+        if not _is_admin(m):
+            return
+        try:
+            _, kind, nick = m.text.split()
+            key = "contact" if kind == "ads" else "support"
+            with STATE_LOCK:
+                STATE["ads"] = dict(ads_get(), **{key: nick})
+            state_touch()
+            await m.answer(f"✅ {'Реклама' if key == 'contact' else 'Поддержка'}: {nick}")
+        except ValueError:
+            await m.answer("Формат: <code>/contact ads @ник</code> или <code>/contact support @ник</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("who"))
+    async def adm_who(m: types.Message):
+        if not _is_admin(m):
+            return
+        try:
+            uid = int(m.text.split()[1])
+            a = access_payload(uid)
+            u = _users().get(str(uid), {})
+            await m.answer(f"👤 {uid} · {html.escape(str(u.get('first_name') or '—'))}\nСтатус: {a['status']}, осталось {a['days_left']} дн., "
+                           f"бесплатно: {'да' if a['free'] else 'нет'}")
+        except (ValueError, IndexError):
+            await m.answer("Формат: <code>/who UID</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("admin_help"))
+    async def adm_help(m: types.Message):
+        if not _is_admin(m):
+            return
+        await m.answer("<b>Команды админа</b>\n/grant UID ДНИ — добавить дни\n/revoke UID — закрыть доступ\n"
+                       "/free UID on|off — бесплатный доступ\n/who UID — статус\n"
+                       "/promo_add КОД ДНИ ИСП [ДНЕЙ] · /promo_del КОД · /promos\n"
+                       "/ad_set текст | ссылка · /ad_off\n/contact ads @ник · /contact support @ник", parse_mode="HTML")
+
+
+
+async def welcome_for(chat_id, uid):
+    if has_access(uid):
+        await bot.send_message(chat_id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
+    else:
+        await bot.send_message(chat_id, "🔒 <b>Доступ закрыт.</b>\nПробный период закончился или не активирован. "
+                                        "Оплатите подписку, чтобы получать сигналы и сопровождение сделок.",
+                               parse_mode="HTML", reply_markup=paywall_kb())
+
+
 @dp.message()
 async def fallback_message(m: types.Message):
     try:
@@ -4470,7 +4886,7 @@ async def fallback_message(m: types.Message):
                                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                                    InlineKeyboardButton(text="📈 Открыть анализ", web_app=WebAppInfo(url=webapp_link(coin)))]]))
     else:
-        await bot.send_message(m.chat.id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
+        await welcome_for(m.chat.id, m.from_user.id)
 
 
 @dp.callback_query()
@@ -4479,6 +4895,12 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
+        if data.startswith("buy:"):
+            await safe_answer(cb)
+            return await send_plan_invoice(uid, int(data.split(":")[1]))
+        if data == "promo:help":
+            await safe_answer(cb)
+            return await _send_new(msg.chat.id if msg else uid, "🎟 Отправьте: <code>/promo КОД</code>", kb_nav(back=False), None)
         if data[:3] in ("in:", "sv:"):
             return await handle_signal_button(cb, data)
         if data == "del_msg" and msg:
@@ -4760,11 +5182,71 @@ async def run_polling(dispatcher, tg_bot, name, stop_event):
 
 
 
+
+# =====================================================================
+# ЦЕНА В РЕАЛЬНОМ ВРЕМЕНИ: цикл цен и поток Server-Sent Events для приложения
+# =====================================================================
+PRICES = {}         # coin -> {"price", "ts"}
+STREAM_COINS = {}   # coin -> ts последнего открытия экрана монеты
+
+
+async def price_feed_loop():
+    """Цена каждые 8 секунд для монет из сигналов, позиций и открытых экранов приложения."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            now = time.time()
+            for c in [c for c, t in list(STREAM_COINS.items()) if now - t > 90]:
+                STREAM_COINS.pop(c, None)
+            watch = {x["coin"] for x in get_active_signals()}
+            for u in list(_users().values()):
+                if isinstance(u, dict):
+                    watch |= set((u.get("open_positions") or {}).keys())
+            watch |= set(list(STREAM_COINS.keys()))
+            for coin in sorted(watch)[:30]:
+                p = await get_simple_price(coin)
+                if p:
+                    PRICES[coin] = {"price": p, "ts": time.time()}
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            log.info(f"price_feed: {e}")
+        await asyncio.sleep(8)
+
+
+@app.route("/stream")
+def mini_stream():
+    """Server-Sent Events: цена каждые 3 секунды, для открытой монеты; PnL и стоп — если есть позиция."""
+    u = tg_auth(request.args.get("initData", ""))
+    if not u:
+        return Response("unauthorized", 401)
+    coin = normalize_ticker(request.args.get("coin", "BTC"))
+    uid = u["id"]
+
+    def gen():
+        while True:
+            STREAM_COINS[coin] = time.time()
+            p = PRICES.get(coin)
+            payload = {"coin": coin, "price": p["price"] if p else None, "ts": p["ts"] if p else None}
+            pos = _users().get(str(uid), {}).get("open_positions", {}).get(coin)
+            if pos and p:
+                sign = 1 if pos["side"] == "LONG" else -1
+                payload["pnl"] = round(sign * (p["price"] - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+                payload["sl"] = pos.get("sl1")
+                payload["trailing"] = abs(pos.get("sl1", 0) - pos.get("sl_orig", pos.get("sl1", 0))) > 1e-12
+            yield f"data: {json.dumps(payload)}\n\n"
+            time.sleep(3)
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+
 async def main():
-    global http, news_lock, scan_lock, MAIN_LOOP
+    global http, news_lock, scan_lock, MAIN_LOOP, TG_SEM
     MAIN_LOOP = asyncio.get_running_loop()
     keep_alive()
     news_lock, scan_lock = asyncio.Lock(), asyncio.Lock()
+    TG_SEM = asyncio.Semaphore(20)
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.1"})
     load_state_file()
 
@@ -4810,13 +5292,17 @@ async def main():
         if restored:
             log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
         load_active_chats()
+        normalize_signals()
+        for _uid in list(_users()):
+            if str(_uid).isdigit():
+                _init_trial(int(_uid))
         gc.freeze()
         asyncio.create_task(discover_models())
 
         background = [asyncio.create_task(c()) for c in (
-            scanner_loop, live_monitor_loop, global_signal_monitor_loop, position_monitor_loop,
+            scanner_loop, live_monitor_loop, price_feed_loop, global_signal_monitor_loop, position_monitor_loop,
             news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
-            anomaly_scanner_loop, state_flush_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
+            anomaly_scanner_loop, state_flush_loop, access_reminder_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
         background.append(asyncio.create_task(update_market_bias()))
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
