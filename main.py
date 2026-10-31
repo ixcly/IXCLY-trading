@@ -2391,6 +2391,49 @@ async def chandelier_stop(coin, is_long):
     return float(df["low"].tail(22).min() + 3 * atr)
 
 
+def weekly_trend(tf_data):
+    """Недельный тренд из дневных свечей (без новых запросов): 1 бычий, −1 медвежий, 0 нет."""
+    df = tf_data.get("1d", {}).get("df")
+    if df is None or len(df) < 12 * 7:
+        return 0
+    closes = df["close"].values[::-1][::7][::-1]
+    if len(closes) < 12:
+        return 0
+    ws = pd.Series(closes)
+    e10 = ws.ewm(span=10, adjust=False).mean().iloc[-1]
+    e20 = ws.ewm(span=20, adjust=False).mean().iloc[-1]
+    last = closes[-1]
+    if last > e10 > e20:
+        return 1
+    if last < e10 < e20:
+        return -1
+    return 0
+
+
+def smc_context(tf_data, is_long):
+    """FVG (имбаланс) и ордерблок на 1h: цена вернулась в зону — возможная точка входа по направлению."""
+    h1 = tf_data.get("1h", {}).get("df")
+    if h1 is None or len(h1) < 40:
+        return 0, None
+    d = h1.tail(60).reset_index(drop=True)
+    hi, lo, op, cl = d["high"].values, d["low"].values, d["open"].values, d["close"].values
+    px = cl[-1]
+    n = len(d)
+    for i in range(n - 1, max(1, n - 40), -1):
+        if is_long and lo[i] > hi[i - 2] and hi[i - 2] <= px <= lo[i]:
+            return 6, f"FVG 1h: цена вернулась в имбаланс {fmt(hi[i - 2])}–{fmt(lo[i])}"
+        if (not is_long) and hi[i] < lo[i - 2] and lo[i - 2] >= px >= hi[i]:
+            return 6, f"FVG 1h: цена вернулась в имбаланс {fmt(hi[i])}–{fmt(lo[i - 2])}"
+    for j in range(n - 6, 20, -1):
+        if is_long and cl[j] < op[j]:
+            if cl[j + 1:j + 4].max() > hi[j - 20:j].max() and lo[j] <= px <= hi[j]:
+                return 6, f"Ордерблок 1h {fmt(lo[j])}–{fmt(hi[j])}: откат к зоне импульса"
+        if (not is_long) and cl[j] > op[j]:
+            if cl[j + 1:j + 4].min() < lo[j - 20:j].min() and lo[j] <= px <= hi[j]:
+                return 6, f"Ордерблок 1h {fmt(lo[j])}–{fmt(hi[j])}: откат к зоне импульса"
+    return 0, None
+
+
 async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_change=0.0, conf_threshold=CONF_FINAL):
     """Мульти-ТФ оценка и фильтры v2. valid=True только если прошли все гейты."""
     out = {"valid": False, "reject": "", "notes": [], "is_long": True, "strength": 50.0, "type": "Среднесрочный",
@@ -2557,6 +2600,20 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
     if squeeze4 and (info["ema20"] > info["ema50"]) == is_long:
         strength += 4
         pos_reasons.append("Сжатие Боллинджера на 4h: импульс близко, направление совпадает с EMA")
+
+    smc_delta, smc_reason = smc_context(tf_data, is_long)
+    if smc_delta:
+        strength += smc_delta
+        if smc_reason:
+            pos_reasons.append(smc_reason)
+    wk = weekly_trend(tf_data)
+    if wk:
+        if (wk == 1) == is_long:
+            strength += 3
+            pos_reasons.append("Недельный тренд совпадает с направлением")
+        else:
+            strength -= 6
+            notes.append("недельный тренд против направления (−6)")
 
     nb = market_bias.get("bias", 0)
     news_status = "Нейтрально"
@@ -3368,14 +3425,19 @@ async def check_position(user_id, coin, pos):
     if reason:
         text = (f"{'🏆' if urgency == 'success' else '🛑'} <b>Сопровождение: {coin} ({side})</b>\n"
                 f"Вход: <code>{fmt(entry)}</code> | Сейчас: <code>{fmt(price)}</code> | PnL <b>{pnl:+.2f}%</b>\n\n{reason}")
+        kb = None
         if pos.get("notified_close"):
             rec = record_trade_result(user_id, coin, pos, exit_price, why)
             set_user_open_position(user_id, coin, None)
             if rec:
                 text += "\n\n" + render_trade_card(rec)
+                share = f"Я закрыл {coin} ({side}) с результатом {rec['pnl']:+.2f}% в IXCLY PRO! 🔥"
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📈 Моя статистика", callback_data="mystats")],
+                    [InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?text={quote(share)}")]])
         else:
             set_user_open_position(user_id, coin, pos)
-        await _tell(user_id, text)
+        await _tell(user_id, text, kb)
     else:
         set_user_open_position(user_id, coin, pos)
 
@@ -3680,12 +3742,20 @@ def mini_page():
     return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp.html"))
 
 
+API_CACHE_TTL = {"me": 4, "signals": 4, "portfolio": 4, "stats": 5, "mystats": 5}
+API_CACHE = {}
+
+
 @app.route("/api/<act>", methods=["POST"])
 def mini_api(act):
     d = request.get_json(silent=True) or {}
     u = tg_auth(d.get("initData", ""))
     if not u:
         return Response('{"error":"Откройте приложение из Telegram"}', 401, mimetype="application/json")
+    key = (u["id"], act, json.dumps({k: v for k, v in d.items() if k != "initData"}, sort_keys=True, default=str))
+    ttl = API_CACHE_TTL.get(act)
+    if ttl and key in API_CACHE and time.time() - API_CACHE[key][0] < ttl:
+        return Response(API_CACHE[key][1], mimetype="application/json")
     try:
         out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(120)
     except (ValueError, TypeError):
@@ -3693,7 +3763,12 @@ def mini_api(act):
     except Exception as e:
         log.warning(f"mini_api {act}: {e}")
         out = {"error": "Ошибка сервера, попробуйте ещё раз"}
-    return Response(json.dumps(out, ensure_ascii=False, default=str), mimetype="application/json")
+    body = json.dumps(out, ensure_ascii=False, default=str)
+    if ttl and not (isinstance(out, dict) and out.get("error")):
+        API_CACHE[key] = (time.time(), body)
+        if len(API_CACHE) > 500:
+            API_CACHE.clear()
+    return Response(body, mimetype="application/json")
 
 
 def _sig_item(x, live=True):
@@ -3753,7 +3828,8 @@ async def coin_payload(uid, coin, force=False):
 
 async def mini_dispatch(uid, u, act, d):
     if act not in FREE_ACTS and not has_access(uid):
-        return {"error": access_closed_text(uid), "closed": True}
+        return {"error": access_closed_text(uid), "closed": True, "access": access_payload(uid),
+                "bot": runtime["main_bot"], "ads_support": ads_get()["support"]}
     if uid not in active_chats:
         active_chats.add(uid)
         await asyncio.to_thread(save_user_data, uid, u.get("username"), u.get("first_name"))
@@ -3766,7 +3842,7 @@ async def mini_dispatch(uid, u, act, d):
                 "mode": mode, "conf": MODE_CONF.get(mode, CONF_FINAL), "notif": get_user_notif_settings(uid),
                 "saved": [_sig_item(s, False) for s in get_user_saved_signals(uid)],
                 "alerts": uu.get("price_alerts", []), "webhook": uu.get("webhook_url", ""),
-                "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150], "access": access_payload(uid),
+                "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150], "access": access_payload(uid), "bot": runtime["main_bot"],
                 "counts": {"signals": len(signals_for(uid)), "saved": len(get_user_saved_signals(uid)),
                            "positions": len(get_user_open_positions(uid))}}
 
@@ -3784,6 +3860,21 @@ async def mini_dispatch(uid, u, act, d):
 
     if act == "refresh_status":
         return dict(refresh_job)
+
+    if act == "price" and coin:
+        STREAM_COINS[coin] = time.time()
+        p = PRICES.get(coin)
+        out = {"price": p["price"] if p else None, "ts": p["ts"] if p else None}
+        pos = uu.get("open_positions", {}).get(coin)
+        if pos and p:
+            sign = 1 if pos["side"] == "LONG" else -1
+            out["pnl"] = round(sign * (p["price"] - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+            out["sl"] = pos.get("sl1")
+            out["trailing"] = abs(pos.get("sl1", 0) - pos.get("sl_orig", pos.get("sl1", 0))) > 1e-12
+        return out
+
+    if act == "promo_apply":
+        return {"msg": apply_promo(uid, str(d.get("code", "")))}
 
     if act == "coin" and coin:
         if d.get("force") and time.time() - COIN_RL.get(uid, 0) < 5:
@@ -4701,6 +4792,33 @@ async def cmd_buy(m: types.Message):
                                f"Оплата звёздами Telegram (⭐). Выберите срок:", paywall_kb(), None)
 
 
+def account_age_hours(uid):
+    try:
+        joined = _users().get(str(uid), {}).get("joined_at")
+        return (datetime.now() - datetime.strptime(joined, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+    except Exception:
+        return 999.0
+
+
+def apply_promo(uid, code):
+    """Промокод. Аккаунт младше 24 часов получает максимум 1 день — против накрутки твинков."""
+    code = code.strip().upper()
+    with STATE_LOCK:
+        promo = STATE["promos"].get(code)
+        if not promo or promo.get("uses_left", 0) <= 0 or (promo.get("expires") and time.time() > promo["expires"]):
+            return "❌ Промокод не найден или закончился."
+        if uid in promo.get("used", []):
+            return "ℹ Вы уже использовали этот промокод."
+        days, note = promo["days"], ""
+        if account_age_hours(uid) < 24 and days > 1:
+            days, note = 1, " (новый аккаунт: 1 день)"
+        promo["uses_left"] -= 1
+        promo.setdefault("used", []).append(uid)
+    grant_days(uid, days, "promo")
+    state_touch()
+    return f"🎉 Промокод активирован: +{days} дн.{note}"
+
+
 @dp.message(Command("promo"))
 async def cmd_promo(m: types.Message):
     try:
@@ -4710,22 +4828,7 @@ async def cmd_promo(m: types.Message):
     parts = (m.text or "").split()
     if len(parts) < 2:
         return await _send_new(m.chat.id, "🎟 Введите: <code>/promo КОД</code>", kb_nav(back=False), None)
-    code = parts[1].upper()
-    with STATE_LOCK:
-        promo = STATE["promos"].get(code)
-        if not promo or promo.get("uses_left", 0) <= 0 or (promo.get("expires") and time.time() > promo["expires"]):
-            text = "❌ Промокод не найден или закончился."
-        elif m.from_user.id in promo.get("used", []):
-            text = "ℹ Вы уже использовали этот промокод."
-        else:
-            promo["uses_left"] -= 1
-            promo.setdefault("used", []).append(m.from_user.id)
-            text = None
-    if text is None:
-        grant_days(m.from_user.id, promo["days"], "promo")
-        text = f"🎉 Промокод активирован: +{promo['days']} дн. доступа."
-        state_touch()
-    await _send_new(m.chat.id, text, kb_nav(back=False), None)
+    await _send_new(m.chat.id, apply_promo(m.from_user.id, parts[1]), kb_nav(back=False), None)
 
 
 if admin_dp:
@@ -5211,33 +5314,6 @@ async def price_feed_loop():
         except Exception as e:
             log.info(f"price_feed: {e}")
         await asyncio.sleep(8)
-
-
-@app.route("/stream")
-def mini_stream():
-    """Server-Sent Events: цена каждые 3 секунды, для открытой монеты; PnL и стоп — если есть позиция."""
-    u = tg_auth(request.args.get("initData", ""))
-    if not u:
-        return Response("unauthorized", 401)
-    coin = normalize_ticker(request.args.get("coin", "BTC"))
-    uid = u["id"]
-
-    def gen():
-        while True:
-            STREAM_COINS[coin] = time.time()
-            p = PRICES.get(coin)
-            payload = {"coin": coin, "price": p["price"] if p else None, "ts": p["ts"] if p else None}
-            pos = _users().get(str(uid), {}).get("open_positions", {}).get(coin)
-            if pos and p:
-                sign = 1 if pos["side"] == "LONG" else -1
-                payload["pnl"] = round(sign * (p["price"] - pos["entry_price"]) / pos["entry_price"] * 100, 2)
-                payload["sl"] = pos.get("sl1")
-                payload["trailing"] = abs(pos.get("sl1", 0) - pos.get("sl_orig", pos.get("sl1", 0))) > 1e-12
-            yield f"data: {json.dumps(payload)}\n\n"
-            time.sleep(3)
-
-    return Response(gen(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 
