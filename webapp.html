@@ -96,7 +96,61 @@ const shareText=text=>tg.openTelegramLink('https://t.me/share/url?text='+encodeU
 async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.closed)S=Object.assign(S,m);return m}
 
 /* ---------- Экран оплаты и подписка ---------- */
-function planCards(plans){return `<div class="g">${plans.map(p=>`<div class="card" style="text-align:center"><b>${esc(p.title)}</b><h2 class="num" style="margin:6px 0 2px">${p.stars}⭐</h2><small>${p.days} дн.</small></div>`).join('')}</div>`}
+function planCards(plans){
+    return `<div class="g">${plans.map(p=>`
+        <div class="card" style="text-align:center; cursor:pointer;" onclick="confirmBuy(${p.days}, ${p.stars})">
+            <b>${esc(p.title)}</b>
+            <h2 class="num" style="margin:6px 0 2px">${p.stars}⭐</h2>
+            <small>${p.days} дн.</small>
+        </div>
+    `).join('')}</div>`
+}
+function confirmBuy(days, price) {
+    tg.showPopup({
+        title: 'Подтверждение оплаты',
+        message: `Вы уверены, что хотите оформить подписку на ${days} дней за ${price} ⭐?`,
+        buttons: [
+            {id: 'cancel', type: 'cancel', text: 'Отмена'},
+            {id: 'buy', type: 'default', text: 'Оплатить ⭐'}
+        ]
+    }, function(buttonId) {
+        if (buttonId === 'buy') {
+            processPayment(days);
+        }
+    });
+}
+
+async function processPayment(days) {
+    tg.showProgress();
+    try {
+        const res = await fetch('/api/create_stars_invoice', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ days: days, initData: tg.initData })
+        });
+        const data = await res.json();
+        tg.hideProgress();
+
+        if (data.error) {
+            toast('⚠ ' + data.error);
+            return;
+        }
+
+        tg.openInvoice(data.link, function(status) {
+            if (status === 'paid') {
+                toast('✅ Оплата прошла успешно!');
+                setTimeout(() => P.sub(), 1500);
+            } else if (status === 'cancelled') {
+                toast('Оплата отменена');
+            } else {
+                toast('Ошибка оплаты');
+            }
+        });
+    } catch (e) {
+        tg.hideProgress();
+        toast('Ошибка сети');
+    }
+}
 function promoBox(){return `<div class="row" style="margin-top:6px"><input id="pc" placeholder="Промокод" autocapitalize="characters"><button class="btn" style="width:110px" onclick="promoApply()">Активировать</button></div>`}
 async function promoApply(){const code=($('#pc').value||'').trim();if(!code)return toast('Введите промокод');const j=await api('promo_apply',{code});if(j.msg){toast(j.msg);const m=await refreshMe();if(!m.closed&&!m.error)go('signals')}}
 P.paywall=()=>{const a=S.access||{};
