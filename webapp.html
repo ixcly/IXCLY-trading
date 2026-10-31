@@ -236,8 +236,8 @@ ${a.ad?`<div class="card" style="margin-top:12px"><small>📢 ${esc(a.ad)}</smal
 <button class="btn s" style="margin-top:10px" onclick="csv()">📥 Выгрузить историю сигналов (CSV) в чат</button></details>
 <div class="card lst row" onclick="openSupport()"><span>🆘 Поддержка ${esc(a.support||'')}</span><span class="m">›</span></div>
 <h2>📄 Документы и поддержка</h2>
-<div class="card lst" onclick="tg.openLink('https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99')"><div class="row"><span>Политика конфиденциальности</span><span class="m">›</span></div></div>
-<div class="card lst" onclick="tg.openLink('https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15')"><div class="row"><span>Пользовательское соглашение (оферта)</span><span class="m">›</span></div></div>
+<div class="card lst" onclick="tg.openLink('https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-IXCLY-PRO-10-31')"><div class="row"><span>Политика конфиденциальности</span><span class="m">›</span></div></div>
+<div class="card lst" onclick="tg.openLink('https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31')"><div class="row"><span>Пользовательское соглашение (оферта)</span><span class="m">›</span></div></div>
 <div class="card lst" onclick="openSupport()"><div class="row"><span>🆘 Служба поддержки</span><span class="m">›</span></div></div>
 <p class="m" style="margin:14px 0">IXCLY PRO v${S.version}. Криптовалюта — это риск.</p>`};
 async function refShare(){const r=await api('ref_link');if(r.error)return;const t='Попробуй IXCLY PRO: сигналы и сопровождение сделок 🔥';tg.openTelegramLink('https://t.me/share/url?url='+encodeURIComponent(r.link)+'&text='+encodeURIComponent(t))}
