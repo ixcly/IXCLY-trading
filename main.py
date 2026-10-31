@@ -3810,13 +3810,13 @@ def mini_api(act):
     
     key = (u["id"], act, json.dumps({k: v for k, v in d.items() if k != "initData"}, sort_keys=True, default=str))
     
-    # Игнорируем кэш для админов, чтобы они видели изменения мгновенно
-    if u["id"] not in ADMIN_IDS:
-        ttl = API_CACHE_TTL.get(act)
-        if ttl and key in API_CACHE and time.time() - API_CACHE[key][0] < ttl:
-            return Response(API_CACHE[key][1], mimetype="application/json")
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    # Если это админ, ставим ttl = 0 (кэш выключен). Иначе берем стандартный TTL.
+    ttl = 0 if u["id"] in ADMIN_IDS else API_CACHE_TTL.get(act)
     
-    # ... остальной код без изменений ...
+    if ttl and key in API_CACHE and time.time() - API_CACHE[key][0] < ttl:
+        return Response(API_CACHE[key][1], mimetype="application/json")
+    
     try:
         out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(120)
     except (ValueError, TypeError):
@@ -3824,11 +3824,15 @@ def mini_api(act):
     except Exception as e:
         log.warning(f"mini_api {act}: {e}")
         out = {"error": "Ошибка сервера, попробуйте ещё раз"}
+        
     body = json.dumps(out, ensure_ascii=False, default=str)
+    
+    # Сохраняем в кэш только если ttl > 0 (то есть для обычных юзеров)
     if ttl and not (isinstance(out, dict) and out.get("error")):
         API_CACHE[key] = (time.time(), body)
         if len(API_CACHE) > 500:
             API_CACHE.clear()
+            
     return Response(body, mimetype="application/json")
 
 
