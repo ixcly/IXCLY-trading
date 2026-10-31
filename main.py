@@ -4752,7 +4752,9 @@ def access_payload(uid):
     return {"ok": ok, "status": status, "days_left": days_left, "hours_left": int(left // 3600) % 24,
             "until": until, "free": bool(a.get("free")),
             "plans": [{"days": d, "stars": s, "title": PLAN_TITLE[d]} for d, s in PLANS.items()],
-            "support": ads_get()["support"], "ad": ads_get()["text"] if ads_get()["on"] else ""}
+            "support": ads_get()["support"], 
+            "ad": ads_get()["text"] if ads_get()["on"] else "",
+            "ad_url": ads_get()["url"] if ads_get()["on"] else ""} # <-- ДОБАВИЛИ ССЫЛКУ
 
 
 def access_closed_text(uid):
