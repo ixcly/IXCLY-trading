@@ -783,12 +783,29 @@ async def http_json(url, params=None, timeout=8):
 
 
 async def download_bytes(url):
+    """Скачивает только реальные изображения разумного размера."""
+    if not _normalise_image_url(url):
+        return None
     try:
-        async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                return await r.read()
-    except Exception:
-        pass
+        async with http.get(url, headers=BROWSER_UA, timeout=aiohttp.ClientTimeout(total=10),
+                            allow_redirects=True) as r:
+            if r.status != 200:
+                return None
+            content_type = r.headers.get("Content-Type", "").lower()
+            if not content_type.startswith("image/"):
+                return None
+            length = int(r.headers.get("Content-Length", "0") or 0)
+            if length and length > 8 * 1024 * 1024:
+                return None
+            data = await r.read()
+            if not data or len(data) > 8 * 1024 * 1024:
+                return None
+            if not (data.startswith(b"\xff\xd8\xff") or data.startswith(b"\x89PNG") or
+                    data.startswith((b"GIF87a", b"GIF89a", b"RIFF")) or data.startswith(b"BM")):
+                return None
+            return data
+    except Exception as exc:
+        log.debug("Не удалось скачать изображение новости: %s", exc)
     return None
 
 
@@ -1855,34 +1872,129 @@ async def get_news_entries():
     return _news_cache["entries"]
 
 
+def _normalise_image_url(url):
+    url = html.unescape(str(url or "").strip())
+    if url.startswith("//"):
+        url = "https:" + url
+    if not url or not url.lower().startswith(("https://", "http://")):
+        return None
+    if any(x in url.lower() for x in ("gravatar.com", "pixel", "spacer.gif", "logo.svg")):
+        return None
+    return url
+
+
 def extract_image(entry):
-    if getattr(entry, "media_content", None):
-        return entry.media_content[0].get("url")
-    if getattr(entry, "media_thumbnail", None):
-        return entry.media_thumbnail[0].get("url")
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', getattr(entry, "summary", "") or "")
-    return m.group(1) if m else None
+    """Извлекает изображение из разных форматов RSS/Atom."""
+    candidates = []
+    for item in (getattr(entry, "media_content", None) or []):
+        if isinstance(item, dict):
+            candidates.append(item.get("url") or item.get("href"))
+    for item in (getattr(entry, "media_thumbnail", None) or []):
+        if isinstance(item, dict):
+            candidates.append(item.get("url") or item.get("href"))
+    for item in (getattr(entry, "links", None) or []):
+        if isinstance(item, dict) and (item.get("rel") == "enclosure" or "image" in str(item.get("type", "")).lower()):
+            candidates.append(item.get("href"))
+    for item in (getattr(entry, "enclosures", None) or []):
+        if isinstance(item, dict):
+            candidates.append(item.get("href") or item.get("url"))
+    html_parts = [getattr(entry, "summary", "") or ""]
+    for item in (getattr(entry, "content", None) or []):
+        if isinstance(item, dict):
+            html_parts.append(item.get("value", ""))
+    for part in html_parts:
+        part = str(part)
+        candidates.extend(re.findall(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']', part, flags=re.I))
+        candidates.extend(re.findall(r'<source[^>]+src=["\']([^"\']+)["\']', part, flags=re.I))
+    for candidate in candidates:
+        url = _normalise_image_url(candidate)
+        if url:
+            return url
+    return None
+
+
+async def resolve_news_image(entry):
+    """RSS-картинка или og:image/twitter:image со страницы публикации."""
+    image_url = extract_image(entry)
+    if image_url:
+        return image_url
+    article_url = _normalise_image_url(getattr(entry, "link", ""))
+    if not article_url:
+        return None
+    try:
+        async with http.get(article_url, headers=BROWSER_UA,
+                            timeout=aiohttp.ClientTimeout(total=6),
+                            allow_redirects=True) as response:
+            if response.status != 200 or "html" not in response.headers.get("Content-Type", "").lower():
+                return None
+            page = (await response.text(errors="ignore"))[:500_000]
+        patterns = (
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, page, flags=re.I)
+            if match:
+                url = _normalise_image_url(match.group(1))
+                if url:
+                    return url
+    except Exception as exc:
+        log.debug("Не удалось получить изображение новости: %s", exc)
+    return None
 
 
 def clean_summary(raw):
     t = html.unescape(re.sub(r"<[^>]+>", " ", raw or ""))
-    t = re.sub(r"The post .*? appeared first on .*", "", t, flags=re.S)
-    return " ".join(t.split())[:700]
+    t = re.sub(r"The post .*? appeared first on .*", "", t, flags=re.S | re.I)
+    t = re.sub(r"https?://\S+", " ", t)
+    return " ".join(t.split())[:900]
+
+
+def clean_news_field(value, max_chars=360, max_sentences=2):
+    """Удаляет нумерацию, пустые пункты, повторы и чрезмерно длинные ответы ИИ."""
+    value = html.unescape(strip_tags(str(value or "")))
+    value = re.sub(r"(?i)^(?:суть|summary|impact|влияние|coins|монеты)\s*[:：-]\s*", "", value)
+    value = re.sub(r"(?m)^\s*(?:[-*•]|\d+[.)])\s*", "", value)
+    value = re.sub(r"(?<!\w)\d+[.)](?=\s|$)", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" \t\r\n.;,:—-")
+    sentences = re.split(r"(?<=[.!?])\s+", value)
+    unique, seen = [], set()
+    for sentence in sentences:
+        sentence = sentence.strip(" \t\r\n—-")
+        key = re.sub(r"[^a-zа-яё0-9]", "", sentence.lower())
+        if len(key) < 8 or key in seen:
+            continue
+        seen.add(key)
+        unique.append(sentence)
+        if len(unique) >= max_sentences:
+            break
+    value = " ".join(unique) if unique else value
+    return shorten(value, max_chars) if value else ""
 
 
 def parse_news_ai(text):
-    t = (text or "").replace("**", "")
-    ms = list(re.finditer(r"(?im)^[\s\-\*•]*(BIAS|TITLE_RU|SUMMARY|IMPACT|COINS)\s*[:：]\s*", t))
+    t = (text or "").replace("**", "").replace("```", "")
+    ms = list(re.finditer(r"(?im)^\s*(BIAS|TITLE_RU|SUMMARY|IMPACT|COINS)\s*[:：]\s*", t))
     out = {}
-    for i, m in enumerate(ms):
-        end = ms[i + 1].start() if i + 1 < len(ms) else len(t)
-        out[m.group(1).upper()] = re.sub(r"\s+", " ", t[m.end():end]).strip()
+    for i, match in enumerate(ms):
+        finish = ms[i + 1].start() if i + 1 < len(ms) else len(t)
+        out[match.group(1).upper()] = re.sub(r"\s+", " ", t[match.end():finish]).strip()
     return out
 
 
 def _valid_news_ai(text):
     p = parse_news_ai(text)
-    return has_cyr(p.get("TITLE_RU", ""), 6) and has_cyr(p.get("SUMMARY", ""), 20) and has_cyr(p.get("IMPACT", ""), 10)
+    bias_ok = any(x in p.get("BIAS", "").upper() for x in ("BULL", "BEAR", "NEUTRAL", "БЫЧ", "МЕДВ", "НЕЙТР"))
+    summary = p.get("SUMMARY", "").strip()
+    impact = p.get("IMPACT", "").strip()
+    # Если модель снова вернула нумерованные пункты/смешала поля — не публикуем этот ответ,
+    # а используем короткий перевод оригинального RSS-текста.
+    malformed = bool(re.search(r"(?<!\w)\d+[.)]\s|акции\s+Binance", summary + " " + impact, re.I))
+    return (bias_ok and has_cyr(p.get("TITLE_RU", ""), 6)
+            and 20 <= len(summary) <= 600 and 10 <= len(impact) <= 450
+            and not malformed and bool(p.get("COINS", "").strip()))
 
 
 IMPACT_TEMPLATES = {
@@ -1907,27 +2019,45 @@ async def update_market_bias(force=False):
             title = html.unescape(getattr(entry, "title", "") or "")
             summary = clean_summary(getattr(entry, "summary", ""))
             published = get_moscow_time_from_entry(entry)
-            prompt = f"""Новость: {title}
-Текст: {summary}
-Переведи на русский и разбери строго в формате (каждое поле с новой строки):
+            prompt = f"""Ты редактор новостной ленты крипторынка. Используй ТОЛЬКО факты из источника.
+Не додумывай суммы, виновников, последствия, тикеры и причинно-следственные связи.
+Не называй криптовалюты акциями. Если актив не назван прямо, укажи в COINS: Не указаны.
+Не повторяй заголовок в SUMMARY. Не используй нумерацию и списки.
+Верни ровно 5 полей, каждое с новой строки:
 BIAS: BULLISH или BEARISH или NEUTRAL
-TITLE_RU: точный перевод заголовка
-SUMMARY: 2-3 предложения: что произошло, кто участвует, какие цифры
-IMPACT: 2-3 предложения о влиянии на рынок: фон (бычий или медвежий), какие активы и почему
-COINS: тикеры через запятую"""
+TITLE_RU: точный перевод заголовка, до 140 символов
+SUMMARY: 1-2 коротких предложения, только подтверждённые факты, до 320 символов
+IMPACT: 1-2 коротких предложения, осторожное объяснение возможного влияния, до 240 символов
+COINS: только тикеры, прямо подтверждённые текстом, через запятую; иначе Не указаны
+
+ЗАГОЛОВОК: {title[:350]}
+ТЕКСТ ИСТОЧНИКА: {summary[:1200]}"""
             text, engine = await ask_ai_named(prompt, validate=_valid_news_ai)
             if text and _valid_news_ai(text):
                 p = parse_news_ai(text)
                 up = p.get("BIAS", "").upper()
-                market_bias = {"bias": 1 if "BULL" in up else -1 if "BEAR" in up else 0, "title_ru": p["TITLE_RU"][:170],
-                               "summary": shorten(p["SUMMARY"], 380), "impact": shorten(p["IMPACT"], 500),
-                               "coins": p.get("COINS", "BTC, ETH"), "published": published, "link": link, "engine": engine, "ts": now}
+                bias = 1 if ("BULL" in up or "БЫЧ" in up) else -1 if ("BEAR" in up or "МЕДВ" in up) else 0
+                summary_ru = clean_news_field(p.get("SUMMARY", ""), 320, 2)
+                impact_ru = clean_news_field(p.get("IMPACT", ""), 240, 2)
+                allowed = {"BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TON", "AVAX", "LINK", "DOT", "LTC", "TRX", "USDT", "USDC"}
+                raw_coins = p.get("COINS", "").upper()
+                coin_tokens = [x for x in re.findall(r"\b[A-Z]{2,8}\b", raw_coins) if x in allowed]
+                source_coins = mentioned_coins(f"{title} {summary}")
+                coins = ", ".join(dict.fromkeys(coin_tokens or source_coins)) or "Не указаны в источнике"
+                if not summary_ru:
+                    summary_ru = clean_news_field(await translate_text(summary or title), 320, 2)
+                if not impact_ru:
+                    impact_ru = IMPACT_TEMPLATES[bias]
+                market_bias = {"bias": bias, "title_ru": clean_news_field(p["TITLE_RU"], 140, 1),
+                               "summary": summary_ru, "impact": impact_ru, "coins": coins,
+                               "published": published, "link": link, "engine": engine, "ts": now}
             else:
                 bias = news_sentiment(f"{title}. {summary}")
                 title_ru = await translate_text(title)
-                market_bias = {"bias": bias, "title_ru": title_ru[:170],
-                               "summary": shorten(await translate_text(summary) if summary else title_ru, 380),
-                               "impact": IMPACT_TEMPLATES[bias], "coins": ", ".join(mentioned_coins(f"{title} {summary}") or ["BTC", "ETH"]),
+                summary_ru = clean_news_field(await translate_text(summary) if summary else title_ru, 320, 2)
+                market_bias = {"bias": bias, "title_ru": clean_news_field(title_ru, 140, 1),
+                               "summary": summary_ru, "impact": IMPACT_TEMPLATES[bias],
+                               "coins": ", ".join(mentioned_coins(f"{title} {summary}")) or "Не указаны в источнике",
                                "published": published, "link": link, "engine": "fallback", "ts": now}
             state_touch(False)
         except Exception as e:
@@ -1935,18 +2065,20 @@ COINS: тикеры через запятую"""
 
 
 def format_news_post(nb, limit=1000):
+    """Короткая новостная карточка в одном стиле для Telegram."""
     emoji = {1: "🟢", 0: "⚪", -1: "🔴"}.get(nb.get("bias", 0), "⚪")
     label = {1: "Позитивно", 0: "Нейтрально", -1: "Негативно"}.get(nb.get("bias", 0), "Нейтрально")
-    link = f"\n\n🔗 <a href=\"{html.escape(nb['link'], quote=True)}\">Источник</a>" if nb.get("link") else ""
-    s_len, i_len = 300, 360
-    while True:
-        text = (f"📰 <b>{html.escape(shorten(nb.get('title_ru', ''), 140))}</b>\n🕒 <i>{html.escape(nb.get('published', ''))}</i>\n\n"
-                f"📌 <b>Суть</b>\n{html.escape(shorten(nb.get('summary', ''), s_len))}\n\n"
-                f"📊 <b>Влияние</b>\n{emoji} <b>{label}.</b> {html.escape(shorten(nb.get('impact', ''), i_len))}\n\n"
-                f"🪙 <b>Монеты:</b> {html.escape(nb.get('coins', ''))}{link}")
-        if vis_len(text) <= limit or s_len <= 80:
-            return text
-        s_len, i_len = s_len - 40, i_len - 40
+    link = f'\n\n🔗 <a href="{html.escape(nb["link"], quote=True)}">Источник</a>' if nb.get("link") else ""
+    title = clean_news_field(nb.get("title_ru", ""), 140, 1)
+    summary = clean_news_field(nb.get("summary", ""), 300, 2) or "В источнике недостаточно подробностей для краткого пересказа."
+    impact = clean_news_field(nb.get("impact", ""), 220, 2) or IMPACT_TEMPLATES.get(nb.get("bias", 0), IMPACT_TEMPLATES[0])
+    coins = clean_news_field(nb.get("coins", ""), 90, 1) or "Не указаны в источнике"
+    text = (f"📰 <b>{html.escape(title)}</b>\n"
+            f"🕒 <i>{html.escape(nb.get('published', ''))}</i>\n\n"
+            f"📌 <b>Суть</b>\n{html.escape(summary)}\n\n"
+            f"📊 <b>Влияние</b>\n{emoji} <b>{label}.</b> {html.escape(impact)}\n\n"
+            f"🪙 <b>Монеты:</b> {html.escape(coins)}{link}")
+    return trim_html(text, limit)
 
 
 async def prepare_news(force=False):
@@ -1954,7 +2086,12 @@ async def prepare_news(force=False):
     entries = await get_news_entries()
     if not entries or market_bias.get("engine") == "none":
         return None, None
-    return format_news_post(market_bias), extract_image(entries[0])
+    # Используем картинку именно той новости, которую разобрал ИИ.
+    target_link = market_bias.get("link")
+    entry = next((e for e in entries if getattr(e, "link", None) == target_link), entries[0])
+    image_url = await resolve_news_image(entry)
+    image_data = await download_bytes(image_url) if image_url else None
+    return format_news_post(market_bias), image_data
 
 
 async def get_news_batch_text():
@@ -1962,13 +2099,16 @@ async def get_news_batch_text():
     if not entries:
         return "📭 <b>Свежих новостей пока нет.</b>"
     batch = entries[:3]
-    prompt = ("Ты опытный крипто-аналитик. Разбери эти новости. Для каждой строго по шаблону на русском, без markdown:\n"
-              "Новость N:\n📰 Суть: 1-2 предложения\n📊 Влияние: Бычье/Медвежье/Нейтральное и почему\n🪙 Монеты: тикеры через запятую\n\nНовости:\n")
+    prompt = ("Сделай краткий дайджест на русском только по фактам из источников. Не выдумывай детали и тикеры, "
+              "не называй криптовалюты акциями, не повторяй фразы. Для каждой новости максимум 3 короткие строки: "
+              "Заголовок; Суть (1 предложение); Влияние (нейтрально/позитивно/негативно и осторожное объяснение). "
+              "Если актив прямо не назван, напиши «Монеты не указаны». Без нумерованных пустых пунктов.\n\nНовости:\n")
     for i, e in enumerate(batch):
         prompt += f"{i + 1}. [{get_moscow_time_from_entry(e)}] {html.unescape(getattr(e, 'title', '') or '')}. {clean_summary(getattr(e, 'summary', ''))[:200]}\n"
     links = " · ".join(f"<a href=\"{html.escape(getattr(e, 'link', ''), quote=True)}\">{i + 1}</a>" for i, e in enumerate(batch))
     text, _engine = await ask_ai_named(prompt, timeout=30, free_timeout=30)
     if text and has_cyr(text, 30):
+        text = clean_news_field(text, 2600, 12)
         return trim_html(f"📰 <b>Дайджест новостей</b>\n\n{html.escape(text)}\n\n🔗 Источники: {links}", 4000)
     out = "📰 <b>Последние новости (кратко):</b>\n\n"
     for i, e in enumerate(batch):
@@ -3687,9 +3827,8 @@ async def news_watcher_loop():
                                     advice="Воздержитесь от новых входов и не усредняйте убыточные позиции. Пауза снимется, когда рынок успокоится.",
                                     pause_mins=60))
                     if bot_flags["news_enabled"] and active_chats:
-                        text, img_url = await prepare_news()
+                        text, img = await prepare_news()
                         if text:
-                            img = await download_bytes(img_url) if img_url else None
                             sent = 0
                             for cid in list(active_chats):
                                 if not get_user_notif_settings(cid)["news"] or not has_access(cid):
@@ -5537,10 +5676,9 @@ if admin_dp:
                 for uid, u in list(_users().items())[-30:] if isinstance(u, dict)]
             await cb.message.answer("\n".join(lines), parse_mode="HTML")
         elif act == "news_now":
-            text, img_url = await prepare_news(force=True)
+            text, img = await prepare_news(force=True)
             if not text:
                 return await cb.message.answer("Свежих новостей нет")
-            img = await download_bytes(img_url) if img_url else None
             sent = 0
             for cid in list(active_chats):
                 try:
@@ -5822,4 +5960,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        log.info("Бот остановлен")
+        log.info("Бот остановлен")        log.info("Бот остановлен")
