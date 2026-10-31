@@ -38,6 +38,7 @@ import feedparser
 import numpy as np
 import pandas as pd
 from ixcly_intelligence import score_signal, market_regime, volume_anomaly, risk_position_size, cleanup as cleanup_intelligence
+from ixcly_paper import (snapshot as paper_snapshot, create_account as paper_create_account, select_account as paper_select_account, open_position as paper_open_position, close_position as paper_close_position, set_settings as paper_set_settings, reset_account as paper_reset_account)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
@@ -208,7 +209,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "3.3-MAX-SIGNALS"
+VERSION = "4.0-MAX-PAPER"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -331,11 +332,11 @@ _alert_sent = {}
 # =====================================================================
 STATE_FILE = "bot_state.json"
 STATE_LOCK = threading.RLock()
-STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}}
+STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}}
 state_dirty = False
 backup_dirty = False
 last_backup_ts = 0.0
-STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads")
+STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper")
 
 
 def state_touch(important=True):
@@ -4438,6 +4439,93 @@ async def mini_dispatch(uid, u, act, d):
         dn = sorted([m for m in mv if m[1] < 0], key=lambda m: m[1])[:10]
         return {"up": up, "down": dn}
 
+    # Paper Trading: отдельное логическое хранилище STATE["paper"], входит в штатный backup/restore.
+    if act == "paper_get":
+        prices = {}
+        for c, item in list(PRICES.items()):
+            try: prices[c] = float(item.get("price"))
+            except Exception: pass
+        for c, item in list(LIVE.items()):
+            try: prices[c] = float(item.get("price"))
+            except Exception: pass
+        with STATE_LOCK:
+            paper_store = STATE.setdefault("paper", {})
+            was_new = str(uid) not in paper_store or not any(a.get("id") == "main" for a in paper_store.get(str(uid), {}).get("accounts", []))
+            result = paper_snapshot(paper_store, uid, prices)
+            if was_new:
+                state_touch()
+        return result
+
+    if act == "paper_create":
+        try:
+            with STATE_LOCK:
+                acc = paper_create_account(STATE.setdefault("paper", {}), uid, d.get("name", "Тестовая стратегия"), d.get("deposit", 1000), d.get("kind", "strategy"))
+                state_touch()
+            return {"msg": "Виртуальный счёт создан", "account": acc}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if act == "paper_select":
+        try:
+            with STATE_LOCK:
+                aid = paper_select_account(STATE.setdefault("paper", {}), uid, d.get("account_id", "main"))
+                state_touch()
+            return {"msg": "Активный Paper-счёт изменён", "account_id": aid}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if act == "paper_settings":
+        try:
+            with STATE_LOCK:
+                paper_set_settings(STATE.setdefault("paper", {}), uid, d.get("risk_pct"), d.get("fee_pct"), d.get("slippage_pct"), d.get("account_id"))
+                state_touch()
+            return {"msg": "Настройки Paper Trading сохранены"}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if act == "paper_open" and coin:
+        try:
+            res = get_user_res(uid, coin)
+            if not res or res.get("price_only"):
+                res, err = await analyze_coin(coin, uid=uid)
+                if err or not res or res.get("price_only"):
+                    return {"error": "Нет свежего анализа для виртуального входа"}
+            entry = d.get("entry", res.get("entry"))
+            stop = d.get("stop", (res.get("sls") or [None])[0])
+            targets = d.get("targets") or res.get("tps") or []
+            if isinstance(targets, str): targets = [x.strip() for x in targets.split(",") if x.strip()]
+            with STATE_LOCK:
+                pos = paper_open_position(STATE.setdefault("paper", {}), uid, coin, res.get("side"), entry, stop, targets,
+                                          d.get("risk_pct"), d.get("account_id"))
+                state_touch()
+            return {"msg": f"Paper-позиция {coin} открыта виртуально", "position": pos}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if act == "paper_close" and coin:
+        try:
+            px_item = PRICES.get(coin) or LIVE.get(coin) or {}
+            px = d.get("exit_price") or px_item.get("price")
+            if not px:
+                px = await get_simple_price(coin)
+            if not px:
+                return {"error": "Нет актуальной цены для закрытия Paper-позиции"}
+            with STATE_LOCK:
+                rec = paper_close_position(STATE.setdefault("paper", {}), uid, coin, px, d.get("account_id"), d.get("reason", "manual"))
+                state_touch()
+            return {"msg": f"Paper-сделка закрыта: {rec['pnl']:+.2f} USDT", "trade": rec}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if act == "paper_reset":
+        try:
+            with STATE_LOCK:
+                acc = paper_reset_account(STATE.setdefault("paper", {}), uid, d.get("account_id"), d.get("deposit"))
+                state_touch()
+            return {"msg": "Paper-счёт сброшен", "account": acc}
+        except ValueError as e:
+            return {"error": str(e)}
+
     if act == "portfolio":
         return {"risk": get_user_risk_settings(uid), "open_risk": calculate_portfolio_risk(uid), "mode": uu.get("trade_mode", "balanced"),
                 "positions": _enrich_user_positions(uid), "saved": [_sig_item(s, False) for s in get_user_saved_signals(uid)],
@@ -5278,12 +5366,14 @@ def access_payload(uid):
         days_left = int(-(-left // 86400))
     else:
         status, days_left = "закрыт", 0
+    is_vip = int(uid) in ADMIN_IDS or bool(a.get("free")) or a.get("kind") in ("paid", "lifetime")
+    ad = ads_get()
+    show_ad = bool(ad.get("on") and not is_vip)
     return {"ok": ok, "status": status, "days_left": days_left, "hours_left": int(left // 3600) % 24,
-            "until": until, "free": bool(a.get("free")),
+            "until": until, "free": bool(a.get("free")), "vip": is_vip,
             "plans": [{"days": d, "stars": s, "title": PLAN_TITLE[d]} for d, s in PLANS.items()],
-            "support": ads_get()["support"], 
-            "ad": ads_get()["text"] if ads_get()["on"] else "",
-            "ad_url": ads_get()["url"] if ads_get()["on"] else ""} # <-- ДОБАВИЛИ ССЫЛКУ
+            "support": ad["support"], "ad": ad["text"] if show_ad else "",
+            "ad_url": ad["url"] if show_ad else ""}
 
 
 def access_closed_text(uid):
