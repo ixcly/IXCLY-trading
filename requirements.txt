@@ -6,3 +6,5 @@ requests
 flask
 pillow
 pymongo
+ccxt>=4,<5
+cryptography>=42,<46
