@@ -4067,8 +4067,8 @@ def notif_keyboard(uid):
 
 
 ANALYZE_SEM = None
-DOCS_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99"
-DOCS_OFFER = "https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15"
+DOCS_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-IXCLY-PRO-10-31"
+DOCS_OFFER = "https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31"
 DISCOUNT_OFFERS = {}
 CRITICAL_NEWS = re.compile(r"hack|exploit|\bsec\b|lawsuit|delist|halt|bankrupt|arrest|sanction|взлом|запрет")
 
