@@ -1,170 +1,181 @@
 # -*- coding: utf-8 -*-
-"""IXCLY lightweight signal intelligence. No ML frameworks; designed for 512 MB RAM."""
+"""IXCLY MAX 2.0 Paper Trading engine. Standard-library only; no exchange order execution."""
 from __future__ import annotations
-import math
-import time
-from collections import OrderedDict
+import copy, time, uuid
 
-CACHE_MAX = 256
-CACHE_TTL = 180
-_cache = OrderedDict()
+MAX_ACCOUNTS_PER_USER = 5
+MAX_HISTORY_PER_ACCOUNT = 500
+DEFAULT_DEPOSIT = 1000.0
 
 
-def _num(value, default=0.0):
+def _num(value, name, minimum=0.0, maximum=1e12):
     try:
-        x = float(value)
-        return x if math.isfinite(x) else default
+        n = float(str(value).replace(',', '.'))
     except (TypeError, ValueError):
-        return default
+        raise ValueError(f"Некорректное значение: {name}")
+    if not (minimum <= n <= maximum):
+        raise ValueError(f"Недопустимое значение: {name}")
+    return n
 
 
-def bounded_cache_get(key, now=None):
-    now = time.time() if now is None else now
-    item = _cache.get(key)
-    if not item:
-        return None
-    if now - item[0] > CACHE_TTL:
-        _cache.pop(key, None)
-        return None
-    _cache.move_to_end(key)
-    return item[1]
+def _account(uid, name='Основной', deposit=DEFAULT_DEPOSIT, primary=False):
+    now = time.time()
+    return {
+        'id': 'main' if primary else uuid.uuid4().hex[:10], 'name': str(name)[:32],
+        'initial_balance': float(deposit), 'balance': float(deposit), 'equity': float(deposit),
+        'realized_pnl': 0.0, 'unrealized_pnl': 0.0, 'peak_equity': float(deposit),
+        'max_drawdown_pct': 0.0, 'risk_pct': 1.0, 'fee_pct': 0.1, 'slippage_pct': 0.02,
+        'positions': {}, 'history': [], 'created_at': now, 'updated_at': now,
+        'primary': bool(primary), 'owner': str(uid),
+    }
 
 
-def bounded_cache_set(key, value, now=None):
-    now = time.time() if now is None else now
-    _cache[key] = (now, value)
-    _cache.move_to_end(key)
-    while len(_cache) > CACHE_MAX:
-        _cache.popitem(last=False)
+def ensure_user(store, uid):
+    key = str(uid)
+    user = store.setdefault(key, {'accounts': [], 'active_account': 'main'})
+    accounts = user.setdefault('accounts', [])
+    if not any(a.get('id') == 'main' for a in accounts):
+        accounts.insert(0, _account(uid, primary=True))
+    if not any(a.get('id') == user.get('active_account') for a in accounts):
+        user['active_account'] = 'main'
+    return user
 
 
-def score_signal(res):
-    """Deterministic quality score 0..100; never invents a probability of profit."""
-    base = max(0.0, min(100.0, _num(res.get('strength'), 0)))
-    score = base * 0.55
-    probs = res.get('long_prob') or res.get('tf_probs') or {}
-    vals = [_num(v, -1) for v in probs.values()]
-    vals = [v for v in vals if 0 <= v <= 100]
-    if len(vals) >= 2:
-        aligned = sum((v >= 50) == (vals[0] >= 50) for v in vals) / len(vals)
-        score += aligned * 18
-    bt = res.get('bt') or {}
-    trades = int(_num(bt.get('trades'), 0))
-    if trades >= 10:
-        score += 8
-    elif trades >= 5:
-        score += 5
-    elif trades:
-        score += 2
-    if res.get('fake_breakout'):
-        score -= 18
-    regime = str(res.get('regime') or '').lower()
-    if 'sideway' in regime or 'боков' in regime:
-        score -= 5
-    risk = str(res.get('risk_lvl') or '').lower()
-    if 'высок' in risk or 'high' in risk:
-        score -= 8
-    entry, sl = _num(res.get('entry')), _num((res.get('sls') or [0])[0])
-    if entry > 0 and sl > 0:
-        dist = abs(entry - sl) / entry * 100
-        if dist > 8:
-            score -= 10
-        elif dist < 0.15:
-            score -= 6
-        else:
-            score += 5
-    rr = _num(res.get('rr'), 0)
-    if rr >= 2:
-        score += 6
-    elif rr and rr < 1.2:
-        score -= 8
-    return round(max(0.0, min(100.0, score)), 1)
+def _get_account(store, uid, account_id=None):
+    user = ensure_user(store, uid)
+    aid = str(account_id or user.get('active_account') or 'main')
+    acc = next((a for a in user['accounts'] if a.get('id') == aid), None)
+    if not acc:
+        raise ValueError('Виртуальный счёт не найден')
+    return user, acc
 
 
-def market_regime(df):
-    """Classify OHLCV dataframe using close/EMA and ATR%; returns small JSON-safe dict."""
-    try:
-        if df is None or len(df) < 30:
-            return {'name': 'unknown', 'volatility': 'unknown', 'trend_pct': None}
-        close = df['close'].astype(float)
-        last = float(close.iloc[-1])
-        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
-        trend = (ema20 / ema50 - 1) * 100 if ema50 else 0
-        high, low = df['high'].astype(float), df['low'].astype(float)
-        prev = close.shift(1)
-        tr = (high - low).to_frame('hl')
-        tr['hc'] = (high - prev).abs()
-        tr['lc'] = (low - prev).abs()
-        atr = float(tr.max(axis=1).rolling(14).mean().iloc[-1])
-        atr_pct = atr / last * 100 if last else 0
-        if abs(trend) >= 0.8:
-            name = 'uptrend' if trend > 0 else 'downtrend'
-        else:
-            name = 'range'
-        vol = 'high' if atr_pct >= 3 else 'medium' if atr_pct >= 1 else 'low'
-        return {'name': name, 'volatility': vol, 'trend_pct': round(trend, 3), 'atr_pct': round(atr_pct, 3)}
-    except Exception:
-        return {'name': 'unknown', 'volatility': 'unknown', 'trend_pct': None}
+def snapshot(store, uid, prices=None):
+    prices = prices or {}
+    user = ensure_user(store, uid)
+    out = []
+    for acc in user['accounts']:
+        item = copy.deepcopy(acc)
+        unrealized = 0.0
+        for coin, p in item.get('positions', {}).items():
+            px = prices.get(coin)
+            if px and float(px) > 0:
+                direction = 1 if p['side'] == 'LONG' else -1
+                unrealized += (float(px) - p['entry']) * direction * p['qty']
+                p['mark_price'] = float(px)
+                p['pnl_pct'] = round(direction * (float(px) - p['entry']) / p['entry'] * 100, 3)
+            else:
+                unrealized += float(p.get('unrealized_pnl', 0.0))
+        item['unrealized_pnl'] = round(unrealized, 8)
+        item['equity'] = round(float(item['balance']) + unrealized, 8)
+        item['open_count'] = len(item.get('positions', {}))
+        item['history'] = item.get('history', [])[-20:]
+        out.append(item)
+    active = next((a for a in out if a['id'] == user.get('active_account')), out[0])
+    return {'accounts': out, 'active': active, 'active_account': user.get('active_account', 'main')}
 
 
-def volume_anomaly(df, lookback=30, threshold=2.5):
-    try:
-        if df is None or len(df) < lookback + 2 or 'volume' not in df:
-            return None
-        v = df['volume'].astype(float)
-        base = float(v.iloc[-lookback-1:-1].median())
-        current = float(v.iloc[-1])
-        if base <= 0:
-            return None
-        ratio = current / base
-        if ratio < threshold:
-            return None
-        return {'ratio': round(ratio, 2), 'volume': current, 'baseline': base}
-    except Exception:
-        return None
+def create_account(store, uid, name, deposit, kind='strategy'):
+    user = ensure_user(store, uid)
+    if len(user['accounts']) >= MAX_ACCOUNTS_PER_USER:
+        raise ValueError(f'Максимум {MAX_ACCOUNTS_PER_USER} виртуальных счетов')
+    amount = _num(deposit, 'депозит', 10, 1e9)
+    clean_name = str(name or 'Тестовая стратегия').strip()[:32] or 'Тестовая стратегия'
+    acc = _account(uid, clean_name, amount, primary=False)
+    acc['kind'] = 'strategy' if kind == 'strategy' else 'test'
+    user['accounts'].append(acc)
+    user['active_account'] = acc['id']
+    return copy.deepcopy(acc)
 
 
-def liquidity_snapshot(order_book):
-    """Summarize bid/ask depth. Input is ccxt order book dict; no retained raw book."""
-    try:
-        bids = order_book.get('bids') or []
-        asks = order_book.get('asks') or []
-        bid_usd = sum(_num(p) * _num(q) for p, q, *_ in bids[:20])
-        ask_usd = sum(_num(p) * _num(q) for p, q, *_ in asks[:20])
-        total = bid_usd + ask_usd
-        return {'bid_depth_usdt': round(bid_usd, 2), 'ask_depth_usdt': round(ask_usd, 2),
-                'imbalance': round((bid_usd - ask_usd) / total, 4) if total else 0.0}
-    except Exception:
-        return {'bid_depth_usdt': 0.0, 'ask_depth_usdt': 0.0, 'imbalance': 0.0}
+def select_account(store, uid, account_id):
+    user = ensure_user(store, uid)
+    if not any(a.get('id') == str(account_id) for a in user['accounts']):
+        raise ValueError('Виртуальный счёт не найден')
+    user['active_account'] = str(account_id)
+    return str(account_id)
 
 
-def funding_oi_snapshot(funding=None, open_interest=None, previous_oi=None):
-    f = _num(funding, float('nan'))
-    oi = _num(open_interest, float('nan'))
-    prev = _num(previous_oi, float('nan'))
-    return {'funding_rate': round(f, 6) if math.isfinite(f) else None,
-            'open_interest': round(oi, 2) if math.isfinite(oi) else None,
-            'oi_change_pct': round((oi / prev - 1) * 100, 2) if math.isfinite(oi) and math.isfinite(prev) and prev > 0 else None}
+def open_position(store, uid, coin, side, entry, stop, targets, risk_pct=None, account_id=None, fee_pct=None, slippage_pct=None):
+    user, acc = _get_account(store, uid, account_id)
+    coin = str(coin).upper().strip()
+    side = str(side).upper().strip()
+    if not coin or len(coin) > 20 or side not in ('LONG', 'SHORT'):
+        raise ValueError('Некорректная монета или направление')
+    if coin in acc['positions']:
+        raise ValueError(f'{coin}: позиция уже открыта на этом счёте')
+    e = _num(entry, 'вход', 1e-12, 1e12)
+    sl = _num(stop, 'Stop Loss', 1e-12, 1e12)
+    if (side == 'LONG' and sl >= e) or (side == 'SHORT' and sl <= e):
+        raise ValueError('Stop Loss должен находиться за ценой входа')
+    tps = [_num(x, 'Take Profit', 1e-12, 1e12) for x in (targets or [])[:3]]
+    if not tps:
+        raise ValueError('Нужен хотя бы один Take Profit')
+    if (side == 'LONG' and any(x <= e for x in tps)) or (side == 'SHORT' and any(x >= e for x in tps)):
+        raise ValueError('Take Profit должен быть по направлению сделки')
+    risk = _num(risk_pct if risk_pct is not None else acc.get('risk_pct', 1), 'риск', 0.1, 5.0)
+    fee = _num(fee_pct if fee_pct is not None else acc.get('fee_pct', .1), 'комиссия', 0, 2)
+    slip = _num(slippage_pct if slippage_pct is not None else acc.get('slippage_pct', .02), 'проскальзывание', 0, 2)
+    risk_cash = float(acc['equity']) * risk / 100
+    stop_distance = abs(e - sl)
+    qty = risk_cash / stop_distance
+    notional = qty * e
+    if notional > float(acc['equity']) * 10:
+        raise ValueError('Слишком большой размер позиции относительно виртуального капитала')
+    entry_exec = e * (1 + slip / 100 if side == 'LONG' else 1 - slip / 100)
+    entry_fee = notional * fee / 100
+    acc['balance'] -= entry_fee
+    pos = {'coin': coin, 'side': side, 'entry': entry_exec, 'signal_entry': e, 'stop': sl,
+           'targets': tps, 'qty': qty, 'notional': notional, 'risk_pct': risk,
+           'risk_cash': risk_cash, 'entry_fee': entry_fee, 'fee_pct': fee, 'slippage_pct': slip,
+           'opened_at': time.time(), 'account_id': acc['id'], 'unrealized_pnl': 0.0}
+    acc['positions'][coin] = pos
+    acc['updated_at'] = time.time()
+    return copy.deepcopy(pos)
 
 
-def risk_position_size(deposit, risk_pct, entry, stop, max_notional=None):
-    deposit, risk_pct, entry, stop = map(_num, (deposit, risk_pct, entry, stop))
-    if deposit <= 0 or entry <= 0 or stop <= 0 or not 0 < risk_pct <= 10 or entry == stop:
-        raise ValueError('Некорректные параметры риска')
-    risk_cash = deposit * risk_pct / 100
-    distance = abs(entry - stop) / entry
-    notional = risk_cash / distance
-    if max_notional is not None:
-        notional = min(notional, max(0.0, _num(max_notional)))
-    return {'risk_usdt': round(risk_cash, 2), 'position_usdt': round(notional, 2),
-            'quantity': round(notional / entry, 10), 'stop_distance_pct': round(distance * 100, 4)}
+def close_position(store, uid, coin, exit_price, account_id=None, reason='manual'):
+    user, acc = _get_account(store, uid, account_id)
+    coin = str(coin).upper().strip()
+    pos = acc['positions'].get(coin)
+    if not pos:
+        raise ValueError('Открытая Paper-позиция не найдена')
+    px = _num(exit_price, 'цена выхода', 1e-12, 1e12)
+    side_sign = 1 if pos['side'] == 'LONG' else -1
+    exit_exec = px * (1 - pos['slippage_pct'] / 100 if pos['side'] == 'LONG' else 1 + pos['slippage_pct'] / 100)
+    gross = (exit_exec - pos['entry']) * side_sign * pos['qty']
+    exit_fee = abs(exit_exec * pos['qty']) * pos['fee_pct'] / 100
+    net = gross - exit_fee
+    acc['balance'] += net
+    rec = {'coin': coin, 'side': pos['side'], 'entry': pos['entry'], 'exit': exit_exec,
+           'qty': pos['qty'], 'gross_pnl': gross, 'fees': pos['entry_fee'] + exit_fee,
+           'pnl': net - pos['entry_fee'], 'pnl_pct_equity': (net - pos['entry_fee']) / max(1e-9, acc['initial_balance']) * 100,
+           'reason': str(reason)[:32], 'opened_at': pos['opened_at'], 'closed_at': time.time(), 'account_id': acc['id']}
+    acc['history'].append(rec)
+    if len(acc['history']) > MAX_HISTORY_PER_ACCOUNT:
+        del acc['history'][:-MAX_HISTORY_PER_ACCOUNT]
+    del acc['positions'][coin]
+    acc['realized_pnl'] = round(float(acc['balance']) - float(acc['initial_balance']), 8)
+    acc['updated_at'] = time.time()
+    return copy.deepcopy(rec)
 
 
-def cleanup(now=None):
-    now = time.time() if now is None else now
-    for key, (ts, _) in list(_cache.items()):
-        if now - ts > CACHE_TTL:
-            _cache.pop(key, None)
-    while len(_cache) > CACHE_MAX:
-        _cache.popitem(last=False)
+def set_settings(store, uid, risk_pct=None, fee_pct=None, slippage_pct=None, account_id=None):
+    _, acc = _get_account(store, uid, account_id)
+    if risk_pct is not None: acc['risk_pct'] = _num(risk_pct, 'риск', .1, 5)
+    if fee_pct is not None: acc['fee_pct'] = _num(fee_pct, 'комиссия', 0, 2)
+    if slippage_pct is not None: acc['slippage_pct'] = _num(slippage_pct, 'проскальзывание', 0, 2)
+    acc['updated_at'] = time.time()
+    return copy.deepcopy(acc)
+
+
+def reset_account(store, uid, account_id=None, deposit=None):
+    user, acc = _get_account(store, uid, account_id)
+    if acc.get('positions'):
+        raise ValueError('Сначала закройте все открытые позиции')
+    amount = _num(deposit if deposit is not None else acc['initial_balance'], 'депозит', 10, 1e9)
+    fresh = _account(uid, acc['name'], amount, primary=bool(acc.get('primary')))
+    fresh.update({k: acc[k] for k in ('id', 'kind', 'risk_pct', 'fee_pct', 'slippage_pct') if k in acc})
+    idx = user['accounts'].index(acc)
+    user['accounts'][idx] = fresh
+    return copy.deepcopy(fresh)
