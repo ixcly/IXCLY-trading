@@ -3570,6 +3570,31 @@ async def news_watcher_loop():
             log.warning(f"news_watcher: {e}")
         next_timers["news_watcher"] = time.time() + 600
         await asyncio.sleep(600)
+        
+        
+async def broadcast_market_alert(title, reason, advice, pause_mins=60):
+    """Умная рассылка о волатильности/паузе для обычных пользователей."""
+    text = (f"<b>{title}</b>\n\n"
+            f"📝 <b>Что произошло:</b>\n{reason}\n\n"
+            f"💡 <b>Что делать:</b>\n{advice}\n\n"
+            f"⏳ <i>Сканер торговых сигналов приостановлен на {pause_mins} мин. для вашей безопасности.</i>")
+    
+    # Кнопка, чтобы сразу открыть приложение
+    kb = kb_nav([[InlineKeyboardButton(text="📈 Открыть приложение", web_app=WebAppInfo(url=webapp_link()))]], back=False) if WEBAPP_URL else None
+    
+    # Отправляем только тем, у кого включены сигналы (или новости)
+    targets = [uid for uid in active_chats if get_user_notif_settings(uid)["signals"]]
+    
+    sent = 0
+    for cid in targets:
+        try:
+            await _send_new(cid, text, kb, None)
+            sent += 1
+            await asyncio.sleep(0.05) # Защита от лимитов Telegram
+        except Exception as e:
+            pass
+            
+    log.info(f"Оповещение о волатильности отправлено {sent} пользователям.")
 
 
 async def price_alerts_loop():
