@@ -279,6 +279,7 @@ ${r.comment?`<div class="card">💬 <b>Аналитик (${esc(r.risk_lvl)} ри
 ${r.reasons&&r.reasons.length?`<div class="card"><b>📈 Почему</b>${r.reasons.map(x=>`<div class="m">• ${esc(x)}</div>`).join('')}${r.patterns&&r.patterns.length?`<div class="m" style="margin-top:6px">🕯 ${esc(r.patterns.join('; '))}</div>`:''}</div>`:''}
 ${renderAd(S.access)}
 ${pos?(r.waiting_entry?`<button class="btn d" onclick="act('pos_close','${r.coin}')">✖ Отменить сопровождение лимита</button>`:`<button class="btn d" onclick="act('pos_close','${r.coin}')">❌ Закрыть сделку по рынку</button>`):`<button class="btn" onclick="saveEntry('${r.coin}',false)">✅ Подтвердить мой лимит и включить сопровождение</button>`}
+<button class="btn s" style="margin-top:8px;border:1px solid var(--a);" onclick="paperOpenFromCoin('${r.coin}')">🧪 Открыть виртуальную сделку в Paper Trading</button>
 <div class="g" style="margin-top:8px"><button class="btn s" onclick="P.coin('${r.coin}',1)">🔄 Пересчитать</button><button class="btn s" onclick="act('fav_${r.in_fav?'del':'add'}','${r.coin}')">${r.in_fav?'⭐ В избранном':'💾 В избранное'}</button></div>
 <button class="btn s" style="margin-top:8px" onclick="alertFor('${r.coin}',${price})">🔔 Алерт на цену</button>
 ${myAlerts.length?`<div class="card" style="margin-top:8px"><small>Ваши алерты</small>${myAlerts.map(a=>`<div class="row" style="margin-top:6px"><b class="num ${a.op=='>'?'up':'dn'}">${a.op} ${f(a.price)}</b><button class="pill" onclick="delAlert(${a.i},'${r.coin}')">🗑 удалить</button></div>`).join('')}</div>`:''}
@@ -303,9 +304,46 @@ function closeSheet(){$('#sheet-bg').classList.remove('on');$('#sheet').classLis
 async function submitSheet(){let v=($('#sh-val').value||'').replace(/\s/g,'');v=v.includes('.')?v.replace(/,/g,''):v.replace(',','.');const n=parseFloat(v);if(!(n>0))return toast('Введите число');const j=await api('alert_add',{coin:SHEET_COIN,price:n});if(!j.error){toast(j.msg);closeSheet();await refreshMe()}}
 async function delAlert(i,c){const j=await api('alert_del',{idx:i});if(!j.error){await refreshMe();P.coin(c)}}
 
+/* ---------- PAPER TRADING 2.0: отдельный виртуальный контур ---------- */
+async function paperOpenFromCoin(c){
+  const j=await api('paper_open',{coin:c});if(j.error)return;
+  toast(j.msg||'Виртуальная сделка открыта');tab('portfolio');
+}
+async function paperSelect(id){const j=await api('paper_select',{account_id:id});if(!j.error){toast(j.msg);P.portfolio()}}
+async function paperCreate(){
+  const name=($('#paperName').value||'Тестовая стратегия').trim();
+  const deposit=Number($('#paperDeposit').value||1000);
+  if(!(deposit>=10&&Number.isFinite(deposit)))return toast('Минимальный виртуальный депозит — 10 USDT');
+  const j=await api('paper_create',{name,deposit,kind:'strategy'});if(!j.error){toast(j.msg);P.portfolio()}
+}
+async function paperClose(c){const j=await api('paper_close',{coin:c});if(!j.error){toast(j.msg);P.portfolio()}}
+async function paperReset(){
+  const a=window.PAPER_ACTIVE;if(!a)return;
+  const yes=confirm('Сбросить виртуальный счёт? Открытых позиций быть не должно. История этого счёта будет очищена.');
+  if(!yes)return;const j=await api('paper_reset',{account_id:a.id});if(!j.error){toast(j.msg);P.portfolio()}
+}
+function paperPanel(p){
+ const a=p.active||{},accounts=p.accounts||[],positions=Object.entries(a.positions||{}),hist=(a.history||[]).slice().reverse();window.PAPER_ACTIVE=a;
+ return `<div class="card" style="border:1px solid rgba(139,124,255,.38);background:radial-gradient(240px 120px at 100% 0%,rgba(139,124,255,.18),transparent 70%),var(--card)">
+ <div class="row"><b>🧪 PAPER TRADING</b><span class="tag L">ВИРТУАЛЬНО</span></div>
+ <small class="m">Без реальных ордеров. Отдельный счёт, комиссии и проскальзывание учитываются в результате.</small>
+ <label class="m" style="display:block;margin-top:10px">Активный виртуальный счёт</label>
+ <select id="paperAccount" onchange="paperSelect(this.value)" style="width:100%;margin:6px 0 10px">${accounts.map(x=>`<option value="${esc(x.id)}" ${x.id===p.active_account?'selected':''}>${esc(x.name)}${x.primary?' · основной':''}</option>`).join('')}</select>
+ <div class="g"><div class="card"><small>Баланс</small><h2 class="num">${Number(a.balance||0).toFixed(2)} USDT</h2></div><div class="card"><small>Equity</small><h2 class="num">${Number(a.equity||0).toFixed(2)} USDT</h2></div><div class="card"><small>Реализованный PnL</small><h2 class="num ${a.realized_pnl>=0?'up':'dn'}">${a.realized_pnl>=0?'+':''}${Number(a.realized_pnl||0).toFixed(2)}</h2></div><div class="card"><small>Нереализованный PnL</small><h2 class="num ${a.unrealized_pnl>=0?'up':'dn'}">${a.unrealized_pnl>=0?'+':''}${Number(a.unrealized_pnl||0).toFixed(2)}</h2></div></div>
+ <div class="lv"><span>Риск / сделка</span><b>${Number(a.risk_pct||1)}%</b></div><div class="lv"><span>Комиссия / сторона</span><b>${Number(a.fee_pct||0.1)}%</b></div><div class="lv"><span>Проскальзывание / сторона</span><b>${Number(a.slippage_pct||0.02)}%</b></div>
+ <h3 style="margin:14px 0 8px">Открытые виртуальные позиции (${positions.length})</h3>
+ ${positions.length?positions.map(([c,x])=>`<div class="card"><div class="row"><b>${esc(c)} ${side(x.side)}</b><b class="num ${(x.pnl_pct||0)>=0?'up':'dn'}">${x.pnl_pct==null?'—':(x.pnl_pct>0?'+':'')+x.pnl_pct+'%'}</b></div><small class="m">Вход ${f(x.entry)} · mark ${f(x.mark_price)} · SL ${f(x.stop)} · объём ${Number(x.notional||0).toFixed(2)} USDT</small><button class="btn d" style="margin-top:8px" onclick="paperClose('${esc(c)}')">Закрыть виртуально по рынку</button></div>`).join(''):'<div class="card m">Пока нет виртуальных сделок. Открой монету и нажми «Открыть виртуальную сделку».</div>'}
+ <h3 style="margin:14px 0 8px">Создать дополнительный счёт / стратегию</h3><input id="paperName" placeholder="Название стратегии" maxlength="32"><input id="paperDeposit" type="number" min="10" value="1000" placeholder="Депозит USDT" style="margin-top:7px"><button class="btn s" style="margin-top:8px" onclick="paperCreate()">＋ Создать тестовый счёт</button>
+ <button class="btn s" style="margin-top:8px" onclick="paperReset()">↻ Сбросить активный счёт</button>
+ <h3 style="margin:14px 0 8px">История Paper Trading</h3>
+ ${hist.length?hist.slice(0,12).map(t=>`<div class="lv"><span>${esc(t.coin)} ${t.side} · ${esc(t.reason||'manual')}</span><b class="num ${(t.pnl||0)>=0?'up':'dn'}">${(t.pnl||0)>=0?'+':''}${Number(t.pnl||0).toFixed(2)} USDT</b></div>`).join(''):'<small class="m">Закрытые виртуальные сделки появятся здесь.</small>'}
+ <small class="m" style="display:block;margin-top:10px">Paper Trading использует доступные котировки и модельные комиссии. Результаты не равны фактическому исполнению на бирже.</small></div>`;
+}
+
 /* ---------- Портфель ---------- */
-P.portfolio=async()=>{const j=await api('portfolio');if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
+P.portfolio=async()=>{const [j,paper]=await Promise.all([api('portfolio'),api('paper_get')]);if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
 V().innerHTML=`<h1>Мой <span>портфель</span></h1>
+${paper&&!paper.error?paperPanel(paper):''}
 ${renderAd(S.access)}
 <div class="g"><div class="card"><small>💰 Депозит</small><h2 class="num" style="margin:4px 0 8px">$${s.deposit}</h2><input id="dep" type="number" inputmode="decimal" placeholder="Новый депозит"><button class="btn s" style="margin-top:6px" onclick="setv('set_deposit','dep')">Сохранить</button></div>
 <div class="card"><small>📉 Риск на сделку</small><h2 class="num" style="margin:4px 0 8px">${s.risk_pct}%</h2><input id="rsk" type="number" inputmode="decimal" placeholder="0.1 – 10"><button class="btn s" style="margin-top:6px" onclick="setv('set_risk','rsk')">Сохранить</button></div></div>
@@ -373,4 +411,4 @@ if(me.error){V().innerHTML='<div class="card">Нет связи с сервер�
 S=me;const c=q.get('coin'),t=q.get('tab');
 if(c)go('coin',c);else if(t&&P[t])go(t);else go('signals');
 })();
-</script></body></html></script></body></html>
+</script></body></html>
