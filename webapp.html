@@ -167,7 +167,6 @@ V().innerHTML=`<h1>Моя <span>подписка</span></h1>${a.status==='Нав
 <div class="row"><small>Осталось</small><b class="num">${a.free?'∞':(a.days_left+' дн.')}</b></div>
 ${a.free?'':`<div class="bar" style="margin-top:8px"><i style="width:${Math.min(100,a.days_left/30*100)}%"></i></div>`}</div>
 <h2>Тарифы</h2>${planCards(a.plans||[])}
-<button class="btn" style="margin-top:10px" onclick="openBot('buy')">💳 Продлить в боте</button>
 <h2>🎟 Промокод</h2>${promoBox()}
 <button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>
 ${a.ad?`<div class="card" style="margin-top:12px"><small>📢 ${esc(a.ad)}</small></div>`:''}`};
