@@ -38,7 +38,37 @@ import feedparser
 import numpy as np
 import pandas as pd
 from ixcly_intelligence import score_signal, market_regime, volume_anomaly, risk_position_size, cleanup as cleanup_intelligence
-from ixcly_paper import (snapshot as paper_snapshot, create_account as paper_create_account, select_account as paper_select_account, open_position as paper_open_position, close_position as paper_close_position, set_settings as paper_set_settings, reset_account as paper_reset_account, analytics as paper_analytics)
+import ixcly_paper as _paper_engine
+paper_snapshot = _paper_engine.snapshot
+paper_create_account = _paper_engine.create_account
+paper_select_account = _paper_engine.select_account
+paper_open_position = _paper_engine.open_position
+paper_close_position = _paper_engine.close_position
+paper_set_settings = _paper_engine.set_settings
+paper_reset_account = _paper_engine.reset_account
+# Compatibility guard: old deployments may have an outdated ixcly_paper.py.
+if not callable(getattr(_paper_engine, "analytics", None)):
+    def _paper_analytics_compat(store, uid, account_id=None):
+        user = _paper_engine.ensure_user(store, uid)
+        aid = str(account_id or user.get("active_account") or "main")
+        acc = next((a for a in user.get("accounts", []) if str(a.get("id")) == aid), None)
+        if not acc:
+            raise ValueError("Виртуальный счёт не найден")
+        history = list(acc.get("history") or [])[-500:]
+        pnls = [float(x.get("pnl", 0) or 0) for x in history]
+        wins = [x for x in pnls if x > 1e-9]
+        losses = [x for x in pnls if x < -1e-9]
+        gross_profit, gross_loss = sum(wins), -sum(losses)
+        return {"account_id": aid, "account_name": acc.get("name"), "trades": len(pnls),
+                "wins": len(wins), "losses": len(losses), "breakeven": len(pnls)-len(wins)-len(losses),
+                "win_rate": round(len(wins)/len(pnls)*100, 2) if pnls else 0.0,
+                "net_pnl": round(sum(pnls), 2), "avg_pnl": round(sum(pnls)/len(pnls), 2) if pnls else 0.0,
+                "profit_factor": round(gross_profit/gross_loss, 2) if gross_loss else (None if not gross_profit else "∞"),
+                "max_drawdown_pct": float(acc.get("max_drawdown_pct", 0) or 0),
+                "equity_curve": [], "history": history[-10:]}
+    paper_analytics = _paper_analytics_compat
+else:
+    paper_analytics = _paper_engine.analytics
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
@@ -332,11 +362,11 @@ _alert_sent = {}
 # =====================================================================
 STATE_FILE = "bot_state.json"
 STATE_LOCK = threading.RLock()
-STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}}
+STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}}
 state_dirty = False
 backup_dirty = False
 last_backup_ts = 0.0
-STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper")
+STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper", "support_tickets")
 
 
 def state_touch(important=True):
@@ -5916,8 +5946,88 @@ async def welcome_for(chat_id, uid):
                                parse_mode="HTML", reply_markup=paywall_kb(uid))
 
 
+def support_faq_answer(question):
+    q = (question or "").lower().strip()
+    topics = [
+        (("сигнал", "анализ", "монет", "тикер", "сканер"), "📊 Сигналы и анализ\nОткройте Mini App → выберите монету или сканер. Бот показывает направление, вход, Stop Loss и Take Profit. Сигналы не гарантируют прибыль."),
+        (("подпис", "оплат", "звезд", "stars", "купить", "тариф"), "💳 Подписка и оплата\nОткройте раздел «Подписка», выберите срок и оплатите Telegram Stars. После успешной оплаты доступ активируется автоматически."),
+        (("paper", "бумаж", "виртуальн", "демо", "симуляц"), "🧪 Paper Trading\nЭто симулятор: сделки виртуальные и не отправляются на биржу. Откройте Paper Trading в Mini App."),
+        (("vip", "доступ", "пробн", "trial"), "🔐 Доступ\nПроверьте статус в профиле. Для активации VIP откройте раздел «Подписка»."),
+        (("реферал", "приглас", "скидк", "промокод", "промо"), "🎁 Реферальная программа\nПриглашайте пользователей своей ссылкой. Доступные скидки и вознаграждения отображаются в разделе подписки."),
+        (("ошибк", "не работает", "не открывается", "завис", "баг"), "🛠️ Решение проблем\nПерезапустите Mini App. Если ошибка осталась, отправьте её в поддержку вместе с названием раздела и скриншотом."),
+        (("настройк", "уведом", "оповещ", "alerts"), "🔔 Уведомления\nОткройте меню уведомлений и включите нужные категории. Проверьте разрешения Telegram."),
+    ]
+    for keys, answer in topics:
+        if any(k in q for k in keys):
+            return answer
+    return None
+
+
+async def create_support_ticket(m: types.Message, question: str):
+    tickets = STATE.setdefault("support_tickets", {})
+    ticket_id = str(int(time.time())) + str(m.from_user.id)[-4:]
+    ticket = {"id": ticket_id, "uid": m.from_user.id, "chat_id": m.chat.id,
+              "username": m.from_user.username or "", "name": m.from_user.full_name,
+              "question": (question or "")[:3000], "status": "open", "created_at": time.time(), "answer": ""}
+    tickets[ticket_id] = ticket
+    if len(tickets) > 500:
+        for old_id, old in sorted(tickets.items(), key=lambda kv: float(kv[1].get("created_at", 0)))[:100]:
+            if old.get("status") != "open": tickets.pop(old_id, None)
+    state_touch(True)
+    await m.answer("Ваш вопрос передан агенту поддержки. Ожидайте ответа здесь.")
+    await notify_admin("🆘 <b>Новое обращение поддержки</b>\n"
+        f"ID: <code>{ticket_id}</code>\nПользователь: {html.escape(ticket['name'][:80])} (@{html.escape(ticket['username'])})\n"
+        f"Telegram ID: <code>{ticket['uid']}</code>\n\nВопрос:\n{html.escape(ticket['question'][:2500])}\n\n"
+        f"Ответить: <code>/reply {ticket_id} текст ответа</code>\nЗакрыть: <code>/close_ticket {ticket_id}</code>")
+
+
+@dp.message(Command("tickets"))
+async def main_admin_tickets(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    opened = [t for t in STATE.setdefault("support_tickets", {}).values() if t.get("status") == "open"]
+    if not opened:
+        return await m.answer("Открытых обращений нет.")
+    for t in sorted(opened, key=lambda x: float(x.get("created_at", 0)))[:30]:
+        await m.answer(f"🆘 <b>#{html.escape(t['id'])}</b> · <code>{t.get('uid')}</code>\n{html.escape(str(t.get('question',''))[:2500])}\nОтвет: <code>/reply {t['id']} текст</code>", parse_mode="HTML")
+
+
+@dp.message(Command("reply"))
+async def main_admin_reply(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    parts = (m.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        return await m.answer("Формат: /reply ID текст ответа")
+    ticket = STATE.setdefault("support_tickets", {}).get(parts[1])
+    if not ticket:
+        return await m.answer("Обращение не найдено.")
+    answer = parts[2][:3000]
+    try:
+        await bot.send_message(int(ticket["chat_id"]), "🧑‍💻 <b>Ответ поддержки IXCLY</b>\n" + html.escape(answer), parse_mode="HTML")
+    except Exception as e:
+        return await m.answer(f"Не удалось доставить ответ: {html.escape(str(e)[:300])}")
+    ticket.update({"status": "answered", "answer": answer, "answered_at": time.time(), "answered_by": m.from_user.id})
+    state_touch(True)
+    await m.answer("✅ Ответ отправлен пользователю.")
+
+
+@dp.message(Command("support", "helpdesk"))
+async def support_command(m: types.Message):
+    await m.answer("🆘 Поддержка IXCLY\nЗадайте вопрос о функциях бота. Если я не смогу ответить по теме, обращение получит агент поддержки.")
+
+
 @dp.message()
 async def fallback_message(m: types.Message):
+    text_in = (m.text or m.caption or "").strip()
+    if text_in and not text_in.startswith("/"):
+        answer = support_faq_answer(text_in)
+        if answer:
+            return await m.answer(answer)
+        if any(x in text_in.lower() for x in ("поддержка:", "вопрос поддержке", "оператор:", "агент:", "help:")):
+            return await create_support_ticket(m, text_in)
+        if not re.fullmatch(r"[A-Za-z0-9]{2,12}", text_in):
+            return await create_support_ticket(m, text_in)
     try:
         await m.delete()
     except Exception:
@@ -5993,11 +6103,12 @@ def admin_keyboard():
 
 
 async def notify_admin(text):
-    if not admin_bot:
+    sender = admin_bot or bot
+    if not ADMIN_IDS:
         return
     for aid in ADMIN_IDS:
         try:
-            await admin_bot.send_message(aid, text, parse_mode="HTML", disable_web_page_preview=True)
+            await sender.send_message(aid, text, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
             log.info(f"Админу {aid}: {e}")
 
@@ -6071,6 +6182,51 @@ if admin_dp:
         if not isinstance(event.exception, TelegramNetworkError):
             log.error(f"Ошибка админ-бота: {event.exception}", exc_info=event.exception)
         return True
+
+    @admin_dp.message(Command("tickets"))
+    async def admin_support_tickets(m: types.Message):
+        if m.from_user.id not in ADMIN_IDS:
+            return
+        opened = [t for t in STATE.setdefault("support_tickets", {}).values() if t.get("status") == "open"]
+        if not opened:
+            return await m.answer("Открытых обращений нет.")
+        for t in sorted(opened, key=lambda x: float(x.get("created_at", 0)))[:30]:
+            await m.answer(f"🆘 <b>#{html.escape(t['id'])}</b> · {html.escape(str(t.get('name',''))[:60])} · <code>{t.get('uid')}</code>\n"
+                           f"{html.escape(str(t.get('question',''))[:2500])}\n\nОтвет: <code>/reply {t['id']} текст</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("reply"))
+    async def admin_support_reply(m: types.Message):
+        if m.from_user.id not in ADMIN_IDS:
+            return
+        parts = (m.text or "").split(maxsplit=2)
+        if len(parts) < 3:
+            return await m.answer("Формат: /reply ID текст ответа")
+        ticket = STATE.setdefault("support_tickets", {}).get(parts[1])
+        if not ticket:
+            return await m.answer("Обращение не найдено.")
+        answer = parts[2][:3000]
+        try:
+            await bot.send_message(int(ticket['chat_id']), "🧑‍💻 <b>Ответ поддержки IXCLY</b>\n" + html.escape(answer), parse_mode="HTML")
+        except Exception as e:
+            return await m.answer(f"Не удалось доставить ответ: {html.escape(str(e)[:300])}")
+        ticket.update({"status": "answered", "answer": answer, "answered_at": time.time(), "answered_by": m.from_user.id})
+        state_touch(True)
+        await m.answer(f"✅ Ответ отправлен пользователю по обращению {parts[1]}.")
+
+    @admin_dp.message(Command("close_ticket"))
+    async def admin_support_close(m: types.Message):
+        if m.from_user.id not in ADMIN_IDS:
+            return
+        parts = (m.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            return await m.answer("Формат: /close_ticket ID")
+        ticket = STATE.setdefault("support_tickets", {}).get(parts[1])
+        if not ticket:
+            return await m.answer("Обращение не найдено.")
+        ticket["status"] = "closed"
+        ticket["closed_at"] = time.time()
+        state_touch(True)
+        await m.answer("✅ Обращение закрыто.")
 
     @admin_dp.message(Command("panel", "start", "admin"))
     async def admin_panel(m: types.Message):
