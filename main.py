@@ -3764,6 +3764,43 @@ API_CACHE_TTL = {"me": 4, "signals": 4, "portfolio": 4, "stats": 5, "mystats": 5
 API_CACHE = {}
 
 
+# --- API ДЛЯ ОПЛАТЫ В WEBAPP ---
+from aiogram.types import LabeledPrice
+
+@app.route("/api/create_stars_invoice", methods=["POST"])
+def api_create_stars_invoice():
+    d = request.get_json(silent=True) or {}
+    u = tg_auth(d.get("initData", ""))
+    if not u:
+        return Response('{"error":"Откройте из Telegram"}', 401, mimetype="application/json")
+    
+    try:
+        days = int(d.get("days", 30))
+        if days not in PLANS:
+            return jsonify({"error": "Неверный тариф"})
+            
+        price = PLANS[days]
+        title = PLAN_TITLE[days]
+
+        async def _create():
+            # Создаем ссылку на счет для Telegram Stars
+            return await bot.create_invoice_link(
+                title=f"IXCLY PRO · {title}",
+                description=f"Доступ к сигналам и аналитике на {days} дней",
+                payload=f"plan:{days}",
+                currency="XTR", # XTR - это звезды
+                prices=[LabeledPrice(label=title, amount=price)],
+                provider_token="" 
+            )
+            
+        link = asyncio.run_coroutine_threadsafe(_create(), MAIN_LOOP).result(10)
+        return jsonify({"link": link})
+        
+    except Exception as e:
+        log.error(f"Ошибка создания счета: {e}")
+        return jsonify({"error": "Ошибка сервера при создании счета"})
+
+
 @app.route("/api/<act>", methods=["POST"])
 def mini_api(act):
     d = request.get_json(silent=True) or {}
