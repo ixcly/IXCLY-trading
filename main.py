@@ -5822,4 +5822,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        log.info("Бот остановлен")        log.info("Бот остановлен")
+        log.info("Бот остановлен")
