@@ -4050,6 +4050,7 @@ def bot_main_keyboard():
     rows.append([InlineKeyboardButton(text="🔥 Сигналы", web_app=WebAppInfo(url=webapp_link(tab="signals")))] if WEBAPP_URL else
                 [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
+    rows.append([InlineKeyboardButton(text="📄 Документы", callback_data="show_docs")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4066,6 +4067,8 @@ def notif_keyboard(uid):
 
 
 ANALYZE_SEM = None
+DOCS_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99"
+DOCS_OFFER = "https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15"
 DISCOUNT_OFFERS = {}
 CRITICAL_NEWS = re.compile(r"hack|exploit|\bsec\b|lawsuit|delist|halt|bankrupt|arrest|sanction|взлом|запрет")
 
@@ -5070,6 +5073,13 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
+        if data == "show_docs" and msg:
+            await safe_answer(cb)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Политика конфиденциальности", url=DOCS_PRIVACY)],
+                [InlineKeyboardButton(text="Пользовательское соглашение (оферта)", url=DOCS_OFFER)],
+                [InlineKeyboardButton(text=f"🆘 Поддержка {ads_get()['support']}", url=f"https://t.me/{ads_get()['support'].lstrip('@')}")]])
+            return await msg.answer("📄 <b>Документы IXCLY PRO</b>\nВыберите нужный пункт:", reply_markup=kb, parse_mode="HTML")
         if data.startswith("buy:"):
             await safe_answer(cb)
             return await send_plan_invoice(uid, int(data.split(":")[1]))
