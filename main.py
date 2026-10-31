@@ -38,7 +38,7 @@ import feedparser
 import numpy as np
 import pandas as pd
 from ixcly_intelligence import score_signal, market_regime, volume_anomaly, risk_position_size, cleanup as cleanup_intelligence
-from ixcly_paper import (snapshot as paper_snapshot, create_account as paper_create_account, select_account as paper_select_account, open_position as paper_open_position, close_position as paper_close_position, set_settings as paper_set_settings, reset_account as paper_reset_account)
+from ixcly_paper import (snapshot as paper_snapshot, create_account as paper_create_account, select_account as paper_select_account, open_position as paper_open_position, close_position as paper_close_position, set_settings as paper_set_settings, reset_account as paper_reset_account, analytics as paper_analytics)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
@@ -49,7 +49,7 @@ from aiogram.exceptions import (
 )
 from aiogram.filters import Command
 from aiogram.types import (BufferedInputFile, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
-                           MenuButtonWebApp, WebAppInfo)
+                           LabeledPrice, MenuButtonWebApp, WebAppInfo)
 from flask import Flask, Response, jsonify, request, send_file
 from PIL import Image, ImageDraw, ImageFont
 
@@ -3224,7 +3224,7 @@ async def scan_once(send=True):
         def _rej(k):
             rej[k] = rej.get(k, 0) + 1
 
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(2)
         stage1, stage2, final, bt_pass = [], [], [], 0
 
         async def s1(coin):
@@ -4175,7 +4175,7 @@ API_CACHE = {}
 
 
 # --- API ДЛЯ ОПЛАТЫ В WEBAPP ---
-from aiogram.types import LabeledPrice
+
 
 @app.route("/api/create_stars_invoice", methods=["POST"])
 def api_create_stars_invoice():
@@ -4189,18 +4189,19 @@ def api_create_stars_invoice():
         if days not in PLANS:
             return jsonify({"error": "Неверный тариф"})
             
-        price = PLANS[days]
+        price = price_for_user(int(u["id"]), days)
         title = PLAN_TITLE[days]
 
         async def _create():
-            # Создаем ссылку на счет для Telegram Stars
+            # Сумма зафиксирована в payload, чтобы Mini App и Telegram invoice
+            # использовали одну цену и нельзя было оплатить другой тариф.
             return await bot.create_invoice_link(
                 title=f"IXCLY PRO · {title}",
                 description=f"Доступ к сигналам и аналитике на {days} дней",
-                payload=f"plan:{days}",
-                currency="XTR", # XTR - это звезды
+                payload=f"plan:{days}:{price}",
+                currency="XTR",
                 prices=[LabeledPrice(label=title, amount=price)],
-                provider_token="" 
+                provider_token=""
             )
             
         link = asyncio.run_coroutine_threadsafe(_create(), MAIN_LOOP).result(10)
@@ -4398,6 +4399,87 @@ async def mini_dispatch(uid, u, act, d):
                              "grade": x.get("quality_label"), "regime": x.get("market_regime"),
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
                 "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE)}
+
+    if act == "risk_calc":
+        try:
+            entry = float(d.get("entry", 0))
+            stop = float(d.get("stop", 0))
+            side = str(d.get("side", "LONG")).upper()
+            settings = get_user_risk_settings(uid)
+            if entry <= 0 or stop <= 0 or entry == stop or side not in ("LONG", "SHORT"):
+                return {"error": "Проверьте цену входа, Stop Loss и направление"}
+            if (side == "LONG" and stop >= entry) or (side == "SHORT" and stop <= entry):
+                return {"error": "Stop Loss должен быть ниже входа для LONG и выше для SHORT"}
+            open_risk = calculate_portfolio_risk(uid)
+            remaining = max(0.0, settings["max_open_risk"] - open_risk)
+            requested = float(d.get("risk_pct", settings["risk_pct"]))
+            if not 0.1 <= requested <= 10:
+                return {"error": "Риск должен быть от 0.1 до 10%"}
+            effective = min(requested, remaining) if remaining > 0 else 0.0
+            if effective <= 0:
+                return {"error": "Лимит общего открытого риска уже исчерпан"}
+            sizing = risk_position_size(settings["deposit"], effective, entry, stop,
+                                        max_notional=settings["deposit"] * 3.0)
+            return {"side": side, "risk_pct": round(effective, 2), "requested_risk_pct": requested,
+                    "open_risk_pct": round(open_risk, 2), "remaining_risk_pct": round(remaining, 2),
+                    "max_open_risk_pct": settings["max_open_risk"], "warning": effective < requested, **sizing}
+        except (TypeError, ValueError) as e:
+            return {"error": str(e) or "Некорректные параметры риска"}
+
+    if act == "paper_analytics":
+        try:
+            with STATE_LOCK:
+                return paper_analytics(STATE.setdefault("paper", {}), uid, d.get("account_id"))
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if act == "max_dashboard":
+        now = time.time()
+        user_data = _users().get(str(uid), {})
+        trade_log = list(user_data.get("trade_log", []))[-300:]
+        trade_wins = sum(1 for x in trade_log if x.get("result") == "win")
+        trade_losses = sum(1 for x in trade_log if x.get("result") == "loss")
+        closed_trades = trade_wins + trade_losses
+        signal_history = load_signal_history()
+        unique, seen_keys = [], set()
+        for item in sorted(signal_history, key=lambda x: x.get("ts", 0), reverse=True):
+            key = f"{item.get('coin')}:{item.get('side')}"
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique.append(item)
+        sw = sum(1 for x in unique if x.get("status") == "win")
+        sl = sum(1 for x in unique if x.get("status") == "loss")
+        closed_signals = sw + sl
+        movers = []
+        for symbol, item in list(LIVE.items())[:150]:
+            if isinstance(item, dict):
+                movers.append({"coin": symbol, "change_pct": item.get("change_pct"), "price": item.get("price"), "ts": item.get("ts")})
+        movers.sort(key=lambda x: abs(_safe_float(x.get("change_pct"))), reverse=True)
+        alerts = list(user_data.get("price_alerts", []))[:20]
+        active_locks = sum(1 for x in unique if x.get("status") in ("active", "in_trade"))
+        recent_cooldowns = sum(1 for ts in signal_sent_at.values() if now - ts < SIGNAL_COOLDOWN)
+        backup_age = round(now - last_backup_ts) if last_backup_ts else None
+        scan_ts = float(last_scan_info.get("ts", 0) or 0)
+        return {
+            "performance": {"trades": len(trade_log), "wins": trade_wins, "losses": trade_losses,
+                            "win_rate": round(trade_wins / closed_trades * 100, 1) if closed_trades else 0.0,
+                            "net_pnl_pct": round(sum(float(x.get("pnl", 0) or 0) for x in trade_log), 2)},
+            "system_signals": {"total": len(unique), "wins": sw, "losses": sl,
+                               "win_rate": round(sw / closed_signals * 100, 1) if closed_signals else 0.0},
+            "scanner": {"last_scan_age": round(now - scan_ts) if scan_ts else None,
+                        "last_scan": dict(last_scan_info), "active_signals": len(get_active_signals()),
+                        "live_coins": len(LIVE), "movers": movers[:8]},
+            "alerts": alerts,
+            "dedupe": {"enabled": True, "active_signal_locks": active_locks,
+                       "recent_cooldowns": recent_cooldowns, "cooldown_seconds": SIGNAL_COOLDOWN},
+            "monitor": {"uptime_seconds": round(now - stats.get("started", now)),
+                        "news_engine": market_bias.get("engine", "none"),
+                        "main_bot_configured": bool(runtime.get("main_bot")),
+                        "admin_backup_configured": bool(admin_bot and ADMIN_IDS),
+                        "backup_age_seconds": backup_age, "backup_pending": bool(backup_dirty),
+                        "backup_status": "не настроен" if not admin_bot or not ADMIN_IDS else ("ожидает отправки" if backup_dirty else ("выполнен" if backup_age is not None else "ещё не выполнялся")),
+                        "scan_age_seconds": round(now - scan_ts) if scan_ts else None},
+        }
 
     if act == "signals":
         flt = d.get("flt", "Все")
@@ -4746,12 +4828,29 @@ def classify_critical(title, summary=""):
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
     uid = m.from_user.id
+    user_key = str(uid)
+    is_first_start = user_key not in _users()
     parts = (m.text or "").split()
+    referral_uid = None
     if len(parts) > 1 and parts[1].startswith("ref_") and parts[1][4:].isdigit():
-        ref = int(parts[1][4:])
-        if ref != uid and "referrer" not in _users().get(str(uid), {}):
-            set_user_field(uid, referrer=ref)
+        candidate = int(parts[1][4:])
+        if candidate != uid:
+            referral_uid = candidate
     await asyncio.to_thread(save_user_data, uid, m.from_user.username, m.from_user.first_name)
+    if referral_uid and "referrer" not in _users().get(user_key, {}):
+        set_user_field(uid, referrer=referral_uid)
+    # Welcome discount is assigned once, at first registration, and persisted
+    # in STATE so restarts or repeated /start commands cannot renew it.
+    if is_first_start:
+        user_now = _users().get(user_key, {})
+        referred = bool(user_now.get("referrer"))
+        set_user_field(uid, welcome_offer={
+            "pct": 20 if referred else 10,
+            "kind": "referral" if referred else "welcome",
+            "created_at": time.time(),
+            "until": time.time() + 3 * 86400,
+            "used": False,
+        })
     active_chats.add(m.chat.id)
     try:
         await m.delete()
@@ -5306,15 +5405,54 @@ async def cmd_analytics(m: types.Message):
 
 
 
-from aiogram.types import LabeledPrice
+
 
 # =====================================================================
 # ДОСТУП: пробный период, подписка (Telegram Stars), промокоды, бесплатный доступ, реклама
 # =====================================================================
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))
-PLANS = {30: 399, 90: 1000, 365: 3500}  # дни: цена в Telegram Stars (XTR)
+# Более понятная лестница цен в Telegram Stars: выгоднее при оплате за срок.
+PLANS = {30: 299, 90: 799, 365: 2499}  # дни: цена в Telegram Stars (XTR)
 PLAN_TITLE = {30: "Месяц", 90: "3 месяца", 365: "Год"}
 FEE_PCT = 0.1                            # комиссия туда-обратно, % от позиции
+
+
+def discount_offer_for(uid):
+    """Возвращает лучшее действующее персональное предложение пользователя."""
+    now = time.time()
+    user = _users().get(str(uid), {})
+    offer = user.get("welcome_offer") or {}
+    candidates = []
+    if (not offer.get("used") and int(offer.get("pct", 0) or 0) > 0
+            and float(offer.get("until", 0) or 0) > now):
+        candidates.append(offer)
+    # Старое предложение возврата сохраняем для совместимости.
+    legacy = DISCOUNT_OFFERS.get(int(uid)) or DISCOUNT_OFFERS.get(uid)
+    if legacy and float(legacy.get("until", 0) or 0) > now:
+        candidates.append(legacy)
+    return max(candidates, key=lambda x: int(x.get("pct", 0) or 0)) if candidates else None
+
+
+def price_for_user(uid, days):
+    base = int(PLANS[days])
+    offer = discount_offer_for(uid)
+    if not offer:
+        return base
+    pct = max(0, min(80, int(offer.get("pct", 0) or 0)))
+    return max(1, int(round(base * (100 - pct) / 100)))
+
+
+def plan_prices_for_user(uid):
+    offer = discount_offer_for(uid)
+    pct = max(0, min(80, int(offer.get("pct", 0) or 0))) if offer else 0
+    until = int(offer.get("until", 0)) if offer else 0
+    kind = offer.get("kind", "offer") if offer else ""
+    return [{"days": d, "stars": price_for_user(uid, d), "original_stars": s,
+             "discount_pct": pct, "offer_until": until,
+             "offer_label": ("Скидка 20% за приглашение" if kind == "referral" else
+                             "Приветственная скидка 10%" if kind == "welcome" else
+                             f"Персональная скидка {pct}%" if pct else "") ,
+             "title": PLAN_TITLE[d]} for d, s in PLANS.items()]
 FREE_ACTS = {"me", "access", "promo_apply", "support"}
 TG_SEM = None                            # создаётся в main (не привязано к event loop при импорте)
 COIN_RL = {}                             # uid -> ts последнего пересчёта монеты
@@ -5386,7 +5524,11 @@ def access_payload(uid):
     show_ad = bool(ad.get("on") and not is_vip)
     return {"ok": ok, "status": status, "days_left": days_left, "hours_left": int(left // 3600) % 24,
             "until": until, "free": bool(a.get("free")), "vip": is_vip,
-            "plans": [{"days": d, "stars": s, "title": PLAN_TITLE[d]} for d, s in PLANS.items()],
+            "plans": plan_prices_for_user(uid),
+            "offer": ({"pct": int(discount_offer_for(uid).get("pct", 0)),
+                       "until": int(discount_offer_for(uid).get("until", 0)),
+                       "label": plan_prices_for_user(uid)[0].get("offer_label", "")}
+                      if discount_offer_for(uid) else None),
             "support": ad["support"], "ad": ad["text"] if show_ad else "",
             "ad_url": ad["url"] if show_ad else ""}
 
@@ -5406,8 +5548,8 @@ def ad_block():
     return f"\n\n📢 <i>{html.escape(a['text'])}</i>{link}\nРеклама: {html.escape(a['contact'])}"
 
 
-def paywall_kb():
-    rows = [[InlineKeyboardButton(text=f"💳 {PLAN_TITLE[d]} · {s}⭐", callback_data=f"buy:{d}")] for d, s in PLANS.items()]
+def paywall_kb(uid=None):
+    rows = [[InlineKeyboardButton(text=f"💳 {PLAN_TITLE[d]} · {price_for_user(uid, d) if uid is not None else s}⭐", callback_data=f"buy:{d}")] for d, s in PLANS.items()]
     rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:help")])
     rows.append([InlineKeyboardButton(text=f"🆘 Поддержка {ads_get()['support']}", url=f"https://t.me/{ads_get()['support'].lstrip('@')}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5416,13 +5558,10 @@ def paywall_kb():
 async def send_plan_invoice(uid, days):
     if days not in PLANS:
         return
-    off = DISCOUNT_OFFERS.get(uid)
-    stars = PLANS[days]
-    if off and time.time() < off["until"]:
-        stars = max(1, round(stars * (100 - off["pct"]) / 100))
+    stars = price_for_user(uid, days)
     await bot.send_invoice(chat_id=uid, title=f"IXCLY PRO · {PLAN_TITLE[days]}",
                            description=f"Доступ к сигналам, сопровождению сделок и аналитике на {days} дн.",
-                           payload=f"plan:{days}", currency="XTR",
+                           payload=f"plan:{days}:{stars}", currency="XTR",
                            prices=[LabeledPrice(label=f"{PLAN_TITLE[days]}", amount=stars)], provider_token="")
 
 
@@ -5476,7 +5615,7 @@ async def access_reminder_loop():
                     text = "🔒 <b>Доступ закрыт.</b> Оплатите подписку, чтобы вернуть сигналы."
                 else:
                     continue
-                await _tell(uid, text, paywall_kb())
+                await _tell(uid, text, paywall_kb(uid))
                 await asyncio.sleep(0.05)
             except Exception as e:
                 log.info(f"reminder {uid_str}: {e}")
@@ -5497,12 +5636,23 @@ async def on_pre_checkout(q: types.PreCheckoutQuery):
 @dp.message(F.successful_payment)
 async def on_paid(m: types.Message):
     try:
-        days = int(m.successful_payment.invoice_payload.split(":")[1])
-    except Exception:
-        days = 30
+        payload_parts = m.successful_payment.invoice_payload.split(":")
+        days = int(payload_parts[1])
+        if days not in PLANS:
+            raise ValueError("unknown plan")
+        if len(payload_parts) >= 3 and int(payload_parts[2]) != int(m.successful_payment.total_amount):
+            raise ValueError("invoice amount mismatch")
+    except Exception as e:
+        log.error("Rejected invalid Stars payment payload: %s", e)
+        return
     buyer = _users().get(str(m.from_user.id), {})
     first_payment = not (buyer.get("access") or {}).get("paid_ever")
     grant_days(m.from_user.id, days, "paid")
+    with STATE_LOCK:
+        current_offer = STATE["users"].get(str(m.from_user.id), {}).get("welcome_offer")
+        if current_offer:
+            current_offer["used"] = True
+    state_touch()
     DISCOUNT_OFFERS.pop(m.from_user.id, None)
     ref = buyer.get("referrer")
     if ref and first_payment:
@@ -5524,9 +5674,11 @@ async def cmd_buy(m: types.Message):
     except Exception:
         pass
     a = access_payload(m.from_user.id)
+    offer_line = (f"\n🎁 <b>{a['offer']['label']} — действует ограниченное время.</b>" if a.get("offer") else "")
     await _send_new(m.chat.id, f"💳 <b>Подписка IXCLY PRO</b>\nСтатус: <b>{a['status']}</b>"
-                               f"{' · осталось ' + str(a['days_left']) + ' дн.' if a['ok'] and not a['free'] else ''}\n\n"
-                               f"Оплата звёздами Telegram (⭐). Выберите срок:", paywall_kb(), None)
+                               f"{' · осталось ' + str(a['days_left']) + ' дн.' if a['ok'] and not a['free'] else ''}"
+                               f"{offer_line}\n\nОплата звёздами Telegram (⭐). Выберите срок:",
+                    paywall_kb(m.from_user.id), None)
 
 
 def account_age_hours(uid):
@@ -5749,12 +5901,19 @@ if admin_dp:
 
 
 async def welcome_for(chat_id, uid):
+    offer = discount_offer_for(uid)
+    offer_notice = ""
+    if offer:
+        pct = int(offer.get("pct", 0))
+        hours = max(1, int((float(offer.get("until", 0)) - time.time()) / 3600))
+        label = "за приглашение" if offer.get("kind") == "referral" else "для новых пользователей"
+        offer_notice = f"\n\n🎁 <b>Ваша скидка {pct}% {label}!</b> Действует ещё {hours} ч. Цены уже снижены в разделе «Подписка»."
     if has_access(uid):
-        await bot.send_message(chat_id, WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
+        await bot.send_message(chat_id, WELCOME_BOT + offer_notice, parse_mode="HTML", reply_markup=bot_main_keyboard())
     else:
         await bot.send_message(chat_id, "🔒 <b>Доступ закрыт.</b>\nПробный период закончился или не активирован. "
-                                        "Оплатите подписку, чтобы получать сигналы и сопровождение сделок.",
-                               parse_mode="HTML", reply_markup=paywall_kb())
+                                        "Оплатите подписку, чтобы получать сигналы и сопровождение сделок." + offer_notice,
+                               parse_mode="HTML", reply_markup=paywall_kb(uid))
 
 
 @dp.message()
@@ -6061,7 +6220,7 @@ async def churn_offer_loop():
                 idle = now - u.get("last_seen", 0)
                 if -3 * 86400 < left <= 86400 and idle > 3 * 86400:
                     DISCOUNT_OFFERS[uid] = {"pct": 30, "until": now + 86400}
-                    await _tell(uid, "🎁 <b>Скучаем!</b> Скидка 30% на продление — 24 часа.\nВыберите тариф в /buy.", paywall_kb())
+                    await _tell(uid, "🎁 <b>Скучаем!</b> Скидка 30% на продление — 24 часа.\nВыберите тариф в /buy.", paywall_kb(uid))
                     await asyncio.sleep(0.05)
             except Exception as e:
                 log.info(f"churn {uid_str}: {e}")
