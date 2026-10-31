@@ -3583,7 +3583,14 @@ async def news_watcher_loop():
                     if CRITICAL_NEWS.search(ttl_news.lower()):
                         set_blackout(3600)
                         await notify_admin(f"🚨 Критичная новость: сигналы на паузу 1 час.\n{ttl_news}")
-                    await check_news_conflicts_with_signals()
+                        
+                        # --- ДОБАВЛЯЕМ РАССЫЛКУ ---
+                        asyncio.create_task(broadcast_market_alert(
+                            title="🚨 Критическая новость на рынке",
+                            reason=f"Зафиксирована важная новость: <i>{html.escape(shorten(ttl_news, 150))}</i>",
+                            advice="При таких новостях (взломы, решения SEC, банкротства) рынок может улететь на 5-10% за минуту. Рекомендуем воздержаться от новых входов и не усреднять убыточные позиции.",
+                            pause_mins=60
+                        ))
                     if bot_flags["news_enabled"] and active_chats:
                         text, img_url = await prepare_news()
                         if text:
