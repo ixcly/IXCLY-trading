@@ -29,7 +29,9 @@ import time
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from threading import Thread
-from urllib.parse import quote, parse_qsl
+from urllib.parse import quote, parse_qsl, urlparse
+import ipaddress
+import socket
 
 import aiohttp
 import feedparser
@@ -301,6 +303,9 @@ last_backup_msg = {}
 next_timers = {"scanner": 0, "positions": 0, "pos_updates": 0, "news_watcher": 0, "backup": 0, "global_signals": 0, "anomaly": 0}
 exchange_bans = {}
 news_blackout_until = 0.0
+news_blackout_kind, news_blackout_since = "misc", 0.0
+_macro_cache = {"ts": 0.0, "events": []}
+_alert_sent = {}
 
 # =====================================================================
 # ХРАНИЛИЩЕ СОСТОЯНИЯ (память + файл + бэкап в Telegram)
@@ -394,7 +399,18 @@ def flush_state():
     with STATE_LOCK:
         STATE["persist"] = collect_persist()
         STATE["meta"] = {"saved_at": time.time(), "version": VERSION}
-        data = json.dumps(STATE, ensure_ascii=False, default=str)
+        data = None
+        for attempt in range(3):
+            try:
+                data = json.dumps(STATE, ensure_ascii=False, default=str)
+                break
+            except RuntimeError as e:
+                if attempt == 2:
+                    log.error(f"Не удалось сделать снимок STATE после 3 попыток: {e}")
+                else:
+                    time.sleep(0.05)
+        if data is None:
+            return ""
         try:
             with open(STATE_FILE + ".tmp", "w", encoding="utf-8") as f:
                 f.write(data)
@@ -577,16 +593,38 @@ def get_user_api_keys(user_id, exchange=None):
         return None, None
 
 
+def safe_webhook(url):
+    """Разрешает только HTTPS URL с публичным DNS-адресом (защита от базового SSRF)."""
+    try:
+        u = urlparse(str(url or "").strip())
+        if u.scheme != "https" or not u.hostname or u.username or u.password:
+            return False
+        if u.port not in (None, 443):
+            return False
+        for ai in socket.getaddrinfo(u.hostname, 443, type=socket.SOCK_STREAM):
+            ip = ipaddress.ip_address(ai[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                    or ip.is_multicast or ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 async def send_webhook_all(event):
-    """Дублирует событие сигнала POST-запросом всем пользователям, у кого задан вебхук."""
+    """Отправляет события только на HTTPS webhook с публичным адресом."""
     for uid, u in list(_users().items()):
-        url = u.get("webhook_url")
-        if url:
-            try:
-                async with http.post(url, json=event, timeout=aiohttp.ClientTimeout(total=5)) as r:
-                    log.info(f"Webhook {uid}: {r.status}")
-            except Exception as e:
-                log.warning(f"Webhook {uid}: {e}")
+        url = u.get("webhook_url") if isinstance(u, dict) else None
+        if not url:
+            continue
+        try:
+            if not await asyncio.to_thread(safe_webhook, url):
+                log.warning("Webhook %s отклонён: небезопасный URL", uid)
+                continue
+            async with http.post(url, json=event, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False) as r:
+                log.info(f"Webhook {uid}: {r.status}")
+        except Exception as e:
+            log.warning(f"Webhook {uid}: {e}")
 
 
 def generate_csv_history():
@@ -2185,6 +2223,34 @@ def age_text(ts):
     return f"{sec // 3600} ч {sec % 3600 // 60} мин назад" if sec >= 3600 else f"{sec // 60} мин назад"
 
 
+def price_change_pct(side, entry, price):
+    """Направленная доходность цены: LONG и SHORT используют одну формулу."""
+    entry, price = float(entry), float(price)
+    if entry <= 0:
+        return 0.0
+    sign = 1.0 if str(side).upper() == "LONG" else -1.0
+    return sign * (price - entry) / entry * 100.0
+
+
+def rebase_signal_prices(res, new_entry):
+    """Переносит уровни TP/SL на новый вход, сохраняя исходные относительные расстояния."""
+    old_entry = float(res.get("entry") or 0)
+    new_entry = float(new_entry)
+    if old_entry <= 0 or new_entry <= 0:
+        raise ValueError("Цена входа должна быть больше нуля")
+    out = dict(res)
+    for key in ("tps", "sls"):
+        levels = res.get(key) or []
+        out[key] = [new_entry * (float(level) / old_entry) for level in levels]
+    out["entry"] = new_entry
+    if out.get("price") is not None:
+        out["entry_override"] = True
+    # risk_dist — доля риска от нового входа до первого стопа
+    sls = out.get("sls") or []
+    out["risk_dist"] = abs(new_entry - float(sls[0])) / new_entry if sls else float(res.get("risk_dist") or 0)
+    return out
+
+
 def render_caption(res, uid=None):
     """Короткая карточка сигнала для Telegram-уведомления (≤1024 символов)."""
     coin = html.escape(res["coin"])
@@ -2194,7 +2260,7 @@ def render_caption(res, uid=None):
     entry = res["entry"]
 
     def pct(p):
-        return f"{(p - entry) / entry * 100:+.1f}%"
+        return f"{price_change_pct(res['side'], entry, p):+.1f}%"
 
     s = get_user_risk_settings(uid) if uid else {"deposit": DEPOSIT, "risk_pct": RISK_PCT}
     risk_usdt = s["deposit"] * s["risk_pct"] / 100
@@ -2866,95 +2932,109 @@ def coin_recently_lost(coin, hours=24):
                for x in load_signal_history())
 
 
-def set_blackout(secs):
+def set_blackout(secs, kind="misc"):
+    global news_blackout_until, news_blackout_kind, news_blackout_since
+    news_blackout_until = max(news_blackout_until, time.time() + secs)
+    news_blackout_kind, news_blackout_since = kind, time.time()
+
+
+def alert_once(kind, ttl):
+    now = time.time()
+    if now - _alert_sent.get(kind, 0) < ttl:
+        return False
+    _alert_sent[kind] = now
+    return True
+
+
+async def maybe_lift_blackout():
+    """Снимает только новостную паузу, если через 15 минут BTC не отреагировал."""
     global news_blackout_until
-    news_blackout_until = time.time() + secs
+    if news_blackout_kind != "news" or time.time() < news_blackout_since + 900:
+        return False
+    if abs(await btc_move_15m()) < 0.6:
+        news_blackout_until = 0.0
+        if alert_once("blackout_lift", 3600):
+            await notify_admin("✅ Новостная пауза снята раньше срока: BTC спокоен.")
+        return True
+    return False
 
 
 async def btc_shock():
     try:
         tf, _ = await get_market_data_light("BTC", ("1h",))
         last = tf["1h"]["df"].iloc[-1]
-        return (last["high"] - last["low"]) > 2.5 * last["atr"]
+        closed_ago = time.time() - (float(last["ts"]) / 1000 + 3600)
+        return closed_ago < 1800 and (last["high"] - last["low"]) > 2.5 * last["atr"]
     except Exception:
         return False
 
 
 async def check_macro_calendar():
-    """Важные новости USD (ФРС, CPI и т.п.) в окне ±30 минут."""
-    try:
-        async with http.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status != 200:
-                return False
-            events = await r.json(content_type=None)
-        now = datetime.now(timezone.utc)
-        for event in events:
-            if event.get("impact") == "High" and event.get("country") == "USD":
-                diff = (datetime.fromisoformat(event["date"].replace("Z", "+00:00")) - now).total_seconds()
-                if -1800 < diff < 1800:
-                    log.warning(f"Макро-новость: {event.get('title')}")
-                    return True
-    except Exception as e:
-        log.warning(f"Ошибка проверки календаря: {e}")
+    """Календарь USD кэшируется на 15 минут, включая неудачные запросы."""
+    if time.time() - _macro_cache["ts"] > 900:
+        _macro_cache["ts"] = time.time()
+        try:
+            async with http.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+                                timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    _macro_cache["events"] = [e for e in await r.json(content_type=None)
+                                               if e.get("impact") == "High" and e.get("country") == "USD"]
+        except Exception as e:
+            log.warning(f"Календарь: {e}")
+    now = datetime.now(timezone.utc)
+    for ev in _macro_cache["events"]:
+        try:
+            diff = (datetime.fromisoformat(ev["date"].replace("Z", "+00:00")) - now).total_seconds()
+            if -1800 < diff < 1800:
+                return True
+        except Exception:
+            continue
     return False
 
 
 def signal_recipients(coin, side):
-    """Кому отправлять уведомления о сигнале: включивших сигналы."""
-    return [int(uid) for uid, u in list(_users().items())
-            if isinstance(u, dict) and u.get("active", True) and u.get("notify_signals", True) and has_access(int(uid))]
+    """Кому отправлять уведомления о сигнале: включившим сигналы и имеющим доступ."""
+    out = []
+    for uid, u in list(_users().items()):
+        try:
+            iid = int(uid)
+            if isinstance(u, dict) and u.get("active", True) and get_user_notif_settings(iid)["signals"] and has_access(iid):
+                out.append(iid)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 async def scan_once(send=True):
-    # ... начало функции ...
-    async with scan_lock:
-        t0 = time.time()
-        
-        # 1. Проверка макро-календаря
-        if await check_macro_calendar():
-            set_blackout(1800)
-            await notify_admin("🏦 Макро-новость (ФРС/CPI): сканер на паузе 30 минут.")
-            
-            # --- ДОБАВЛЯЕМ РАССЫЛКУ ---
-            asyncio.create_task(broadcast_market_alert(
-                title="🏦 Внимание: Макро-новость (ФРС/CPI)",
-                reason="Скоро выход важных экономических данных по США. В такие моменты рынок может вести себя хаотично, возможны резкие свечи и ложные пробои.",
-                advice="Не входите в сделки за 15 минут до и 15 минут после новости. Дождитесь реакции рынка.",
-                pause_mins=30
-            ))
-            return []
-            
-        # 2. Проверка шока BTC
-        if await btc_shock():
-            set_blackout(1800)
-            await notify_admin("⚠ Шок BTC: сканер на паузе 30 минут.")
-            
-            # --- ДОБАВЛЯЕМ РАССЫЛКУ ---
-            asyncio.create_task(broadcast_market_alert(
-                title="⚡ Шок волатильности на рынке",
-                reason="По BTC зафиксирован резкий импульс (свеча более 2.5 ATR). В такие моменты альткоины часто летят вниз за биткоином, снося стопы.",
-                advice="Бот приостановил поиск сигналов. Подождите стабилизации цены на графике BTC, чтобы не попасть под раздачу.",
-                pause_mins=30
-            ))
-            return []
-            
-        # ... остальной код сканера ...
-    """Сканер: быстрый этап по 4h/1d, затем 1h/15m, бэктест, ИИ. Отсев с причинами."""
-    if scan_lock.locked():
+    """Единый проход сканера: сначала блокировки, затем сетевые проверки и анализ."""
+    if scan_lock is None or scan_lock.locked():
         return []
     async with scan_lock:
         t0 = time.time()
-        if time.time() < news_blackout_until or streak_pause():
+        if time.time() < news_blackout_until:
+            if not await maybe_lift_blackout():
+                return []
+        if streak_pause():
             return []
         if await check_macro_calendar():
-            set_blackout(1800)
-            await notify_admin("🏦 Макро-новость (ФРС/CPI): сканер на паузе 30 минут.")
+            set_blackout(1800, "macro")
+            if alert_once("macro", 2 * 3600):
+                await notify_admin("🏦 Макро-новость (ФРС/CPI): сканер на паузе 30 минут.")
+                asyncio.create_task(broadcast_market_alert(
+                    title="🏦 Внимание: макро-новость (ФРС/CPI)",
+                    reason="В окне важных данных США возможны резкие свечи, расширение спредов и ложные пробои.",
+                    advice="Не открывайте новые сделки за 15 минут до и после публикации. Дождитесь стабилизации рынка.",
+                    pause_mins=30))
             return []
         if await btc_shock():
-            set_blackout(1800)
-            await notify_admin("⚠ Шок BTC: сканер на паузе 30 минут.")
+            set_blackout(1800, "shock")
+            if alert_once("shock", 2 * 3600):
+                await notify_admin("⚠ Шок BTC: сканер на паузе 30 минут.")
+                asyncio.create_task(broadcast_market_alert(
+                    title="⚡ Шок волатильности на рынке",
+                    reason="Последняя закрытая часовая свеча BTC превышает 2.5 ATR и ещё находится в окне актуальности.",
+                    advice="Не открывайте новые сделки до стабилизации BTC.", pause_mins=30))
             return []
-
         if time.time() - market_bias["ts"] > 900:
             await update_market_bias()
         ctx = await get_context(force=True)
@@ -3134,6 +3214,8 @@ async def notify_signal_holders(coin, side, text, kb=None, extra_uids=()):
             uids.add(int(uid))
     for uid in uids:
         try:
+            if not has_access(uid) or not get_user_notif_settings(uid)["pos_updates"]:
+                continue
             await _send_new(uid, text, kb or kb_nav(back=False), None)
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -3203,8 +3285,6 @@ async def live_monitor_loop():
                     if reason:
                         await invalidate_signal(x, reason)
                         changed = True
-                    else:
-                        changed = True
             if changed:
                 save_signal_history(hist)
         except Exception as e:
@@ -3234,7 +3314,8 @@ def open_tracked_position(uid, coin, res):
     if get_open_position(uid, coin):
         return False
     set_user_open_position(uid, coin, {
-        "side": res["side"], "entry_price": res["entry"], "created_at": time.time(), "entered_at": time.time(),
+        "side": res["side"], "entry_price": float(res["entry"]), "created_at": time.time(), "entered_at": None,
+        "entry_source": "user" if res.get("entry_override") else "signal",
         "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
         "sl_orig": res["sls"][0], "risk_pct": get_user_risk_settings(uid)["risk_pct"],
         "notified_close": False, "waiting_entry": True, "peak_pnl": 0.0})
@@ -3247,7 +3328,7 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
         return None
     entry, side = pos["entry_price"], pos["side"]
     sign = 1 if side == "LONG" else -1
-    pnl_at = lambda p: sign * (p - entry) / entry * 100
+    pnl_at = lambda p: price_change_pct(side, entry, p)
     h3 = pos.get("hit_tp3")
     h2 = pos.get("hit_tp2") or h3
     h1 = pos.get("hit_tp1") or h2
@@ -3380,7 +3461,7 @@ async def check_position(user_id, coin, pos):
         return
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
-    pnl = sign * (price - entry) / entry * 100
+    pnl = price_change_pct(side, entry, price)
 
     if pos.get("waiting_entry"):
         newer = next((x for x in get_active_signals() if x["coin"] == coin and x["side"] == side
@@ -3388,9 +3469,10 @@ async def check_position(user_id, coin, pos):
         if newer and pos.get("warned_entry") != round(newer["entry"], 8):
             pos["warned_entry"] = round(newer["entry"], 8)
             set_user_open_position(user_id, coin, pos)
-            await _tell(user_id, f"⚠ <b>Лимит сдвинулся: {coin} ({side})</b>\nВаш ордер: <code>{fmt(entry)}</code>\n"
-                                 f"Новый сигнал по монете: вход <code>{fmt(newer['entry'])}</code>.\n"
-                                 f"Ваш ордер не обновлён автоматически: проверьте его на бирже.")
+            await _tell(user_id, f"⚠ <b>Лимит сигнала изменился: {coin} ({side})</b>\n"
+                                 f"Ваша сохранённая цена: <code>{fmt(entry)}</code>\n"
+                                 f"Новая цена сигнала: <code>{fmt(newer['entry'])}</code>.\n"
+                                 f"Ваша цена не менялась. Если хотите перенести лимит, измените её в Mini App и проверьте ордер на бирже.")
         if sign * (price - entry) <= 0:
             pos["waiting_entry"] = False
             pos["entered_at"] = time.time()
@@ -3572,32 +3654,45 @@ async def news_watcher_loop():
         try:
             entries = await get_news_entries()
             if entries:
-                link = entries[0].link
                 if last_news_link is None:
-                    last_news_link = link
-                elif link != last_news_link:
-                    last_news_link = link
+                    last_news_link = entries[0].link
+                elif entries[0].link != last_news_link:
+                    fresh = []
+                    for e in entries:
+                        if getattr(e, "link", None) == last_news_link:
+                            break
+                        fresh.append(e)
+                    last_news_link = entries[0].link
                     state_touch(False)
                     await update_market_bias(force=True)
-                    ttl_news = (getattr(entries[0], "title", "") or "")
-                    if CRITICAL_NEWS.search(ttl_news.lower()):
-                        set_blackout(3600)
-                        await notify_admin(f"🚨 Критичная новость: сигналы на паузу 1 час.\n{ttl_news}")
-                        
-                        # --- ДОБАВЛЯЕМ РАССЫЛКУ ---
-                        asyncio.create_task(broadcast_market_alert(
-                            title="🚨 Критическая новость на рынке",
-                            reason=f"Зафиксирована важная новость: <i>{html.escape(shorten(ttl_news, 150))}</i>",
-                            advice="При таких новостях (взломы, решения SEC, банкротства) рынок может улететь на 5-10% за минуту. Рекомендуем воздержаться от новых входов и не усреднять убыточные позиции.",
-                            pause_mins=60
-                        ))
+                    await check_news_conflicts_with_signals()
+                    scored = []
+                    for e in fresh[:5]:
+                        title = html.unescape(getattr(e, "title", "") or "")
+                        summary = clean_summary(getattr(e, "summary", "") or "")
+                        result = classify_critical(title, summary)
+                        scored.append((result, e, title))
+                        log.info("crit %s: %s (%s)", result[0], title[:180], result[1])
+                    if scored:
+                        (score, _), event, title = max(scored, key=lambda item: item[0][0])
+                        if score >= 3:
+                            set_blackout(3600, "news")
+                            await notify_admin(f"🚨 Критичная новость (балл {score}): пауза до 1 часа.\n{html.escape(title)}")
+                            move = await btc_move_15m()
+                            if (score >= 5 or abs(move) >= 1.2) and alert_once("crit_news", 3 * 3600):
+                                title_ru = market_bias["title_ru"] if market_bias.get("link") == getattr(event, "link", None) else await translate_text(title)
+                                asyncio.create_task(broadcast_market_alert(
+                                    title="🚨 Критическая новость на рынке",
+                                    reason=f"<i>{html.escape(shorten(title_ru, 150))}</i>\nBTC за 15 минут: {move:+.2f}%",
+                                    advice="Воздержитесь от новых входов и не усредняйте убыточные позиции. Пауза снимется, когда рынок успокоится.",
+                                    pause_mins=60))
                     if bot_flags["news_enabled"] and active_chats:
                         text, img_url = await prepare_news()
                         if text:
                             img = await download_bytes(img_url) if img_url else None
                             sent = 0
                             for cid in list(active_chats):
-                                if not get_user_notif_settings(cid)["news"]:
+                                if not get_user_notif_settings(cid)["news"] or not has_access(cid):
                                     continue
                                 try:
                                     await _send_new(cid, text, kb_nav([[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]], back=False), img)
@@ -3607,11 +3702,9 @@ async def news_watcher_loop():
                                     pass
                             stats["news_sent"] += sent
         except Exception as e:
-            log.warning(f"news_watcher: {e}")
+            log.warning(f"news_watcher: {e}", exc_info=True)
         next_timers["news_watcher"] = time.time() + 600
         await asyncio.sleep(600)
-        
-        
 async def broadcast_market_alert(title, reason, advice, pause_mins=60):
     """Умная рассылка о волатильности/паузе для обычных пользователей."""
     text = (f"<b>{title}</b>\n\n"
@@ -3623,7 +3716,7 @@ async def broadcast_market_alert(title, reason, advice, pause_mins=60):
     kb = kb_nav([[InlineKeyboardButton(text="📈 Открыть приложение", web_app=WebAppInfo(url=webapp_link()))]], back=False) if WEBAPP_URL else None
     
     # Отправляем только тем, у кого включены сигналы (или новости)
-    targets = [uid for uid in active_chats if get_user_notif_settings(uid)["signals"]]
+    targets = [uid for uid in active_chats if get_user_notif_settings(uid)["signals"] and has_access(uid)]
     
     sent = 0
     for cid in targets:
@@ -3912,7 +4005,7 @@ def _sig_item(x, live=True):
         item["live_long_prob"] = lv["long_prob"]
     dist = None
     if item.get("live_price") and item.get("entry"):
-        dist = round((item["live_price"] - item["entry"]) / item["entry"] * 100, 2)
+        dist = round(price_change_pct(item.get("side"), item["entry"], item["live_price"]), 2)
     item["dist_pct"] = dist
     return item
 
@@ -3923,7 +4016,7 @@ def _enrich_user_positions(uid):
         lv = LIVE.get(c)
         price = (lv["price"] if lv else None) or p["entry_price"]
         sign = 1 if p["side"] == "LONG" else -1
-        out[c] = dict(p, price=price, pnl=round(sign * (price - p["entry_price"]) / p["entry_price"] * 100, 2))
+        out[c] = dict(p, price=price, pnl=round(price_change_pct(p["side"], p["entry_price"], price), 2))
     return out
 
 
@@ -3947,6 +4040,15 @@ async def coin_payload(uid, coin, force=False):
     out["position"] = bool(get_open_position(uid, coin))
     out["live"] = LIVE.get(coin)
     pos_now = get_open_position(uid, coin)
+    out["waiting_entry"] = bool(pos_now and pos_now.get("waiting_entry"))
+    if pos_now:
+        out["entry"] = float(pos_now.get("entry_price", out["entry"]))
+        out["tps"] = [pos_now.get("tp1"), pos_now.get("tp2"), pos_now.get("tp3")]
+        out["sls"] = [pos_now.get("sl1"), pos_now.get("sl2")]
+        out["side"] = pos_now.get("side", out["side"])
+        effective_risk = abs(float(out["entry"]) - float(pos_now.get("sl1") or out["entry"])) / float(out["entry"])
+        out["risk_dist"] = effective_risk
+        out["pos_usdt"] = out["risk_usdt"] / effective_risk * float(out["entry"]) if effective_risk > 0 else 0.0
     sig_now = next((x for x in get_active_signals() if x["coin"] == coin), None)
     cur_sl = (pos_now or {}).get("sl1") or (sig_now or {}).get("sl1")
     orig_sl = (pos_now or {}).get("sl_orig") or (sig_now or {}).get("sl1")
@@ -4003,7 +4105,7 @@ async def mini_dispatch(uid, u, act, d):
         pos = uu.get("open_positions", {}).get(coin)
         if pos and p:
             sign = 1 if pos["side"] == "LONG" else -1
-            out["pnl"] = round(sign * (p["price"] - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+            out["pnl"] = round(price_change_pct(pos["side"], pos["entry_price"], p["price"]), 2)
             out["sl"] = pos.get("sl1")
             out["trailing"] = abs(pos.get("sl1", 0) - pos.get("sl_orig", pos.get("sl1", 0))) > 1e-12
         return out
@@ -4098,17 +4200,38 @@ async def mini_dispatch(uid, u, act, d):
         await asyncio.to_thread(del_user_saved_signal, uid, coin)
         return {"msg": "Удалено из избранного"}
 
-    if act == "pos_enter" and coin:
+    if act in ("pos_enter", "pos_set_entry") and coin:
         res = get_user_res(uid, coin) or (await analyze_coin(coin, uid=uid))[0]
         if not res or res.get("price_only"):
             return {"error": "Данные устарели, обновите анализ"}
+        raw_entry = d.get("entry_price", d.get("entry"))
+        if raw_entry not in (None, ""):
+            try:
+                custom_entry = float(str(raw_entry).replace(",", ".").strip())
+                if not (custom_entry > 0 and custom_entry < 1e15):
+                    raise ValueError
+                res = rebase_signal_prices(res, custom_entry)
+            except (TypeError, ValueError):
+                return {"error": "Введите корректную цену входа больше нуля"}
+        elif act == "pos_set_entry":
+            return {"error": "Укажите новую цену входа"}
+        existing = get_open_position(uid, coin)
+        if act == "pos_set_entry":
+            if not existing or not existing.get("waiting_entry"):
+                return {"error": "Изменять можно только ожидающий лимитный ордер"}
+            existing.update({"entry_price": float(res["entry"]), "tp1": res["tps"][0], "tp2": res["tps"][1],
+                             "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
+                             "sl_orig": res["sls"][0], "entry_source": "user", "warned_entry": None})
+            set_user_open_position(uid, coin, existing)
+            await _tell(uid, f"✏️ <b>Лимит обновлён: {coin} ({res['side']})</b>\nНовая цена входа: <code>{fmt(res['entry'])}</code>\nTP/SL пересчитаны. Проверьте и обновите ордер на бирже.")
+            return {"msg": "Цена лимитного ордера и уровни TP/SL обновлены"}
         for oc, od in get_user_open_positions(uid).items():
             if oc != coin and od.get("side") == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
                 return {"error": f"Уже открыт {od['side']} по {oc}: {coin} сильно коррелирует"}
         if not open_tracked_position(uid, coin, res):
             return {"error": "Сделка по монете уже открыта"}
-        await _tell(uid, f"⏳ <b>Лимитный ордер: {coin} ({res['side']})</b>\nЖдём вход: <code>{fmt(res['entry'])}</code>\n"
-                         f"Сопровождение включено: вход, TP1-3, стоп и итог придут сюда.")
+        await _tell(uid, f"⏳ <b>Лимитный ордер: {coin} ({res['side']})</b>\nЦена входа: <code>{fmt(res['entry'])}</code>\n"
+                         f"Сопровождение включено. Если цена входа отличается от вашей биржи, измените её в Mini App.")
         return {"msg": "Ордер поставлен, ждём вход"}
 
     if act == "pos_close" and coin:
@@ -4140,8 +4263,8 @@ async def mini_dispatch(uid, u, act, d):
 
     if act == "webhook":
         url = str(d.get("url", "")).strip()
-        if url and not url.startswith("http"):
-            return {"error": "Ссылка должна начинаться с http"}
+        if url and not await asyncio.to_thread(safe_webhook, url):
+            return {"error": "Разрешены только HTTPS webhook на публичных адресах (без localhost и внутренних IP)"}
         set_user_field(uid, webhook_url=url)
         return {"msg": "Вебхук сохранён" if url else "Вебхук отключён"}
 
@@ -4182,7 +4305,32 @@ ANALYZE_SEM = None
 DOCS_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-IXCLY-PRO-10-31"
 DOCS_OFFER = "https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31"
 DISCOUNT_OFFERS = {}
-CRITICAL_NEWS = re.compile(r"hack|exploit|\bsec\b|lawsuit|delist|halt|bankrupt|arrest|sanction|взлом|запрет|хакеры|скам|суд|иск|ликвидация")
+_CRIT_EVENTS = [
+    (re.compile(r"\b(hacked|exploited|drained|rug ?pull|stolen|breached?)\b", re.I), 3),
+    (re.compile(r"\b(insolven\w*|bankrupt\w*|delist(ed|s|ing)?|depegg?ed|halts? (withdrawals?|trading|deposits?))\b", re.I), 3),
+    (re.compile(r"\bsec\b.{0,40}\b(sues?|charges?|lawsuit)\b|\b(sues?|charges?)\b.{0,40}\bsec\b", re.I), 3),
+    (re.compile(r"\b(arrested|sanctioned|seized|indicted)\b", re.I), 2),
+    (re.compile(r"\b(взлом\w*|хакер\w*|банкротств\w*|делистинг\w*|заморозил\w*)\b", re.I), 3),
+]
+_CRIT_CONTEXT = re.compile(r"\b(bitcoin|btc|ethereum|eth|binance|coinbase|bybit|okx|kraken|exchange|stablecoin|usdt|usdc|tether|defi|protocol|bridge|wallet|биржа|биржи|стейблкоин\w*|биткоин\w*)\b", re.I)
+_CRIT_NOISE = re.compile(r"\b(reward hacking|ai models?|llms?|chatgpt|openai|explained|guide|how to|opinion|podcast|weekly|price prediction)\b|искусственн\w+ интеллект", re.I)
+_AMOUNT = re.compile(r"\$\s?(\d+(?:[.,]\d+)?)\s?(million|billion|m|b|млн|млрд)\b", re.I)
+
+
+def classify_critical(title, summary=""):
+    text = f"{title}. {summary[:300]}"
+    if _CRIT_NOISE.search(text):
+        return 0, "шум"
+    score = sum(weight for rx, weight in _CRIT_EVENTS if rx.search(text))
+    if not score or not _CRIT_CONTEXT.search(text):
+        return 0, "нет события или крипто-контекста"
+    match = _AMOUNT.search(text)
+    if match:
+        amount = float(match.group(1).replace(",", "."))
+        if match.group(2).lower() in ("billion", "b", "млрд"):
+            amount *= 1000
+        score += 3 if amount >= 100 else 2 if amount >= 20 else 0
+    return score, "ok"
 
 
 @dp.message(Command("start", "menu"))
@@ -5009,6 +5157,33 @@ async def cmd_promo(m: types.Message):
     await _send_new(m.chat.id, apply_promo(m.from_user.id, parts[1]), kb_nav(back=False), None)
 
 
+@dp.message(Command("ad_set", "add_set"))
+async def main_ad_set(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    body = m.text.split(" ", 1)[1] if " " in (m.text or "") else ""
+    ad_text, _, url = body.partition("|")
+    ad_text, url = ad_text.strip(), url.strip()
+    if not ad_text:
+        return await m.answer("Формат: <code>/add_set Текст рекламы | https://example.com</code>", parse_mode="HTML")
+    if url and urlparse(url).scheme != "https":
+        return await m.answer("Ссылка должна начинаться с https://", parse_mode="HTML")
+    with STATE_LOCK:
+        STATE["ads"] = dict(ads_get(), on=True, text=ad_text, url=url)
+    state_touch()
+    await m.answer("📢 Реклама включена: главная страница и раздел сигналов Mini App.")
+
+
+@dp.message(Command("ad_off"))
+async def main_ad_off(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    with STATE_LOCK:
+        STATE["ads"] = dict(ads_get(), on=False)
+    state_touch()
+    await m.answer("📢 Реклама выключена.")
+
+
 if admin_dp:
     def _is_admin(m):
         return m.from_user.id in ADMIN_IDS
@@ -5097,15 +5272,20 @@ if admin_dp:
         lines = [f"{k}: {v['days']} дн., осталось {v['uses_left']}" for k, v in STATE["promos"].items()] or ["Промокодов нет"]
         await m.answer("🎟 <b>Промокоды</b>\n" + "\n".join(lines), parse_mode="HTML")
 
-    @admin_dp.message(Command("ad_set"))
+    @admin_dp.message(Command("ad_set", "add_set"))
     async def adm_ad_set(m: types.Message):
         """/ad_set текст | ссылка(необязательно)"""
         if not _is_admin(m):
             return
         body = m.text.split(" ", 1)[1] if " " in m.text else ""
         text, _, url = body.partition("|")
+        text, url = text.strip(), url.strip()
+        if not text:
+            return await m.answer("Формат: <code>/add_set Текст рекламы | https://example.com</code>", parse_mode="HTML")
+        if url and urlparse(url).scheme != "https":
+            return await m.answer("Ссылка должна начинаться с https://", parse_mode="HTML")
         with STATE_LOCK:
-            STATE["ads"] = dict(ads_get(), on=True, text=text.strip(), url=url.strip())
+            STATE["ads"] = dict(ads_get(), on=True, text=text, url=url)
         state_touch()
         await m.answer("📢 Реклама включена и будет показана в приложении и утреннем брифинге.")
 
@@ -5153,7 +5333,7 @@ if admin_dp:
         await m.answer("<b>Команды админа</b>\n/grant UID ДНИ — добавить дни\n/revoke UID — закрыть доступ\n"
                        "/free UID on|off — бесплатный доступ\n/who UID — статус\n"
                        "/promo_add КОД ДНИ ИСП [ДНЕЙ] · /promo_del КОД · /promos\n"
-                       "/ad_set текст | ссылка · /ad_off\n/contact ads @ник · /contact support @ник", parse_mode="HTML")
+                       "/ad_set или /add_set текст | ссылка · /ad_off\n/contact ads @ник · /contact support @ник", parse_mode="HTML")
 
 
 
@@ -5430,9 +5610,12 @@ async def memory_janitor_loop():
                 LIVE.pop(c, None)
             for c in [c for c, v in analysis_cache.items() if now - v[0] > 600]:
                 analysis_cache.pop(c, None)
-            for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600)):
-                for k in [k for k, v in store.items() if now - v[0] > ttl]:
+            for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600), (_ob_cache, 600), (_hourly_cache, 600)):
+                for k in [k for k, v in store.items() if isinstance(v, (tuple, list)) and v and now - v[0] > ttl]:
                     store.pop(k, None)
+            for k, ts in list(_alert_sent.items()):
+                if now - ts > 24 * 3600:
+                    _alert_sent.pop(k, None)
             for store in (scan_skip, exchange_bans, BAD_MODELS):
                 for k in [k for k, t in store.items() if t < now]:
                     store.pop(k, None)
@@ -5639,4 +5822,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        log.info("Бот остановлен")
+        log.info("Бот остановлен")        log.info("Бот остановлен")
