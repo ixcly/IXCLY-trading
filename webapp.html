@@ -108,7 +108,7 @@ ${planCards(a.plans||[])}
 <button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
 P.sub=async()=>{await refreshMe();const a=S.access||{};
 if(!a.ok&&!a.free){return P.paywall()}
-V().innerHTML=`<h1>Моя <span>подписка</span></h1>
+V().innerHTML=`<h1>Моя <span>подписка</span></h1>${a.status==='Навсегда'?'<div class="card" style="text-align:center;border-color:var(--up)"><b>♾ Доступ навсегда</b><br><small>Спасибо за поддержку проекта!</small></div>':''}
 <div class="card"><div class="row"><small>Статус</small><b>${esc(a.status)}</b></div>
 <div class="row"><small>Осталось</small><b class="num">${a.free?'∞':(a.days_left+' дн.')}</b></div>
 ${a.free?'':`<div class="bar" style="margin-top:8px"><i style="width:${Math.min(100,a.days_left/30*100)}%"></i></div>`}</div>
@@ -226,6 +226,7 @@ function stl(k){const L=(window.ST.lists||{})[k]||[];$('#sl').innerHTML=`<h2>${S
 const NT=[['signals','🔥 Новые сигналы'],['pos_updates','📊 Сопровождение и итоги'],['news','📰 Новости'],['anomalies','🚨 Аномалии объёма'],['briefing','☀️ Утренний брифинг']];
 P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=S.notif||{};const a=S.access||{};
 V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
+<div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг оплатит подписку — вам +7 дней</div></div>
 <div class="card lst" onclick="go('news')"><b>📰 Новости рынка</b><div class="m" style="margin-top:4px">${esc((S.news||{}).title_ru||'Разбор последней новости')}</div></div>
 <h2>🔔 Уведомления в Telegram</h2>${NT.map(x=>`<div class="card row"><span>${x[1]}</span><div class="sw ${n[x[0]]?'on':''}" onclick="tgl('${x[0]}')"></div></div>`).join('')}
 ${a.ad?`<div class="card" style="margin-top:12px"><small>📢 ${esc(a.ad)}</small></div>`:''}
@@ -235,6 +236,7 @@ ${a.ad?`<div class="card" style="margin-top:12px"><small>📢 ${esc(a.ad)}</smal
 <button class="btn s" style="margin-top:10px" onclick="csv()">📥 Выгрузить историю сигналов (CSV) в чат</button></details>
 <div class="card lst row" onclick="openSupport()"><span>🆘 Поддержка ${esc(a.support||'')}</span><span class="m">›</span></div>
 <p class="m" style="margin:14px 0">IXCLY PRO v${S.version}. Криптовалюта — это риск.</p>`};
+async function refShare(){const r=await api('ref_link');if(r.error)return;const t='Попробуй IXCLY PRO: сигналы и сопровождение сделок 🔥';tg.openTelegramLink('https://t.me/share/url?url='+encodeURIComponent(r.link)+'&text='+encodeURIComponent(t))}
 async function tgl(k){const j=await api('toggle',{key:k});if(!j.error){toast(j.msg);P.more()}}
 async function wh(){const j=await api('webhook',{url:$('#wh').value});if(!j.error)toast(j.msg)}
 async function csv(){const j=await api('csv');if(!j.error)toast(j.msg)}
