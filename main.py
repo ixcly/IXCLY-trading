@@ -3807,10 +3807,16 @@ def mini_api(act):
     u = tg_auth(d.get("initData", ""))
     if not u:
         return Response('{"error":"Откройте приложение из Telegram"}', 401, mimetype="application/json")
+    
     key = (u["id"], act, json.dumps({k: v for k, v in d.items() if k != "initData"}, sort_keys=True, default=str))
-    ttl = API_CACHE_TTL.get(act)
-    if ttl and key in API_CACHE and time.time() - API_CACHE[key][0] < ttl:
-        return Response(API_CACHE[key][1], mimetype="application/json")
+    
+    # Игнорируем кэш для админов, чтобы они видели изменения мгновенно
+    if u["id"] not in ADMIN_IDS:
+        ttl = API_CACHE_TTL.get(act)
+        if ttl and key in API_CACHE and time.time() - API_CACHE[key][0] < ttl:
+            return Response(API_CACHE[key][1], mimetype="application/json")
+    
+    # ... остальной код без изменений ...
     try:
         out = asyncio.run_coroutine_threadsafe(mini_dispatch(u["id"], u, act, d), MAIN_LOOP).result(120)
     except (ValueError, TypeError):
