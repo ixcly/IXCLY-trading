@@ -37,6 +37,7 @@ import aiohttp
 import feedparser
 import numpy as np
 import pandas as pd
+from ixcly_intelligence import score_signal, market_regime, volume_anomaly, risk_position_size, cleanup as cleanup_intelligence
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
@@ -103,11 +104,24 @@ app = Flask(__name__)
 
 
 def _rss_mb():
+    """Peak RSS in MB (Linux Render)."""
     try:
         import resource
         return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
     except Exception:
         return None
+
+
+def _current_rss_mb():
+    """Current resident memory, unlike ru_maxrss which is a lifetime peak."""
+    try:
+        with open("/proc/self/status", "r", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except Exception:
+        pass
+    return None
 
 
 @app.route("/")
@@ -125,7 +139,7 @@ def status_page():
     return jsonify({
         "version": VERSION, "uptime_s": int(time.time() - stats["started"]), "recipients": len(active_chats),
         "main_bot": runtime["main_bot"], "admin_bot": runtime["admin_bot"], "news_engine": market_bias.get("engine"),
-        "last_scan": last_scan_info, "peak_rss_mb": _rss_mb(),
+        "last_scan": last_scan_info, "peak_rss_mb": _rss_mb(), "rss_mb": _current_rss_mb(),
     })
 
 
@@ -194,7 +208,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "3.2"
+VERSION = "3.3-MAX-SIGNALS"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -204,7 +218,7 @@ BT_MIN_TRADES = int(os.getenv("BT_MIN_TRADES", "5"))
 BT_MIN_AVG_R = float(os.getenv("BT_MIN_AVG_R", "0.10"))
 BT_MIN_WINRATE = float(os.getenv("BT_MIN_WINRATE", "23"))
 MIN_QV24 = float(os.getenv("MIN_QV24", "1000000"))
-SCAN_MAX_COINS = int(os.getenv("SCAN_MAX_COINS", "150"))
+SCAN_MAX_COINS = int(os.getenv("SCAN_MAX_COINS", "90"))
 DEPOSIT = float(os.getenv("DEPOSIT", "1000"))
 RISK_PCT = 1.0
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))  # сканер каждые 5 минут
@@ -1470,7 +1484,7 @@ async def fetch_history(coin, tf="4h", limit=1000, min_rows=300):
             order.append((cand, ex))
     order = [(c, ex) for c, ex in order
              if (c, ex["name"]) not in seen and not seen.add((c, ex["name"])) and time.time() >= exchange_bans.get(ex["name"], 0)]
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(2)
 
     async def one(cand, ex):
         async with sem:
@@ -3166,6 +3180,12 @@ async def scan_once(send=True):
         return []
     async with scan_lock:
         t0 = time.time()
+        rss_now = _current_rss_mb()
+        if rss_now is not None and rss_now >= float(os.getenv("RAM_SCAN_STOP_MB", "440")):
+            log.error("Сканер пропущен: RAM %.1f MB достигла защитного порога", rss_now)
+            if alert_once("ram_guard", 1800):
+                await notify_admin(f"⚠️ IXCLY RAM guard: {rss_now:.1f} MB. Сканирование приостановлено до следующего цикла.")
+            return []
         if time.time() < news_blackout_until:
             if not await maybe_lift_blackout():
                 return []
@@ -3262,7 +3282,15 @@ async def scan_once(send=True):
                 except Exception as e:
                     log.info(f"Сборка {coin}: {e}")
                     return
-                if res["verdict"] == "ENTER":
+                # Дополнительный детерминированный контроль качества: это score факторов, не вероятность прибыли.
+                primary_tf = tf_data.get("4h") or tf_data.get("1h") or {}
+                primary_df = primary_tf.get("df") if isinstance(primary_tf, dict) else None
+                res["market_regime"] = market_regime(primary_df)
+                res["volume_anomaly"] = volume_anomaly(primary_df)
+                res["quality_score"] = score_signal(res)
+                res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
+                                         else "C" if res["quality_score"] >= 62 else "D")
+                if res["verdict"] == "ENTER" and res["quality_score"] >= float(os.getenv("MIN_SIGNAL_QUALITY", "58")):
                     final.append(res)
                     analysis_cache[coin] = (time.time(), 60, res)
                     save_analysis_db(coin, res)
@@ -3298,7 +3326,10 @@ async def scan_once(send=True):
                         "strength": r["strength"], "entry": r["entry"], "tp1": r["tps"][0], "tp2": r["tps"][1],
                         "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
                         "max_tp_hit": 0, "hit_sl": 0, "price": r["price"], "sent_to": [], "is_long": r["is_long"],
-                        "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "reasons": [re.sub(r"\s*\(.*\)$", "", s) for s in r.get("reasons", [])][:6], "hour": datetime.now(timezone(timedelta(hours=3))).hour, "daily": False, "mfe": 0.0, "mae": 0.0}
+                        "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "quality_score": r.get("quality_score"),
+                        "quality_label": r.get("quality_label"), "market_regime": r.get("market_regime"),
+                        "volume_anomaly": r.get("volume_anomaly"),
+                        "reasons": [re.sub(r"\s*\(.*\)$", "", s) for s in r.get("reasons", [])][:6], "hour": datetime.now(timezone(timedelta(hours=3))).hour, "daily": False, "mfe": 0.0, "mae": 0.0}
                 hist.append(item)
                 new_items.append((item, r))
             if new_items:
@@ -4208,7 +4239,7 @@ def mini_api(act):
 
 def _sig_item(x, live=True):
     item = {k: x.get(k) for k in ("coin", "side", "type", "strength", "entry", "tp1", "tp2", "tp3", "sl1", "status", "ts",
-                                  "max_tp_hit", "cancel_reason", "live_price")}
+                                  "max_tp_hit", "cancel_reason", "live_price", "quality_score", "quality_label", "market_regime", "volume_anomaly")}
     item["sent"] = len(x.get("sent_to", []))
     if live and x.get("coin") in LIVE:
         lv = LIVE[x["coin"]]
@@ -4306,6 +4337,14 @@ async def coin_payload(uid, coin, force=False):
     return out
 
 
+def _safe_float(value, default=0.0):
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else default
+    except (TypeError, ValueError):
+        return default
+
+
 async def mini_dispatch(uid, u, act, d):
     _users().setdefault(str(uid), {"active": True})["last_seen"] = time.time()
     if act not in FREE_ACTS and not has_access(uid):
@@ -4326,6 +4365,23 @@ async def mini_dispatch(uid, u, act, d):
                 "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150], "access": access_payload(uid), "bot": runtime["main_bot"],
                 "counts": {"signals": len(signals_for(uid)), "saved": len(get_user_saved_signals(uid)),
                            "positions": len(get_user_open_positions(uid))}}
+
+    if act == "intel":
+        # Лёгкий снимок без дополнительного фонового сканера и без хранения свечных массивов.
+        active = get_active_signals()[:30]
+        heat = []
+        for coin, item in list(LIVE.items())[:120]:
+            if not isinstance(item, dict):
+                continue
+            heat.append({"coin": coin, "price": item.get("price"), "change_pct": item.get("change_pct"),
+                         "long_prob": item.get("long_prob")})
+        heat.sort(key=lambda x: abs(_safe_float(x.get("change_pct"))), reverse=True)
+        return {"regime": market_bias.get("regime", "unknown"), "market": market_bias.get("title_ru", ""),
+                "signals": [{"coin": x.get("coin"), "side": x.get("side"), "quality": x.get("quality_score"),
+                             "grade": x.get("quality_label"), "regime": x.get("market_regime"),
+                             "volume_anomaly": x.get("volume_anomaly")} for x in active],
+                "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE),
+                "rss_mb": _current_rss_mb(), "peak_rss_mb": _rss_mb()}
 
     if act == "signals":
         flt = d.get("flt", "Все")
@@ -5859,6 +5915,7 @@ async def memory_janitor_loop():
                 LIVE.pop(c, None)
             for c in [c for c, v in analysis_cache.items() if now - v[0] > 600]:
                 analysis_cache.pop(c, None)
+            cleanup_intelligence(now)
             for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600), (_ob_cache, 600), (_hourly_cache, 600)):
                 for k in [k for k, v in store.items() if isinstance(v, (tuple, list)) and v and now - v[0] > ttl]:
                     store.pop(k, None)
