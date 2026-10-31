@@ -56,7 +56,7 @@ const $=s=>document.querySelector(s),V=()=>$('#v');
 const hap=()=>{try{tg.HapticFeedback.impactOccurred('light')}catch(e){}};
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const f=p=>{if(p==null)return'—';p=+p;const a=Math.abs(p);return a>=1000?p.toLocaleString('en',{maximumFractionDigits:2}):a>=1?p.toFixed(4):a>=.01?p.toFixed(5):p.toFixed(8)};
-const pc=(p,e)=>((p-e)/e*100).toFixed(1)+'%';
+const pc=(p,e,s)=>(((s==='SHORT'?(e-p):(p-e))/e)*100).toFixed(1)+'%';
 const side=s=>`<span class="tag ${s=='LONG'?'L':'S'}">${s}</span>`;
 const TI={'Краткосрочный':'⚡','Среднесрочный':'⏳','Долгосрочный':'🛡'};
 const q=new URLSearchParams(location.search);
@@ -98,7 +98,8 @@ async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.clos
 /* --- РЕКЛАМА --- */
 function renderAd(a){
     if(!a || !a.ad) return '';
-    const url = a.ad_url ? `<br><a href="${esc(a.ad_url)}" target="_blank" style="color:var(--up)">Подробнее</a>` : '';
+    const safeUrl = /^https:\/\//i.test(a.ad_url||'') ? a.ad_url : '';
+    const url = safeUrl ? `<br><a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--up)">Подробнее</a>` : '';
     return `<div class="card" style="margin-top:12px; border-color:var(--ac);"><small>📢 ${esc(a.ad)}${url}</small></div>`;
 }
 
@@ -209,10 +210,11 @@ ${r.img?`<div class="card" style="padding:6px"><img class="ch" src="${r.img}"></
 <div class="g" style="gap:6px">${['1d','4h','1h','15m'].filter(t=>lp[t]!=null).map(t=>`<div class="pill" style="text-align:center">${t}: <b class="${lp[t]>=50?'up':'dn'}">${lp[t]}%</b> лонг</div>`).join('')}</div>
 <small style="display:block;margin-top:6px">RSI 4h ${r.rsi} · ADX ${r.adx} · 📰 ${esc(r.news_status)} · 🌍 BTC ${esc(r.btc_txt)}${r.fng!=null?' · F&G '+r.fng:''}</small>
 ${r.fake_breakout?'<small class="dn" style="display:block">⚠ Ложный пробой (тонкий объём)</small>':''}${r.corr?`<small class="dn" style="display:block">⚠ ${esc(r.corr)}</small>`:''}</div>
-<div class="card"><div class="lv"><span>📥 Вход (только лимит)</span><b class="num">${f(r.entry)}</b></div>
-${r.tps.map((p,i)=>`<div class="lv"><span>🎯 TP${i+1}</span><b class="num up">${f(p)} <small>${pc(p,r.entry)}</small></b></div>`).join('')}
+<div class="card"><div class="lv"><span>📥 Вход (лимит)</span><b class="num">${f(r.entry)}</b></div>
+${r.waiting_entry||!pos?`<label style="display:block;margin:8px 0 5px;color:var(--m);font-size:12px">Ваша цена входа (можно изменить)</label><input id="entry-override" type="text" inputmode="decimal" value="${String(r.entry).replace(/&/g,'&amp;').replace(/"/g,'&quot;')}" placeholder="Введите цену входа">`:''}
+${r.tps.map((p,i)=>`<div class="lv"><span>🎯 TP${i+1}</span><b class="num up">${f(p)} <small>${pc(p,r.entry,r.side)}</small></b></div>`).join('')}
 ${r.current_sl!=null?`<div class="lv"><span>🛡 Стоп сейчас${r.trailing?' (трейлинг)':''}</span><b class="num dn" id="cursl">${f(r.current_sl)}</b></div>`:''}
-${r.sls.map((p,i)=>`<div class="lv"><span>🛡 SL${i+1}</span><b class="num dn">${f(p)} <small>${pc(p,r.entry)}</small></b></div>`).join('')}
+${r.sls.map((p,i)=>`<div class="lv"><span>🛡 SL${i+1}</span><b class="num dn">${f(p)} <small>${pc(p,r.entry,r.side)}</small></b></div>`).join('')}
 ${pos?`<div class="lv"><span>Результат сейчас</span><b class="num" id="pnl">—</b></div>`:''}</div>
 <div class="card"><small>⚖ ${esc(r.leverage)}</small><div class="lv"><span>Размер позиции</span><b class="num">$${(r.pos_usdt||0).toFixed(0)} ≈ ${(r.pos_usdt/r.entry||0).toPrecision(3)} ${esc(r.coin)}</b></div>
 <div class="lv"><span>Риск на сделку</span><b class="num">$${(r.risk_usdt||0).toFixed(0)}</b></div><div class="lv"><span>Ликвидация при x20</span><b class="num dn">${f(r.liq_x20)}</b></div>
@@ -220,7 +222,7 @@ ${r.bt?`<small>🧪 Бэктест ${r.bt.days} дн.: ${r.bt.trades} сд · TP
 ${r.comment?`<div class="card">💬 <b>Аналитик (${esc(r.risk_lvl)} риск)</b><br><small>${esc(r.comment)}</small></div>`:''}
 ${r.reasons&&r.reasons.length?`<div class="card"><b>📈 Почему</b>${r.reasons.map(x=>`<div class="m">• ${esc(x)}</div>`).join('')}${r.patterns&&r.patterns.length?`<div class="m" style="margin-top:6px">🕯 ${esc(r.patterns.join('; '))}</div>`:''}</div>`:''}
 ${renderAd(S.access)}
-${pos?`<button class="btn d" onclick="act('pos_close','${r.coin}')">❌ Закрыть сделку по рынку</button>`:`<button class="btn" onclick="act('pos_enter','${r.coin}')">✅ Вошёл в сделку (лимит)</button>`}
+${pos&&!r.waiting_entry?`<button class="btn d" onclick="act('pos_close','${r.coin}')">❌ Закрыть сделку по рынку</button>`:`<button class="btn" onclick="submitEntry('${pos?'pos_set_entry':'pos_enter'}','${r.coin}')">${pos?'✏️ Обновить лимит и TP/SL':'✅ Сохранить цену и начать сопровождение'}</button>`}
 <div class="g" style="margin-top:8px"><button class="btn s" onclick="P.coin('${r.coin}',1)">🔄 Пересчитать</button><button class="btn s" onclick="act('fav_${r.in_fav?'del':'add'}','${r.coin}')">${r.in_fav?'⭐ В избранном':'💾 В избранное'}</button></div>
 <button class="btn s" style="margin-top:8px" onclick="alertFor('${r.coin}',${price})">🔔 Алерт на цену</button>
 ${myAlerts.length?`<div class="card" style="margin-top:8px"><small>Ваши алерты</small>${myAlerts.map(a=>`<div class="row" style="margin-top:6px"><b class="num ${a.op=='>'?'up':'dn'}">${a.op} ${f(a.price)}</b><button class="pill" onclick="delAlert(${a.i},'${r.coin}')">🗑 удалить</button></div>`).join('')}</div>`:''}
@@ -239,6 +241,7 @@ PT=setInterval(async()=>{if(!CUR||CUR[0]!=='coin'||CUR_COIN!==c)return stopPoll(
 },5000)};
 async function act(a,c){hap();const j=await api(a,{coin:c});if(j.error)return;toast(j.msg||'Готово');
 if(CUR&&CUR[0]==='coin')P.coin(c);else if(CUR)go(CUR[0],CUR[1],1)}
+async function submitEntry(action,coin){const raw=($('#entry-override')?.value||'').trim().replace(/\s/g,'').replace(',','.');const price=Number(raw);if(!Number.isFinite(price)||price<=0)return toast('Введите корректную цену входа');const j=await api(action,{coin,entry_price:price});if(j.error)return;toast(j.msg||'Цена сохранена');await P.coin(coin,1)}
 function alertFor(c,p){SHEET_COIN=c;$('#sh-title').textContent='Алерт на цену: '+c;$('#sh-sub').textContent='Сейчас '+f(p)+'. Сообщу, когда цена пересечёт уровень.';$('#sh-val').value=String(+p);$('#sheet-bg').classList.add('on');$('#sheet').classList.add('on')}
 function closeSheet(){$('#sheet-bg').classList.remove('on');$('#sheet').classList.remove('on')}
 async function submitSheet(){let v=($('#sh-val').value||'').replace(/\s/g,'');v=v.includes('.')?v.replace(/,/g,''):v.replace(',','.');const n=parseFloat(v);if(!(n>0))return toast('Введите число');const j=await api('alert_add',{coin:SHEET_COIN,price:n});if(!j.error){toast(j.msg);closeSheet();await refreshMe()}}
@@ -314,4 +317,4 @@ if(me.error){V().innerHTML='<div class="card">Нет связи с сервер�
 S=me;const c=q.get('coin'),t=q.get('tab');
 if(c)go('coin',c);else if(t&&P[t])go(t);else go('signals');
 })();
-</script></body></html>
+</script></body></html></script></body></html>
