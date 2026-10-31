@@ -4159,7 +4159,15 @@ def tg_auth(init):
 
 @app.route("/app")
 def mini_page():
-    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp.html"))
+    # Mini App is updated on deploy; prevent Telegram's embedded browser from reusing stale HTML.
+    response = send_file(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp.html"),
+        conditional=False, max_age=0,
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 API_CACHE_TTL = {"me": 4, "signals": 4, "portfolio": 4, "stats": 5, "mystats": 5}
@@ -4377,12 +4385,19 @@ async def mini_dispatch(uid, u, act, d):
             heat.append({"coin": coin, "price": item.get("price"), "change_pct": item.get("change_pct"),
                          "long_prob": item.get("long_prob")})
         heat.sort(key=lambda x: abs(_safe_float(x.get("change_pct"))), reverse=True)
-        return {"regime": market_bias.get("regime", "unknown"), "market": market_bias.get("title_ru", ""),
+        # Общий режим берём только из реального BTC OHLC-анализа.
+        # Не подменяем его новостным bias и не выводим техническое "unknown" пользователю.
+        btc_cached = analysis_cache.get("BTC")
+        btc_result = btc_cached[2] if isinstance(btc_cached, tuple) and len(btc_cached) >= 3 else {}
+        btc_regime = btc_result.get("market_regime") if isinstance(btc_result, dict) else None
+        regime_code = btc_regime.get("name") if isinstance(btc_regime, dict) else None
+        regime_names = {"uptrend": "Бычий тренд", "downtrend": "Медвежий тренд", "range": "Боковик"}
+        regime_label = regime_names.get(regime_code, "Нет данных")
+        return {"regime": regime_label, "market": market_bias.get("title_ru", "Нет данных"),
                 "signals": [{"coin": x.get("coin"), "side": x.get("side"), "quality": x.get("quality_score"),
                              "grade": x.get("quality_label"), "regime": x.get("market_regime"),
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
-                "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE),
-                "rss_mb": _current_rss_mb(), "peak_rss_mb": _rss_mb()}
+                "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE)}
 
     if act == "signals":
         flt = d.get("flt", "Все")
