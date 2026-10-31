@@ -37,6 +37,49 @@ img.ch{width:100%;border-radius:12px;display:block}.lst{cursor:pointer}
 #sheet{position:fixed;left:0;right:0;bottom:0;transform:translateY(105%);transition:.25s;background:var(--c);border-top:1px solid var(--ln);border-radius:20px 20px 0 0;padding:12px 16px calc(16px + env(safe-area-inset-bottom));z-index:21}
 #sheet.on{transform:translateY(0)}.grab{width:40px;height:4px;border-radius:4px;background:var(--ln);margin:0 auto 12px}#sheet h3{font:800 16px "Trebuchet MS",sans-serif}
 details summary{cursor:pointer;color:var(--t);font-weight:700;padding:6px 0}
+
+/* IXCLY MAX visual refresh: premium terminal, mobile-first */
+:root{--bg:#060914;--c:#0d1426;--c2:#131e35;--ln:rgba(139,164,220,.17);--t:#f2f6ff;--m:#91a0bd;--up:#35e0bd;--dn:#ff668d;--ac:#8b7cff;--y:#ffd078}
+html{background:var(--bg);scroll-behavior:smooth}
+body{max-width:760px;margin:0 auto;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:radial-gradient(650px 300px at 100% -5%,rgba(107,82,255,.24),transparent 65%),radial-gradient(500px 260px at -15% 18%,rgba(0,191,190,.13),transparent 62%),linear-gradient(180deg,#080d1b 0%,#060914 55%);letter-spacing:.05px}
+h1{font-size:25px;letter-spacing:-.8px;margin:4px 0 14px;font-weight:850}
+h1 span{background:linear-gradient(100deg,#53ebce 5%,#8c83ff 88%);-webkit-background-clip:text;background-clip:text;color:transparent}
+h2{font-size:14px;font-weight:800;letter-spacing:.15px;margin:20px 2px 9px}
+.card,.sig{background:linear-gradient(145deg,rgba(17,27,49,.97),rgba(10,17,32,.98));border:1px solid var(--ln);border-radius:19px;padding:15px;margin:10px 0;box-shadow:0 10px 28px rgba(0,0,0,.14)}
+.card{backdrop-filter:blur(10px)}
+.row{gap:10px}.m,small{color:var(--m)}
+.btn{min-height:44px;border-radius:14px;background:linear-gradient(105deg,#40e2c2,#67c9f5);box-shadow:0 7px 18px rgba(49,213,194,.12);font-family:inherit;font-weight:800;letter-spacing:.1px}
+.btn.s{background:rgba(25,39,66,.9);box-shadow:none;border:1px solid var(--ln);color:#e6edff}
+.btn.d{background:rgba(255,91,133,.1);border-color:rgba(255,91,133,.3)}
+input{min-height:44px;border-radius:14px;background:#101a30;border-color:rgba(139,164,220,.22);font-family:inherit}
+input:focus{border-color:var(--ac);box-shadow:0 0 0 3px rgba(139,124,255,.12)}
+.pill{border-color:rgba(139,164,220,.18);background:rgba(22,34,57,.9);color:#b6c5e3;padding:5px 9px}
+.fb{border-radius:14px;background:rgba(17,29,51,.88);border-color:var(--ln);padding:11px 4px;font-family:inherit}
+.fb.on{background:linear-gradient(130deg,#35dfbd,#69c8ef);color:#07131c;border-color:transparent;box-shadow:0 6px 18px rgba(53,224,189,.13)}
+.fb b{margin-top:5px;font-size:18px}.stk{position:sticky;top:0;padding:8px 0 7px;background:linear-gradient(#080d1b 72%,rgba(8,13,27,.88));backdrop-filter:blur(12px)}
+.sig{padding:14px;border-radius:16px;transition:transform .15s,border-color .15s}.sig:active,.lst:active{transform:scale(.985)}
+.lv{border-bottom-color:rgba(139,164,220,.12);padding:9px 0;gap:12px}.bar{height:7px;background:#1b2944}.bar i{border-radius:8px}
+.tb{max-width:760px;margin:0 auto;background:rgba(7,12,25,.94);border-top:1px solid rgba(139,164,220,.18);padding:8px 4px calc(8px + env(safe-area-inset-bottom));box-shadow:0 -12px 35px rgba(0,0,0,.25)}
+.tb b{font-size:10px;letter-spacing:.1px;border-radius:12px;padding:5px 1px}.tb b span{font-size:20px;margin-bottom:2px}.tb b.on{background:rgba(53,224,189,.09);color:var(--up)}
+#toast{background:#17243d;border:1px solid rgba(139,124,255,.5);box-shadow:0 10px 30px #0008;font-weight:700}
+#sheet{background:#0d172b;border-color:var(--ln);box-shadow:0 -18px 50px #0008}
+/* Large, unmistakable advertising placement — never inside the search field */
+.ad-hero{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:11px;padding:17px;margin:12px 0 16px;border-radius:20px;border:1px solid rgba(139,124,255,.52);background:radial-gradient(260px 140px at 100% 0%,rgba(143,116,255,.32),transparent 72%),linear-gradient(135deg,#182344 0%,#111b35 52%,#102d38 100%);box-shadow:0 12px 32px rgba(49,38,130,.2)}
+.ad-hero:after{content:"";position:absolute;width:150px;height:150px;right:-62px;bottom:-90px;border:1px solid rgba(92,232,212,.25);border-radius:50%;box-shadow:0 0 0 18px rgba(92,232,212,.035),0 0 0 38px rgba(92,232,212,.025);pointer-events:none}
+.ad-top{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}
+.ad-label{display:inline-flex;align-items:center;gap:6px;color:#c4baff;background:rgba(139,124,255,.17);border:1px solid rgba(171,157,255,.25);border-radius:99px;padding:5px 9px;font-size:10px;font-weight:900;letter-spacing:1px;text-transform:uppercase}
+.ad-sponsored{font-size:10px;color:#a8b5d2;letter-spacing:.3px}
+.ad-copy{position:relative;z-index:1;font-size:15px;line-height:1.45;font-weight:750;color:#f2f5ff;overflow-wrap:anywhere}
+.ad-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative;z-index:1}
+.ad-foot small{font-size:11px;color:#aebbd7}
+.ad-cta{width:auto;min-width:125px;min-height:38px;padding:9px 14px;border-radius:12px;background:linear-gradient(100deg,#a99bff,#64d8d0);color:#091326;font-size:12px;font-weight:900;box-shadow:none}
+.ad-hero .ad-icon{font-size:23px;line-height:1}
+.search-wrap{display:flex;gap:8px;align-items:center;margin:14px 0 12px;padding:8px;border-radius:17px;background:rgba(15,25,45,.9);border:1px solid var(--ln)}
+.search-wrap input{border:0;background:transparent;box-shadow:none;padding:8px 7px;min-width:0}
+.search-wrap .btn{width:88px;min-height:40px;padding:8px}
+.section-kicker{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#8495b9;font-weight:900;margin:16px 2px 7px}
+@media(min-width:600px){body{padding-left:20px;padding-right:20px}.ad-hero{padding:20px}.g{gap:10px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style></head><body>
 <div id="toast"></div>
 <div id="sheet-bg" onclick="closeSheet()"></div>
@@ -96,11 +139,19 @@ const shareText=text=>tg.openTelegramLink('https://t.me/share/url?text='+encodeU
 async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.closed)S=Object.assign(S,m);return m}
 
 /* --- РЕКЛАМА --- */
+let ACTIVE_AD_URL='';
 function renderAd(a){
-    if(!a || !a.ad) return '';
-    const url = a.ad_url ? `<br><a href="${esc(a.ad_url)}" target="_blank" style="color:var(--up)">Подробнее</a>` : '';
-    return `<div class="card" style="margin-top:12px; border-color:var(--ac);"><small>📢 ${esc(a.ad)}${url}</small></div>`;
+    if(!a || !String(a.ad||'').trim()) return '';
+    let safeUrl='';
+    try{const u=new URL(String(a.ad_url||''));if(u.protocol==='https:'||u.protocol==='http:')safeUrl=u.href}catch(e){}
+    ACTIVE_AD_URL=safeUrl;
+    return `<section class="ad-hero" aria-label="Реклама">
+      <div class="ad-top"><span class="ad-label"><span class="ad-icon">✦</span> Спецпредложение</span><span class="ad-sponsored">РЕКЛАМА</span></div>
+      <div class="ad-copy">${esc(a.ad)}</div>
+      <div class="ad-foot"><small>Партнёр IXCLY</small>${safeUrl?'<button class="btn ad-cta" onclick="openAd()">Подробнее&nbsp; ↗</button>':''}</div>
+    </section>`;
 }
+function openAd(){if(!ACTIVE_AD_URL)return;try{tg.openLink(ACTIVE_AD_URL)}catch(e){location.href=ACTIVE_AD_URL}}
 
 /* ---------- Экран оплаты и подписка ---------- */
 function planCards(plans){
@@ -172,8 +223,8 @@ ${renderAd(a)}
 <button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
 
 /* ---------- Сигналы ---------- */
-function sigRow(x){const p=x.live_price;const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
-return `<div class="sig lst" onclick="go('coin','${x.coin}')"><div style="flex:1"><div class="row" style="justify-content:flex-start;gap:8px"><b>${x.coin}</b>${side(x.side)}<span class="pill">${TI[x.type]||''} ${x.strength||0}%</span></div>
+function sigRow(x){const p=x.live_price;const quality=x.quality_score!=null?`<span class="pill">Q ${Number(x.quality_score).toFixed(0)} · ${esc(x.quality_label||'—')}</span>`:'';const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
+return `<div class="sig lst" onclick="go('coin','${x.coin}')"><div style="flex:1"><div class="row" style="justify-content:flex-start;gap:8px"><b>${x.coin}</b>${side(x.side)}<span class="pill">${TI[x.type]||''} ${x.strength||0}%</span>${quality}</div>
 <small class="num">Вход ${f(x.entry)} · TP1 ${f(x.tp1)} · SL ${f(x.sl1)}</small><div>${live}</div></div><span class="m" style="font-size:20px">›</span></div>`}
 function sq(){const v=($('#q').value||'').toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/USDT$/,'');if(v)go('coin',v)}
 
@@ -183,11 +234,12 @@ if(j.error){V().innerHTML=`<div class="card">${esc(j.error)}</div><button class=
 const c=j.counts||{};const T=[['Все','📋','Все'],['Краткосрочный','⚡','Кратко'],['Среднесрочный','⏳','Средне'],['Долгосрочный','🛡','Долго']];
 const M=[['mode:aggressive','🟢','Агрессивн.'],['mode:balanced','🟡','Баланс'],['mode:conservative','🔴','Консерв.']];
 const b=x=>`<div class="fb ${SF==x[0]?'on':''}" onclick="P.signals('${x[0]}')">${x[1]} ${x[2]}<b>${c[x[0]]||0}</b></div>`;
-const rf=j.refresh||{};const liq=await api('liquidations',{},1,true);const liqItems=(liq.items||[]).slice(-8).reverse();
+const rf=j.refresh||{};const liq=await api('liquidations',{},1,true);const intel=await api('intel',{},1,true);const liqItems=(liq.items||[]).slice(-8).reverse();
 V().innerHTML=`<h1>Актуальные <span>сигналы</span></h1>
 ${renderAd(S.access)}
+${intel&&!intel.error?`<div class="card"><div class="row"><b>🧠 Signal Intelligence</b><small>RAM ${intel.rss_mb==null?'—':intel.rss_mb+' MB'} · peak ${intel.peak_rss_mb==null?'—':intel.peak_rss_mb+' MB'}</small></div><div class="lv"><span>Режим рынка</span><b>${esc(intel.regime||'—')}</b></div>${(intel.heatmap||[]).slice(0,5).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}</div>`:''}
 ${liqItems.length?`<div class="card"><div class="row"><b>💥 Ликвидации за последний час</b><small>Binance Futures</small></div>${liqItems.map(x=>`<div class="lv"><span>${esc(x.coin)} · ${x.side==='LONG'?'ликвидация лонгов':'ликвидация шортов'}</span><b class="num">$${Number(x.notional).toLocaleString('en',{maximumFractionDigits:0})}</b></div>`).join('')}</div>`:''}
-<div class="row" style="margin:10px 0"><input id="q" placeholder="Поиск монеты: SOL, BTC…" autocapitalize="characters" onkeydown="if(event.key=='Enter')sq()"><button class="btn" style="width:90px" onclick="sq()">Найти</button></div>
+<div class="section-kicker">Быстрый поиск рынка</div><div class="search-wrap"><span aria-hidden="true">⌕</span><input id="q" placeholder="Найти монету · BTC, SOL…" autocapitalize="characters" onkeydown="if(event.key=='Enter')sq()"><button class="btn" onclick="sq()">Найти</button></div>
 <button id="rf" class="btn s" onclick="refreshAll()" ${rf.running?'disabled':''}>${rf.running?`⏳ Обновляю ${rf.done}/${rf.total}`:'🔄 Обновить все данные'}</button>
 ${rf.running?`<div class="bar" style="margin-top:6px"><i style="width:${rf.total?rf.done/rf.total*100:0}%"></i></div>`:''}
 <div class="stk"><div class="grid4">${T.map(b).join('')}</div><div class="grid3">${M.map(b).join('')}</div></div>
@@ -321,4 +373,4 @@ if(me.error){V().innerHTML='<div class="card">Нет связи с сервер�
 S=me;const c=q.get('coin'),t=q.get('tab');
 if(c)go('coin',c);else if(t&&P[t])go(t);else go('signals');
 })();
-</script></body></html>
+</script></body></html></script></body></html>
