@@ -194,7 +194,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "3.1"
+VERSION = "3.2"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -220,7 +220,8 @@ MODE_TYPES = {"aggressive": ("Краткосрочный", "Среднесроч
 MODE_NAMES = {"aggressive": "🟢 Агрессивный", "balanced": "🟡 Сбалансированный", "conservative": "🔴 Консервативный"}
 MODE_CONF = {"aggressive": 60, "balanced": 66, "conservative": 80}
 NOTIFY_NAMES = {"signals": "Сигналы", "news": "Новости", "anomalies": "Аномалии объёма",
-                "pos_updates": "Отчёты по сделкам", "briefing": "Утренний брифинг"}
+                "pos_updates": "Отчёты по сделкам", "briefing": "Утренний брифинг",
+                "liquidations": "Кластеры ликвидаций"}
 
 bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=60.0))
 dp = Dispatcher()
@@ -304,6 +305,10 @@ next_timers = {"scanner": 0, "positions": 0, "pos_updates": 0, "news_watcher": 0
 exchange_bans = {}
 news_blackout_until = 0.0
 news_blackout_kind, news_blackout_since = "misc", 0.0
+# Публичный поток принудительных ликвидаций Binance USD-M Futures.
+LIQUIDATIONS = []
+_liq_last_alert = {}
+_liq_lock = asyncio.Lock()
 _macro_cache = {"ts": 0.0, "events": []}
 _alert_sent = {}
 
@@ -476,6 +481,7 @@ def get_user_notif_settings(user_id):
         "anomalies": u.get("notify_anomalies", True),
         "pos_updates": u.get("notify_pos_updates", True),
         "briefing": u.get("notify_briefing", True),
+        "liquidations": u.get("notify_liquidations", True),
     }
 
 
@@ -2095,25 +2101,34 @@ async def prepare_news(force=False):
 
 
 async def get_news_batch_text():
+    """Детерминированный дайджест: без свободной генерации, пустых пунктов и выдуманных активов."""
     entries = await get_news_entries()
     if not entries:
         return "📭 <b>Свежих новостей пока нет.</b>"
-    batch = entries[:3]
-    prompt = ("Сделай краткий дайджест на русском только по фактам из источников. Не выдумывай детали и тикеры, "
-              "не называй криптовалюты акциями, не повторяй фразы. Для каждой новости максимум 3 короткие строки: "
-              "Заголовок; Суть (1 предложение); Влияние (нейтрально/позитивно/негативно и осторожное объяснение). "
-              "Если актив прямо не назван, напиши «Монеты не указаны». Без нумерованных пустых пунктов.\n\nНовости:\n")
-    for i, e in enumerate(batch):
-        prompt += f"{i + 1}. [{get_moscow_time_from_entry(e)}] {html.unescape(getattr(e, 'title', '') or '')}. {clean_summary(getattr(e, 'summary', ''))[:200]}\n"
-    links = " · ".join(f"<a href=\"{html.escape(getattr(e, 'link', ''), quote=True)}\">{i + 1}</a>" for i, e in enumerate(batch))
-    text, _engine = await ask_ai_named(prompt, timeout=30, free_timeout=30)
-    if text and has_cyr(text, 30):
-        text = clean_news_field(text, 2600, 12)
-        return trim_html(f"📰 <b>Дайджест новостей</b>\n\n{html.escape(text)}\n\n🔗 Источники: {links}", 4000)
-    out = "📰 <b>Последние новости (кратко):</b>\n\n"
-    for i, e in enumerate(batch):
-        out += f"<b>{i + 1}.</b> {html.escape(await translate_text(html.unescape(getattr(e, 'title', '') or '')))}\n\n"
-    return out + f"🔗 Источники: {links}"
+    out = ["📰 <b>Последние новости рынка</b>"]
+    used = set()
+    for entry in entries[:3]:
+        title = html.unescape(getattr(entry, "title", "") or "").strip()
+        summary = clean_summary(getattr(entry, "summary", ""))
+        if not title:
+            continue
+        title_ru = clean_news_field(await translate_text(title), 150, 1) or title[:150]
+        summary_ru = clean_news_field(await translate_text(summary), 260, 2) if summary else ""
+        sentiment = news_sentiment(f"{title} {summary}")
+        label = "🟢 Позитивный фон" if sentiment > 0 else "🔴 Негативный фон" if sentiment < 0 else "⚪ Нейтрально / недостаточно данных"
+        coins = ", ".join(mentioned_coins(f"{title} {summary}")) or "Не указаны в источнике"
+        link = getattr(entry, "link", "") or ""
+        key = (title.lower(), link)
+        if key in used:
+            continue
+        used.add(key)
+        out.append(f"\n<b>{html.escape(title_ru)}</b>")
+        if summary_ru:
+            out.append(html.escape(summary_ru))
+        out.append(f"{label} · Монеты: {html.escape(coins)}")
+        if link:
+            out.append(f'<a href="{html.escape(link, quote=True)}">Источник</a>')
+    return trim_html("\n\n".join(out), 3900)
 
 
 # =====================================================================
@@ -4021,6 +4036,64 @@ async def anomaly_scan_once():
                 await _tell(cid, text, webapp_kb(coin))
 
 
+async def liquidation_stream_loop():
+    """Поток Binance force orders: объединяет ликвидации в минутные кластеры."""
+    await asyncio.sleep(8)
+    url = "wss://fstream.binance.com/ws/!forceOrder@arr"
+    while True:
+        try:
+            async with http.ws_connect(url, heartbeat=25, receive_timeout=45, max_msg_size=2**20) as ws:
+                log.info("Liquidation stream connected")
+                async for msg in ws:
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+                        continue
+                    try:
+                        raw = json.loads(msg.data)
+                        orders = raw if isinstance(raw, list) else [raw]
+                        for ev in orders:
+                            o = ev.get("o", {})
+                            symbol = str(o.get("s", ""))
+                            if not symbol.endswith("USDT"):
+                                continue
+                            coin = symbol[:-4]
+                            qty, price = float(o.get("q", 0)), float(o.get("p", 0))
+                            notional = qty * price
+                            if notional < 10000:
+                                continue
+                            side = str(o.get("S", "")).upper()
+                            item = {"coin": coin, "side": "LONG" if side == "SELL" else "SHORT",
+                                    "notional": round(notional, 2), "price": price,
+                                    "ts": float(o.get("T", time.time() * 1000)) / 1000}
+                            LIQUIDATIONS.append(item)
+                            if len(LIQUIDATIONS) > 250:
+                                del LIQUIDATIONS[:-250]
+                            # Сигналим только по крупному событию и не чаще 5 минут на тикер/сторону.
+                            key = (coin, item["side"])
+                            if notional >= 250000 and time.time() - _liq_last_alert.get(key, 0) >= 300:
+                                _liq_last_alert[key] = time.time()
+                                label = "лонг-позиции" if item["side"] == "LONG" else "шорт-позиции"
+                                message = (f"💥 <b>Крупная ликвидация {coin}</b>\n"
+                                           f"Ликвидированы {label} примерно на <b>${notional:,.0f}</b>.\n"
+                                           f"Цена события: <code>{fmt(price)}</code>. Это индикатор давления, не торговый сигнал.")
+                                for uid_text, user_data in list(_users().items()):
+                                    try:
+                                        uid = int(uid_text)
+                                        if (isinstance(user_data, dict) and user_data.get("active", True)
+                                                and has_access(uid) and get_user_notif_settings(uid)["liquidations"]):
+                                            await _tell(uid, message, webapp_kb(coin))
+                                    except (TypeError, ValueError):
+                                        continue
+                    except (ValueError, TypeError, KeyError) as e:
+                        log.debug("bad liquidation event: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("Liquidation stream reconnect: %s", e)
+        await asyncio.sleep(5)
+
+
 async def anomaly_scanner_loop():
     await asyncio.sleep(90)
     while True:
@@ -4159,6 +4232,37 @@ def _enrich_user_positions(uid):
     return out
 
 
+async def correlation_snapshot(coin, peers=None):
+    """Оценка 1h корреляции доходностей к BTC и ближайшей тематической монете."""
+    peers = list(peers or [])
+    group = next((g for g in CORRELATION_GROUPS if coin in g), [])
+    peer = next((x for x in group if x != coin), "BTC")
+    symbols = list(dict.fromkeys([coin, peer, "BTC"]))[:3]
+    try:
+        frames = await asyncio.gather(*[get_market_data_light(c, ("1h",)) for c in symbols])
+        returns = {}
+        for c, item in zip(symbols, frames):
+            df = item[0].get("1h", {}).get("df") if item and item[0] else None
+            if df is not None and len(df) >= 30:
+                returns[c] = pd.Series(df["close"].astype(float).pct_change().dropna().tail(48).to_numpy())
+        out = {}
+        base = returns.get(coin)
+        if base is not None:
+            for c in symbols:
+                if c == coin or c not in returns:
+                    continue
+                n = min(len(base), len(returns[c]))
+                if n >= 20:
+                    a, b = base.iloc[-n:], returns[c].iloc[-n:]
+                    corr = float(a.corr(b))
+                    if np.isfinite(corr):
+                        out[c] = round(corr, 2)
+        return out
+    except Exception as e:
+        log.debug("correlation %s: %s", coin, e)
+        return {}
+
+
 async def coin_payload(uid, coin, force=False):
     if ANALYZE_SEM is not None:
         async with ANALYZE_SEM:
@@ -4195,6 +4299,7 @@ async def coin_payload(uid, coin, force=False):
     out["trailing"] = bool(cur_sl and orig_sl and abs(cur_sl - orig_sl) > 1e-12)
     out["signal_active"] = any(x["coin"] == coin for x in get_active_signals())
     out["corr"] = None
+    out["correlation"] = await correlation_snapshot(coin)
     for oc, od in get_user_open_positions(uid).items():
         if oc != coin and od["side"] == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
             out["corr"] = f"Уже открыт {od['side']} по {oc}: монеты коррелируют"
@@ -4299,6 +4404,11 @@ async def mini_dispatch(uid, u, act, d):
         return {"counts": cnt, "lists": lists, "total": len(uniq),
                 "wr": cnt["win"] / closed * 100 if closed else 0.0}
 
+    if act == "liquidations":
+        now = time.time()
+        recent = [x for x in LIQUIDATIONS if now - x.get("ts", 0) <= 3600]
+        return {"items": recent[-30:], "updated": now}
+
     if act == "news":
         return {"bias": market_bias, "html": await get_news_batch_text()}
 
@@ -4350,6 +4460,7 @@ async def mini_dispatch(uid, u, act, d):
                 if not (custom_entry > 0 and custom_entry < 1e15):
                     raise ValueError
                 res = rebase_signal_prices(res, custom_entry)
+                res["entry_override"] = True
             except (TypeError, ValueError):
                 return {"error": "Введите корректную цену входа больше нуля"}
         elif act == "pos_set_entry":
@@ -4435,7 +4546,7 @@ WELCOME_BOT = ("👋 <b>IXCLY PRO</b>\n\nВся работа теперь в м�
 def notif_keyboard(uid):
     s = get_user_notif_settings(uid)
     rows = [[InlineKeyboardButton(text=f"{'🟢' if s[k] else '🔴'} {NOTIFY_NAMES[k]}", callback_data=f"notif:{k}")]
-            for k in ("signals", "pos_updates", "news", "anomalies", "briefing")]
+            for k in ("signals", "pos_updates", "news", "anomalies", "briefing", "liquidations")]
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="notif:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -5923,7 +6034,7 @@ async def main():
         background = [asyncio.create_task(c()) for c in (
             scanner_loop, live_monitor_loop, price_feed_loop, global_signal_monitor_loop, position_monitor_loop,
             news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
-            anomaly_scanner_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
+            anomaly_scanner_loop, liquidation_stream_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
         background.append(asyncio.create_task(update_market_bias()))
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
