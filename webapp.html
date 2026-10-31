@@ -62,6 +62,11 @@ const TI={'Краткосрочный':'⚡','Среднесрочный':'⏳',
 const q=new URLSearchParams(location.search);
 const P={};let S={},CUR=null,STACK=[],SF='Все',CUR_COIN=null,PT=null,SHEET_COIN=null;
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
+function renderAd(a){
+    if(!a || !a.ad) return '';
+    const url = a.ad_url ? `<br><a href="${esc(a.ad_url)}" target="_blank" style="color:var(--up)">Подробнее</a>` : '';
+    return `<div class="card" style="margin-top:12px; border-color:var(--ac);"><small>📢 ${esc(a.ad)}${url}</small></div>`;
+}
 async function api(a,p,tries=2,silent=false){
   for(let i=0;i<tries;i++){
     try{
