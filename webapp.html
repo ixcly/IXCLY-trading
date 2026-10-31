@@ -62,11 +62,6 @@ const TI={'Краткосрочный':'⚡','Среднесрочный':'⏳',
 const q=new URLSearchParams(location.search);
 const P={};let S={},CUR=null,STACK=[],SF='Все',CUR_COIN=null,PT=null,SHEET_COIN=null;
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
-function renderAd(a){
-    if(!a || !a.ad) return '';
-    const url = a.ad_url ? `<br><a href="${esc(a.ad_url)}" target="_blank" style="color:var(--up)">Подробнее</a>` : '';
-    return `<div class="card" style="margin-top:12px; border-color:var(--ac);"><small>📢 ${esc(a.ad)}${url}</small></div>`;
-}
 async function api(a,p,tries=2,silent=false){
   for(let i=0;i<tries;i++){
     try{
@@ -100,6 +95,13 @@ const openSupport=()=>tg.openTelegramLink('https://t.me/'+(S.access&&S.access.su
 const shareText=text=>tg.openTelegramLink('https://t.me/share/url?text='+encodeURIComponent(text));
 async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.closed)S=Object.assign(S,m);return m}
 
+/* --- РЕКЛАМА --- */
+function renderAd(a){
+    if(!a || !a.ad) return '';
+    const url = a.ad_url ? `<br><a href="${esc(a.ad_url)}" target="_blank" style="color:var(--up)">Подробнее</a>` : '';
+    return `<div class="card" style="margin-top:12px; border-color:var(--ac);"><small>📢 ${esc(a.ad)}${url}</small></div>`;
+}
+
 /* ---------- Экран оплаты и подписка ---------- */
 function planCards(plans){
     return `<div class="g">${plans.map(p=>`
@@ -124,7 +126,6 @@ function confirmBuy(days, price) {
         }
     });
 }
-
 async function processPayment(days) {
     tg.showProgress();
     try {
@@ -135,21 +136,13 @@ async function processPayment(days) {
         });
         const data = await res.json();
         tg.hideProgress();
-
-        if (data.error) {
-            toast('⚠ ' + data.error);
-            return;
-        }
-
+        if (data.error) { toast('⚠ ' + data.error); return; }
         tg.openInvoice(data.link, function(status) {
             if (status === 'paid') {
                 toast('✅ Оплата прошла успешно!');
                 setTimeout(() => P.sub(), 1500);
-            } else if (status === 'cancelled') {
-                toast('Оплата отменена');
-            } else {
-                toast('Ошибка оплаты');
-            }
+            } else if (status === 'cancelled') { toast('Оплата отменена'); } 
+            else { toast('Ошибка оплаты'); }
         });
     } catch (e) {
         tg.hideProgress();
@@ -158,29 +151,32 @@ async function processPayment(days) {
 }
 function promoBox(){return `<div class="row" style="margin-top:6px"><input id="pc" placeholder="Промокод" autocapitalize="characters"><button class="btn" style="width:110px" onclick="promoApply()">Активировать</button></div>`}
 async function promoApply(){const code=($('#pc').value||'').trim();if(!code)return toast('Введите промокод');const j=await api('promo_apply',{code});if(j.msg){toast(j.msg);const m=await refreshMe();if(!m.closed&&!m.error)go('signals')}}
+
 P.paywall=()=>{const a=S.access||{};
 V().innerHTML=`<h1>IXCLY <span>PRO</span></h1>
 <div class="card"><b style="font-size:16px">🔒 Доступ закрыт</b><br><small>Пробный период закончился или не активирован. Сигналы, сопровождение сделок и аналитика доступны по подписке.</small></div>
+${renderAd(a)}
 ${planCards(a.plans||[])}
-<button class="btn" style="margin-top:10px" onclick="openBot('buy')">💳 Оплатить в боте</button>
 <h2>🎟 Промокод</h2>${promoBox()}
 <button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
+
 P.sub=async()=>{await refreshMe();const a=S.access||{};
 if(!a.ok&&!a.free){return P.paywall()}
 V().innerHTML=`<h1>Моя <span>подписка</span></h1>${a.status==='Навсегда'?'<div class="card" style="text-align:center;border-color:var(--up)"><b>♾ Доступ навсегда</b><br><small>Спасибо за поддержку проекта!</small></div>':''}
 <div class="card"><div class="row"><small>Статус</small><b>${esc(a.status)}</b></div>
 <div class="row"><small>Осталось</small><b class="num">${a.free?'∞':(a.days_left+' дн.')}</b></div>
 ${a.free?'':`<div class="bar" style="margin-top:8px"><i style="width:${Math.min(100,a.days_left/30*100)}%"></i></div>`}</div>
+${renderAd(a)}
 <h2>Тарифы</h2>${planCards(a.plans||[])}
 <h2>🎟 Промокод</h2>${promoBox()}
-<button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>
-${a.ad?`<div class="card" style="margin-top:12px"><small>📢 ${esc(a.ad)}</small></div>`:''}`};
+<button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
 
 /* ---------- Сигналы ---------- */
 function sigRow(x){const p=x.live_price;const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
 return `<div class="sig lst" onclick="go('coin','${x.coin}')"><div style="flex:1"><div class="row" style="justify-content:flex-start;gap:8px"><b>${x.coin}</b>${side(x.side)}<span class="pill">${TI[x.type]||''} ${x.strength||0}%</span></div>
 <small class="num">Вход ${f(x.entry)} · TP1 ${f(x.tp1)} · SL ${f(x.sl1)}</small><div>${live}</div></div><span class="m" style="font-size:20px">›</span></div>`}
 function sq(){const v=($('#q').value||'').toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/USDT$/,'');if(v)go('coin',v)}
+
 P.signals=async(flt)=>{if(flt)SF=flt;const j=await api('signals',{flt:SF});
 if(j.closed)return P.paywall();
 if(j.error){V().innerHTML=`<div class="card">${esc(j.error)}</div><button class="btn s" onclick="go('signals')">Повторить</button>`;return}
@@ -189,6 +185,7 @@ const M=[['mode:aggressive','🟢','Агрессивн.'],['mode:balanced','🟡
 const b=x=>`<div class="fb ${SF==x[0]?'on':''}" onclick="P.signals('${x[0]}')">${x[1]} ${x[2]}<b>${c[x[0]]||0}</b></div>`;
 const rf=j.refresh||{};
 V().innerHTML=`<h1>Актуальные <span>сигналы</span></h1>
+${renderAd(S.access)}
 <div class="row" style="margin:10px 0"><input id="q" placeholder="Поиск монеты: SOL, BTC…" autocapitalize="characters" onkeydown="if(event.key=='Enter')sq()"><button class="btn" style="width:90px" onclick="sq()">Найти</button></div>
 <button id="rf" class="btn s" onclick="refreshAll()" ${rf.running?'disabled':''}>${rf.running?`⏳ Обновляю ${rf.done}/${rf.total}`:'🔄 Обновить все данные'}</button>
 ${rf.running?`<div class="bar" style="margin-top:6px"><i style="width:${rf.total?rf.done/rf.total*100:0}%"></i></div>`:''}
@@ -222,6 +219,7 @@ ${pos?`<div class="lv"><span>Результат сейчас</span><b class="num
 ${r.bt?`<small>🧪 Бэктест ${r.bt.days} дн.: ${r.bt.trades} сд · TP1 ${r.bt.winrate}% · ${r.bt.avg_r}R · PF ${r.bt.pf}</small>`:''}</div>
 ${r.comment?`<div class="card">💬 <b>Аналитик (${esc(r.risk_lvl)} риск)</b><br><small>${esc(r.comment)}</small></div>`:''}
 ${r.reasons&&r.reasons.length?`<div class="card"><b>📈 Почему</b>${r.reasons.map(x=>`<div class="m">• ${esc(x)}</div>`).join('')}${r.patterns&&r.patterns.length?`<div class="m" style="margin-top:6px">🕯 ${esc(r.patterns.join('; '))}</div>`:''}</div>`:''}
+${renderAd(S.access)}
 ${pos?`<button class="btn d" onclick="act('pos_close','${r.coin}')">❌ Закрыть сделку по рынку</button>`:`<button class="btn" onclick="act('pos_enter','${r.coin}')">✅ Вошёл в сделку (лимит)</button>`}
 <div class="g" style="margin-top:8px"><button class="btn s" onclick="P.coin('${r.coin}',1)">🔄 Пересчитать</button><button class="btn s" onclick="act('fav_${r.in_fav?'del':'add'}','${r.coin}')">${r.in_fav?'⭐ В избранном':'💾 В избранное'}</button></div>
 <button class="btn s" style="margin-top:8px" onclick="alertFor('${r.coin}',${price})">🔔 Алерт на цену</button>
@@ -249,6 +247,7 @@ async function delAlert(i,c){const j=await api('alert_del',{idx:i});if(!j.error)
 /* ---------- Портфель ---------- */
 P.portfolio=async()=>{const j=await api('portfolio');if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
 V().innerHTML=`<h1>Мой <span>портфель</span></h1>
+${renderAd(S.access)}
 <div class="g"><div class="card"><small>💰 Депозит</small><h2 class="num" style="margin:4px 0 8px">$${s.deposit}</h2><input id="dep" type="number" inputmode="decimal" placeholder="Новый депозит"><button class="btn s" style="margin-top:6px" onclick="setv('set_deposit','dep')">Сохранить</button></div>
 <div class="card"><small>📉 Риск на сделку</small><h2 class="num" style="margin:4px 0 8px">${s.risk_pct}%</h2><input id="rsk" type="number" inputmode="decimal" placeholder="0.1 – 10"><button class="btn s" style="margin-top:6px" onclick="setv('set_risk','rsk')">Сохранить</button></div></div>
 <div class="card"><div class="row"><small>⚠ Открытый риск</small><b class="num">${j.open_risk.toFixed(1)}% / ${s.max_open_risk}%</b></div><div class="bar" style="margin-top:6px"><i style="width:${Math.min(100,j.open_risk/s.max_open_risk*100)}%"></i></div></div>
@@ -275,6 +274,7 @@ const mine=!m.n?'<div class="card m">Закрытых сделок пока не
 <h2>Последние сделки</h2>${m.last.map(t=>`<div class="card"><div class="row"><b>${t.coin} ${side(t.side)}</b><b class="num ${t.pnl>=0?'up':'dn'}">${t.pnl>=0?'+':''}${t.pnl}%</b></div><small class="num">Вход ${f(t.entry)} → Выход ${f(t.exit)} · ${t.r}R · ${esc(t.reason)}</small>
 <button class="pill" style="margin-top:6px" onclick="shareText('Я закрыл ${t.coin} (${t.side}) с результатом ${t.pnl>=0?'+':''}${t.pnl}% в IXCLY PRO! 🔥')">📤 Поделиться</button></div>`).join('')}`;
 V().innerHTML=`<h1>Моя <span>аналитика</span></h1>${mine}
+${renderAd(S.access)}
 <h2>📡 Система</h2><div class="grid3">${['win','loss','active'].map(k=>`<div class="fb" onclick="stl('${k}')">${STN[k]}<b>${g.counts[k]||0}</b></div>`).join('')}</div>
 <div class="grid3" style="margin-top:6px">${['missed','expired','cancelled'].map(k=>`<div class="fb" onclick="stl('${k}')">${STN[k]}<b>${g.counts[k]||0}</b></div>`).join('')}</div>
 <small style="display:block;margin-top:6px">Винрейт системы: <b>${g.wr.toFixed(1)}%</b></small><div id="sl"></div>`};
@@ -286,8 +286,8 @@ P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=
 V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
 <div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг оплатит подписку — вам +7 дней</div></div>
 <div class="card lst" onclick="go('news')"><b>📰 Новости рынка</b><div class="m" style="margin-top:4px">${esc((S.news||{}).title_ru||'Разбор последней новости')}</div></div>
+${renderAd(a)}
 <h2>🔔 Уведомления в Telegram</h2>${NT.map(x=>`<div class="card row"><span>${x[1]}</span><div class="sw ${n[x[0]]?'on':''}" onclick="tgl('${x[0]}')"></div></div>`).join('')}
-${a.ad?`<div class="card" style="margin-top:12px"><small>📢 ${esc(a.ad)}</small></div>`:''}
 <details class="card"><summary>⚙️ Настройки для продвинутых</summary>
 <small>Вебхук: новые сигналы и итоги дублируются POST-запросом на ваш сервер.</small>
 <input id="wh" placeholder="https://your-server.com/api/signal" value="${esc(S.webhook||'')}" style="margin-top:8px"><button class="btn s" style="margin-top:6px" onclick="wh()">Сохранить вебхук</button>
