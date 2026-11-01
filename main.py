@@ -37,7 +37,7 @@ import aiohttp
 import feedparser
 import numpy as np
 import pandas as pd
-from ixcly_intelligence import score_signal, market_regime, volume_anomaly, risk_position_size, cleanup as cleanup_intelligence
+from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, cleanup as cleanup_intelligence)
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -239,7 +239,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.0-MAX-PAPER"
+VERSION = "4.1-MAX-INTEL"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -342,6 +342,7 @@ nav_stack = {}
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
 last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "secs": 0}
+scanner_ranking = []  # top-50 кандидатов последнего прохода, без свечных массивов
 market_bias = {"bias": 0, "title_ru": "Нет данных", "summary": "", "impact": "Нейтральный фон", "coins": "BTC, ETH",
                "published": "", "link": "", "engine": "none", "ts": 0}
 last_news_link = None
@@ -1597,6 +1598,9 @@ async def get_context(force=False):
         ctx["btc_dir"] = 1 if p >= 55 else -1 if p <= 45 else 0
         ctx["btc_conf"] = max(p, 100 - p)
         ctx["btc_txt"] = "бычий ▲" if ctx["btc_dir"] == 1 else "медвежий ▼" if ctx["btc_dir"] == -1 else "флэт ▬"
+        btc4 = tf.get("4h", {})
+        ctx["btc_atr_pct"] = round(float(btc4.get("atr", 0) or 0) / max(1e-12, float(btc4.get("price", 0) or 0)) * 100, 3)
+        ctx["btc_regime"] = market_regime(btc4.get("df")).get("name", "unknown")
     except Exception as e:
         log.info(f"Контекст BTC: {e}")
     try:
@@ -2110,6 +2114,11 @@ COINS: только тикеры, прямо подтверждённые тек
                                "summary": summary_ru, "impact": IMPACT_TEMPLATES[bias],
                                "coins": ", ".join(mentioned_coins(f"{title} {summary}")) or "Не указаны в источнике",
                                "published": published, "link": link, "engine": "fallback", "ts": now}
+            # Severity/relevance is computed locally from the source text. It does not
+            # turn a single headline into an automatic global signal shutdown.
+            crit_score, _crit_reason = classify_critical(title, summary)
+            market_bias["severity"] = "critical" if crit_score >= 7 else "high" if crit_score >= 5 else "medium" if crit_score >= 3 else "low"
+            market_bias["critical_score"] = int(crit_score)
             state_touch(False)
         except Exception as e:
             log.warning(f"Ошибка обновления новостей: {e}")
@@ -2236,9 +2245,16 @@ def calc_levels_and_risk(info, is_long):
     entry, sl1, risk = levels_core(price, atr, info["ema20"], info["ema50"], info["recent_low"], info["recent_high"],
                                    is_long, sr.get("support"), sr.get("resistance"))
     sign = 1 if is_long else -1
-    tps = [entry + sign * risk * m for m in (1.5, 2.5, 4.0)]
+    atr_pct = (atr / price) * 100 if price > 0 else 0.0
+    # Stop не уже динамического ATR-минимума, но исходный swing-уровень сохраняет
+    # право сделать его шире. Верхняя граница ограничивает чрезмерный риск.
+    adx = float(info.get("adx", 20) or 20)
+    stop_mult = atr_stop_multiplier(adx, atr_pct)
+    risk = min(max(risk, atr * stop_mult), atr * 3.0)
+    sl1 = entry - sign * risk
+    tp_multipliers = atr_target_multipliers(adx, atr_pct)
+    tps = [entry + sign * risk * m for m in tp_multipliers]
     sl2 = sl1 - sign * 0.7 * atr
-    atr_pct = (atr / price) * 100
     if atr_pct > 3.0:
         leverage = "x3-x5 (Высокая волатильность ⚠)"
     elif atr_pct > 1.5:
@@ -2271,7 +2287,11 @@ def backtest_df(df, conf_min=CONF_FINAL, rr1=1.5, fill_bars=6, max_hold=30, fee=
         if risk <= 0:
             i += 1
             continue
-        tp = entry + rr1 * risk if is_long else entry - rr1 * risk
+        atr_pct_i = (atr[i] / c[i] * 100) if c[i] > 0 else 0.0
+        risk = min(max(risk, atr[i] * atr_stop_multiplier(adx[i], atr_pct_i)), atr[i] * 3.0)
+        sl = entry - risk if is_long else entry + risk
+        tp1_mult = atr_target_multipliers(adx[i], atr_pct_i)[0]
+        tp = entry + tp1_mult * risk if is_long else entry - tp1_mult * risk
         filled = next((j for j in range(i + 1, min(n, i + 1 + fill_bars))
                        if (is_long and l[j] <= entry) or ((not is_long) and h[j] >= entry)), None)
         if filled is None:
@@ -2833,9 +2853,32 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
         strength -= 3
         notes.append("Азия + пробой: такие пробои часто ложные (−3)")
 
-    # Ложные пробои и сбор ликвидности (1h, а если нет — 4h)
+    # Ложные пробои и сбор ликвидности (1h, а если нет — 4h).
+    # Дополнительная оценка использует только последнюю закрытую свечу.
     tdf = h1df if h1df is not None else info.get("df")
     traps = detect_traps(tdf) if tdf is not None else {}
+    breakout = breakout_assessment(tdf)
+    if breakout.get("state", "").startswith("fake_"):
+        strength -= 8
+        notes.append("подтверждён риск ложного пробоя (−8)")
+    elif breakout.get("state") in ("breakout_up", "breakout_down"):
+        if (breakout.get("direction") == "LONG") == is_long:
+            strength += 3
+            pos_reasons.append("Пробой подтверждён закрытием свечи и объёмом")
+        else:
+            strength -= 4
+            notes.append("пробой направлен против сетапа (−4)")
+
+    # Anti-FOMO: мягкий штраф за растянутую цену, блок только в экстремуме.
+    anti_fomo = anti_fomo_assessment(info.get("df"), "LONG" if is_long else "SHORT")
+    if anti_fomo.get("penalty"):
+        strength -= anti_fomo["penalty"]
+        notes.append(f"Anti-FOMO: {anti_fomo['reason']} (−{anti_fomo['penalty']})")
+    if anti_fomo.get("blocked"):
+        reject = reject or "Anti-FOMO: вход чрезмерно растянут, ожидаем откат"
+
+    # Компактный снимок индикаторов для карточки сигнала и Signal Memory.
+    indicators = indicator_snapshot(info.get("df"))
     lv_hi, lv_lo = traps.get("levels", (0, 0))
     if traps.get("fake_up"):
         if is_long:
@@ -2888,14 +2931,37 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
 
     nb = market_bias.get("bias", 0)
     news_status = "Нейтрально"
-    if time.time() - market_bias.get("ts", 0) < 3 * 3600 and nb != 0:
-        word = "бычий" if nb == 1 else "медвежий"
-        if nb == side:
-            strength += 7
-            news_status = f"✅ Подтверждают ({word} фон)"
-        else:
-            strength -= 20
-            news_status = f"❌ Противоречат ({word} фон)"
+    news_risk = news_risk_assessment(market_bias, coin)
+    if time.time() - market_bias.get("ts", 0) < 3 * 3600 and news_risk.get("relevant"):
+        if nb != 0:
+            word = "бычий" if nb == 1 else "медвежий"
+            if nb == side:
+                strength += 4
+                news_status = f"✅ Подтверждают ({word} фон)"
+            else:
+                penalty = min(12, max(3, int(news_risk.get("penalty", 5))))
+                strength -= penalty
+                news_status = f"⚠️ Противоречат ({word} фон, риск {news_risk.get('severity', 'medium')})"
+                notes.append(f"Новостной риск для {coin}: −{penalty}")
+        elif news_risk.get("severity") in ("high", "critical"):
+            penalty = min(6, max(2, int(news_risk.get("penalty", 4)) // 2))
+            strength -= penalty
+            news_status = f"⚠️ Негативное событие ({news_risk.get('severity')})"
+            notes.append(f"Новостной риск для {coin}: −{penalty}")
+
+    # Market Panic Detector: повышает порог осторожности, но не выключает сканер
+    # из-за одного заголовка или обычной коррекции.
+    btc_atr_pct = 0.0
+    try:
+        btc_info = ctx.get("btc_atr_pct")
+        btc_atr_pct = float(btc_info or 0.0)
+    except (TypeError, ValueError):
+        pass
+    panic = market_panic_assessment(btc15, btc_atr_pct)
+    if panic["level"] in ("elevated", "high"):
+        penalty = 3 if panic["level"] == "elevated" else 6
+        strength -= penalty
+        notes.append(f"Market Panic {panic['level']}: BTC {btc15:+.2f}% за 15м (−{penalty})")
 
     strength = max(0.0, min(100.0, strength))
     if not reject and strength < conf_threshold:
@@ -2911,8 +2977,12 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
         type="Краткосрочный" if fast else "Долгосрочный" if long_term else "Среднесрочный",
         news_status=news_status, wp=wp, tf_probs={t: tf_data[t]["long_prob"] for t in tfs},
         reasons=reasons, patterns=pattern_lines(tf_data),
-        extras={"oi": oi_state, "oi_pct": oi_pct, "price_pct": p_pct, "imbalance": imb, "funding": fr[-1] if fr else None,
-                "btc15": btc15, "session": sess_name, "traps": {k: v for k, v in traps.items() if k != "levels"}})
+        extras={"oi": oi_state, "oi_pct": oi_pct, "price_pct": p_pct, "imbalance": imb,
+                "funding": fr[-1] if fr else funding, "funding_history": fr[-4:],
+                "oi_change_pct": oi_pct, "btc15": btc15, "market_panic": panic,
+                "news_risk": news_risk, "anti_fomo": anti_fomo, "breakout": breakout,
+                "indicators": indicators, "tf_consensus": f"{agree}/{len(tfs)}",
+                "session": sess_name, "traps": {k: v for k, v in traps.items() if k != "levels"}})
     return out
 
 
@@ -2991,6 +3061,16 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "liq_x20": liq_x20, "fake_breakout": setup.get("fake_breakout", False),
         "long_prob": {t: round(tf_data[t]["long_prob"], 1) for t in tfs_list(tf_data)},
         "adx": round(info["adx"], 1), "rsi": round(info["rsi"], 1),
+        "indicators": setup.get("extras", {}).get("indicators", {}),
+        "funding_rate": setup.get("extras", {}).get("funding"),
+        "oi_change_pct": setup.get("extras", {}).get("oi_change_pct"),
+        "tf_consensus": setup.get("extras", {}).get("tf_consensus"),
+        "news_risk": setup.get("extras", {}).get("news_risk", {}),
+        "market_panic": setup.get("extras", {}).get("market_panic", {}),
+        "anti_fomo": setup.get("extras", {}).get("anti_fomo", {}),
+        "breakout": setup.get("extras", {}).get("breakout", {}),
+        "atr_target_profile": list(atr_target_multipliers(info.get("adx"), (info.get("atr", 0) / info.get("price", 1) * 100))),
+        "atr_stop_multiplier": atr_stop_multiplier(info.get("adx"), (info.get("atr", 0) / info.get("price", 1) * 100)),
         "sr": info.get("sr", {}),
     }
     res["text"] = render_caption(res)
@@ -3113,12 +3193,10 @@ def recent_results(n=20):
     return [x for x in hist if x.get("status") in ("win", "loss")][:n]
 
 
-def adaptive_conf_bonus():
-    r = recent_results(20)
-    if len(r) < 8:
-        return 0
-    wr = sum(1 for x in r if x["status"] == "win") / len(r)
-    return 10 if wr < 0.35 else 6 if wr < 0.45 else 0
+def adaptive_conf_bonus(regime=None):
+    # Обучение только на закрытых сигналах; при малой выборке параметры не меняются.
+    profile = adaptive_scanner_profile(load_signal_history(), CONF_FINAL, regime=regime)
+    return int(profile.get("adjustment", 0))
 
 
 def streak_pause():
@@ -3207,6 +3285,7 @@ def signal_recipients(coin, side):
 
 async def scan_once(send=True):
     """Единый проход сканера: сначала блокировки, затем сетевые проверки и анализ."""
+    global scanner_ranking
     if scan_lock is None or scan_lock.locked():
         return []
     async with scan_lock:
@@ -3270,11 +3349,17 @@ async def scan_once(send=True):
                     return
                 q = quick_check(tf2)
                 if q:
-                    stage1.append((coin, tf2, q[1]))
+                    rank = scanner_rank_score(tf2, q[1])
+                    stage1.append((coin, tf2, rank))
                 await asyncio.sleep(0.15)
 
         await asyncio.gather(*[s1(c) for c in universe])
         stage1 = sorted(stage1, key=lambda x: x[2], reverse=True)[:50]
+        scanner_ranking = [{"coin": coin, "rank": idx + 1, "score": round(score, 1),
+                            "direction": "LONG" if tf2.get("4h", {}).get("long_prob", 50) >= 50 else "SHORT",
+                            "adx": round(float(tf2.get("4h", {}).get("adx", 0) or 0), 1),
+                            "rsi": round(float(tf2.get("4h", {}).get("rsi", 50) or 50), 1)}
+                           for idx, (coin, tf2, score) in enumerate(stage1)]
 
         async def s2(item):
             sc, tf2, _ = item
@@ -3289,7 +3374,7 @@ async def scan_once(send=True):
                 except Exception:
                     pass
                 setup = await evaluate_setup(sc, tf_data, ctx, await get_funding(sc), scan=True,
-                                             onchain_change=onchain, conf_threshold=scan_conf + adaptive_conf_bonus())
+                                             onchain_change=onchain, conf_threshold=scan_conf + adaptive_conf_bonus(ctx.get("btc_regime")))
                 if setup["valid"]:
                     stage2.append((sc, tf_data, setup))
                 else:
@@ -3360,6 +3445,10 @@ async def scan_once(send=True):
                         "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "quality_score": r.get("quality_score"),
                         "quality_label": r.get("quality_label"), "market_regime": r.get("market_regime"),
                         "volume_anomaly": r.get("volume_anomaly"),
+                        "memory_features": {"regime": (r.get("market_regime") or {}).get("name", "unknown"),
+                                             "quality": r.get("quality_score"), "atr_pct": (r.get("indicators") or {}).get("atr_pct"),
+                                             "rsi": r.get("rsi"), "adx": r.get("adx"), "btc_context": r.get("btc_txt"),
+                                             "breakout": (r.get("breakout") or {}).get("state")},
                         "reasons": [re.sub(r"\s*\(.*\)$", "", s) for s in r.get("reasons", [])][:6], "hour": datetime.now(timezone(timedelta(hours=3))).hour, "daily": False, "mfe": 0.0, "mae": 0.0}
                 hist.append(item)
                 new_items.append((item, r))
@@ -3893,16 +3982,24 @@ async def news_watcher_loop():
                     if scored:
                         (score, _), event, title = max(scored, key=lambda item: item[0][0])
                         if score >= 3:
-                            set_blackout(3600, "news")
-                            await notify_admin(f"🚨 Критичная новость (балл {score}): пауза до 1 часа.\n{html.escape(title)}")
                             move = await btc_move_15m()
-                            if (score >= 5 or abs(move) >= 1.2) and alert_once("crit_news", 3 * 3600):
-                                title_ru = market_bias["title_ru"] if market_bias.get("link") == getattr(event, "link", None) else await translate_text(title)
-                                asyncio.create_task(broadcast_market_alert(
-                                    title="🚨 Критическая новость на рынке",
-                                    reason=f"<i>{html.escape(shorten(title_ru, 150))}</i>\nBTC за 15 минут: {move:+.2f}%",
-                                    advice="Воздержитесь от новых входов и не усредняйте убыточные позиции. Пауза снимется, когда рынок успокоится.",
-                                    pause_mins=60))
+                            # Пауза только при подтверждённой реакции рынка: сильная новость
+                            # без движения цены снижает уверенность отдельных активов, но
+                            # не выключает весь сканер.
+                            confirmed_panic = (score >= 7 and abs(move) >= 1.8) or (score >= 9 and abs(move) >= 1.2)
+                            await notify_admin(
+                                f"📰 Новостной риск (балл {score}); BTC за 15 минут: {move:+.2f}%. "
+                                f"Глобальная пауза: {'да, 20 минут' if confirmed_panic else 'нет, сигналы продолжают анализироваться'}.\n"
+                                f"{html.escape(title)}")
+                            if confirmed_panic:
+                                set_blackout(1200, "news")
+                                if alert_once("crit_news", 3 * 3600):
+                                    title_ru = market_bias["title_ru"] if market_bias.get("link") == getattr(event, "link", None) else await translate_text(title)
+                                    asyncio.create_task(broadcast_market_alert(
+                                        title="🚨 Подтверждённый рыночный шок",
+                                        reason=f"<i>{html.escape(shorten(title_ru, 150))}</i>\nBTC за 15 минут: {move:+.2f}%",
+                                        advice="Риск временно повышен. Дождитесь стабилизации; новостной заголовок сам по себе не считается сигналом к продаже.",
+                                        pause_mins=20))
                     if bot_flags["news_enabled"] and active_chats:
                         text, img = await prepare_news()
                         if text:
@@ -4424,11 +4521,21 @@ async def mini_dispatch(uid, u, act, d):
         regime_code = btc_regime.get("name") if isinstance(btc_regime, dict) else None
         regime_names = {"uptrend": "Бычий тренд", "downtrend": "Медвежий тренд", "range": "Боковик"}
         regime_label = regime_names.get(regime_code, "Нет данных")
+        memory = signal_memory_summary(load_signal_history(), 120)
+        profile = adaptive_scanner_profile(load_signal_history(), CONF_FINAL, regime=regime_code)
+        ctx_now = await get_context()
+        panic = market_panic_assessment(await btc_move_15m(), ctx_now.get("btc_atr_pct", 0))
         return {"regime": regime_label, "market": market_bias.get("title_ru", "Нет данных"),
+                "news_risk": {"severity": market_bias.get("severity", "low"),
+                              "critical_score": market_bias.get("critical_score", 0),
+                              "coins": market_bias.get("coins", "")},
+                "memory": memory, "adaptive": profile, "market_panic": panic, "ranking": scanner_ranking[:50],
                 "signals": [{"coin": x.get("coin"), "side": x.get("side"), "quality": x.get("quality_score"),
                              "grade": x.get("quality_label"), "regime": x.get("market_regime"),
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
-                "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE)}
+                "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE),
+                "rss_mb": _current_rss_mb(), "peak_rss_mb": _rss_mb(),
+                "last_scan": dict(last_scan_info)}
 
     if act == "risk_calc":
         try:
