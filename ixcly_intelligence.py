@@ -39,45 +39,50 @@ def bounded_cache_set(key, value, now=None):
 
 
 def score_signal(res):
-    """Deterministic quality score 0..100; never invents a probability of profit."""
+    """Deterministic setup-quality score 0..100, not a win probability."""
     base = max(0.0, min(100.0, _num(res.get('strength'), 0)))
-    score = base * 0.55
-    probs = res.get('long_prob') or res.get('tf_probs') or {}
+    score = base * 0.50
+    is_long = bool(res.get('is_long', str(res.get('side', '')).upper() in ('LONG', 'BUY')))
+    probs = res.get('tf_probs') or res.get('long_prob') or {}
     vals = [_num(v, -1) for v in probs.values()]
     vals = [v for v in vals if 0 <= v <= 100]
-    if len(vals) >= 2:
-        aligned = sum((v >= 50) == (vals[0] >= 50) for v in vals) / len(vals)
-        score += aligned * 18
+    if vals:
+        aligned = sum((v >= 50) == is_long for v in vals) / len(vals)
+        score += aligned * 22
+        if len(vals) >= 3 and aligned < 0.5:
+            score -= 7
     bt = res.get('bt') or {}
     trades = int(_num(bt.get('trades'), 0))
-    if trades >= 10:
-        score += 8
-    elif trades >= 5:
-        score += 5
-    elif trades:
-        score += 2
-    if res.get('fake_breakout'):
-        score -= 18
-    regime = str(res.get('regime') or '').lower()
-    if 'sideway' in regime or 'боков' in regime:
-        score -= 5
+    wr = _num(bt.get('win_rate', bt.get('winrate', 0)), 0)
+    if trades >= 20: score += 7
+    elif trades >= 10: score += 5
+    elif trades >= 5: score += 2
+    if trades >= 10 and wr:
+        score += max(-5, min(5, (wr - 50) * 0.2))
+    if res.get('fake_breakout'): score -= 20
+    regime = str((res.get('market_regime') or {}).get('name') or res.get('regime') or '').lower()
+    if 'range' in regime or 'sideway' in regime or 'боков' in regime: score -= 5
+    if ('downtrend' in regime and is_long) or ('uptrend' in regime and not is_long): score -= 7
     risk = str(res.get('risk_lvl') or '').lower()
-    if 'высок' in risk or 'high' in risk:
-        score -= 8
-    entry, sl = _num(res.get('entry')), _num((res.get('sls') or [0])[0])
+    if 'высок' in risk or 'high' in risk: score -= 8
+    entry = _num(res.get('entry'))
+    sls = res.get('sls') or []
+    sl = _num(sls[0]) if sls else 0
     if entry > 0 and sl > 0:
         dist = abs(entry - sl) / entry * 100
-        if dist > 8:
-            score -= 10
-        elif dist < 0.15:
-            score -= 6
-        else:
-            score += 5
+        if dist > 8: score -= 10
+        elif dist < 0.15: score -= 6
+        else: score += 5
     rr = _num(res.get('rr'), 0)
-    if rr >= 2:
-        score += 6
-    elif rr and rr < 1.2:
-        score -= 8
+    if not rr and entry > 0 and sl > 0:
+        tps = res.get('tps') or []
+        if tps:
+            rr = abs(_num(tps[0]) - entry) / abs(entry - sl)
+    if rr >= 2: score += 7
+    elif rr >= 1.5: score += 3
+    elif rr and rr < 1.2: score -= 10
+    anomaly = res.get('volume_anomaly')
+    if isinstance(anomaly, dict) and _num(anomaly.get('ratio')) >= 2.5: score += 2
     return round(max(0.0, min(100.0, score)), 1)
 
 
