@@ -3321,7 +3321,7 @@ async def scan_once(send=True):
                 res["quality_score"] = score_signal(res)
                 res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
                                          else "C" if res["quality_score"] >= 62 else "D")
-                if res["verdict"] == "ENTER" and res["quality_score"] >= float(os.getenv("MIN_SIGNAL_QUALITY", "58")):
+                if res["verdict"] == "ENTER" and res["quality_score"] >= float(os.getenv("MIN_SIGNAL_QUALITY", "62")):
                     final.append(res)
                     analysis_cache[coin] = (time.time(), 60, res)
                     save_analysis_db(coin, res)
@@ -4807,6 +4807,7 @@ def bot_main_keyboard():
                 [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
     rows.append([InlineKeyboardButton(text="📄 Документы", callback_data="show_docs")])
+    rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_auto")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -6012,15 +6013,24 @@ async def main_admin_reply(m: types.Message):
     await m.answer("✅ Ответ отправлен пользователю.")
 
 
+SUPPORT_WAITING_AGENT = set()
+
 @dp.message(Command("support", "helpdesk"))
 async def support_command(m: types.Message):
-    await m.answer("🆘 Поддержка IXCLY\nЗадайте вопрос о функциях бота. Если я не смогу ответить по теме, обращение получит агент поддержки.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 Автоответ по IXCLY", callback_data="support_auto")],
+        [InlineKeyboardButton(text="🧑‍💻 Написать агенту", callback_data="support_agent")],
+    ])
+    await m.answer("🆘 <b>Поддержка IXCLY</b>\nВыберите автоответ или обращение к человеку.", parse_mode="HTML", reply_markup=kb)
 
 
 @dp.message()
 async def fallback_message(m: types.Message):
     text_in = (m.text or m.caption or "").strip()
     if text_in and not text_in.startswith("/"):
+        if m.from_user.id in SUPPORT_WAITING_AGENT:
+            SUPPORT_WAITING_AGENT.discard(m.from_user.id)
+            return await create_support_ticket(m, text_in)
         answer = support_faq_answer(text_in)
         if answer:
             return await m.answer(answer)
@@ -6047,6 +6057,13 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
+        if data == "support_auto" and msg:
+            await safe_answer(cb)
+            return await msg.answer("🤖 Напишите вопрос о функциях IXCLY: сигналы, подписка, VIP, оплата, Paper Trading или настройки.")
+        if data == "support_agent" and msg:
+            await safe_answer(cb)
+            SUPPORT_WAITING_AGENT.add(uid)
+            return await msg.answer("🧑‍💻 Напишите одним сообщением ваш вопрос. Я передам его агенту поддержки.")
         if data == "show_docs" and msg:
             await safe_answer(cb)
             kb = InlineKeyboardMarkup(inline_keyboard=[
