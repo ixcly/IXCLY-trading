@@ -4574,7 +4574,7 @@ async def mini_dispatch(uid, u, act, d):
     _users().setdefault(str(uid), {"active": True})["last_seen"] = time.time()
     if act not in FREE_ACTS and not has_access(uid):
         return {"error": access_closed_text(uid), "closed": True, "access": access_payload(uid),
-                "bot": runtime["main_bot"], "ads_support": ads_get()["support"]}
+                "bot": runtime["main_bot"]}
     if uid not in active_chats:
         active_chats.add(uid)
         await asyncio.to_thread(save_user_data, uid, u.get("username"), u.get("first_name"))
@@ -5002,7 +5002,7 @@ def bot_main_keyboard():
                 [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
     rows.append([InlineKeyboardButton(text="📄 Документы", callback_data="show_docs")])
-    rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_auto")])
+    rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -5082,6 +5082,8 @@ async def cmd_start(m: types.Message, state: FSMContext):
         await m.delete()
     except Exception:
         pass
+    if len(parts) > 1 and parts[1].lower() in ("support", "help", "helpdesk"):
+        return await show_support_menu(m)
     await welcome_for(m.chat.id, m.from_user.id)
 
 
@@ -5684,7 +5686,7 @@ TG_SEM = None                            # создаётся в main (не пр
 COIN_RL = {}                             # uid -> ts последнего пересчёта монеты
 _ob_cache = {}
 _hourly_cache = {}
-ADS_DEFAULT = {"on": False, "text": "", "url": "", "contact": "@ixcly", "support": "@ixcly"}
+ADS_DEFAULT = {"on": False, "text": "", "url": "", "contact": "@ixcly"}
 
 
 def ads_get():
@@ -5755,7 +5757,7 @@ def access_payload(uid):
                        "until": int(discount_offer_for(uid).get("until", 0)),
                        "label": plan_prices_for_user(uid)[0].get("offer_label", "")}
                       if discount_offer_for(uid) else None),
-            "support": ad["support"], "ad": ad["text"] if show_ad else "",
+            "ad": ad["text"] if show_ad else "",
             "ad_url": ad["url"] if show_ad else ""}
 
 
@@ -5777,7 +5779,7 @@ def ad_block():
 def paywall_kb(uid=None):
     rows = [[InlineKeyboardButton(text=f"💳 {PLAN_TITLE[d]} · {price_for_user(uid, d) if uid is not None else s}⭐", callback_data=f"buy:{d}")] for d, s in PLANS.items()]
     rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:help")])
-    rows.append([InlineKeyboardButton(text=f"🆘 Поддержка {ads_get()['support']}", url=f"https://t.me/{ads_get()['support'].lstrip('@')}")])
+    rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -6089,18 +6091,19 @@ if admin_dp:
 
     @admin_dp.message(Command("contact"))
     async def adm_contact(m: types.Message):
-        """/contact ads|support @ник — кому писать по рекламе и в поддержку"""
+        """/contact ads @ник — контакт по рекламе; поддержка работает только через бота."""
         if not _is_admin(m):
             return
         try:
             _, kind, nick = m.text.split()
-            key = "contact" if kind == "ads" else "support"
+            if kind != "ads":
+                return await m.answer("Поддержка обслуживается только внутри бота. Для рекламы: <code>/contact ads @ник</code>", parse_mode="HTML")
             with STATE_LOCK:
-                STATE["ads"] = dict(ads_get(), **{key: nick})
+                STATE["ads"] = dict(ads_get(), contact=nick)
             state_touch()
-            await m.answer(f"✅ {'Реклама' if key == 'contact' else 'Поддержка'}: {nick}")
+            await m.answer(f"✅ Контакт по рекламе: {html.escape(nick)}")
         except ValueError:
-            await m.answer("Формат: <code>/contact ads @ник</code> или <code>/contact support @ник</code>", parse_mode="HTML")
+            await m.answer("Формат: <code>/contact ads @ник</code>", parse_mode="HTML")
 
     @admin_dp.message(Command("who"))
     async def adm_who(m: types.Message):
@@ -6122,7 +6125,7 @@ if admin_dp:
         await m.answer("<b>Команды админа</b>\n/grant UID ДНИ — добавить дни\n/revoke UID — закрыть доступ\n"
                        "/free UID on|off — бесплатный доступ\n/who UID — статус\n"
                        "/promo_add КОД ДНИ ИСП [ДНЕЙ] · /promo_del КОД · /promos\n"
-                       "/ad_set или /add_set текст | ссылка · /ad_off\n/contact ads @ник · /contact support @ник", parse_mode="HTML")
+                       "/ad_set или /add_set текст | ссылка · /ad_off\n/contact ads @ник · поддержка — через бота", parse_mode="HTML")
 
 
 
@@ -6246,22 +6249,53 @@ def support_faq_answer(question):
 
     return None
 
-async def create_support_ticket(m: types.Message, question: str):
+SUPPORT_CATEGORIES = {
+    "subscription": "Подписка и оплата",
+    "signals": "Сигналы и торговые идеи",
+    "miniapp": "Mini App / приложение",
+    "notifications": "Уведомления",
+    "paper": "Paper Trading",
+    "other": "Другой вопрос",
+}
+SUPPORT_WAITING_AGENT = {}
+
+
+def support_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Подписка и оплата", callback_data="support:cat:subscription")],
+        [InlineKeyboardButton(text="📊 Сигналы и торговые идеи", callback_data="support:cat:signals")],
+        [InlineKeyboardButton(text="📱 Mini App / приложение", callback_data="support:cat:miniapp")],
+        [InlineKeyboardButton(text="🔔 Уведомления", callback_data="support:cat:notifications")],
+        [InlineKeyboardButton(text="🧪 Paper Trading", callback_data="support:cat:paper")],
+        [InlineKeyboardButton(text="❔ Другой вопрос", callback_data="support:cat:other")],
+    ])
+
+
+async def show_support_menu(target):
+    text = ("🆘 <b>Поддержка IXCLY</b>\n\n"
+            "Выберите тему обращения. Я помогу с частыми вопросами или оформлю обращение прямо здесь, в боте.\n"
+            "Личные контакты для обращения не нужны — ответ придёт в этот чат.")
+    if isinstance(target, types.Message):
+        return await target.answer(text, parse_mode="HTML", reply_markup=support_menu_keyboard())
+    return await target.edit_text(text, parse_mode="HTML", reply_markup=support_menu_keyboard())
+
+
+async def create_support_ticket(m: types.Message, question: str, category: str = "other"):
     tickets = STATE.setdefault("support_tickets", {})
-    ticket_id = str(int(time.time())) + str(m.from_user.id)[-4:]
+    ticket_id = f"{int(time.time())}{random.randint(1000, 9999)}"
+    category_label = SUPPORT_CATEGORIES.get(category, SUPPORT_CATEGORIES["other"])
     ticket = {"id": ticket_id, "uid": m.from_user.id, "chat_id": m.chat.id,
               "username": m.from_user.username or "", "name": m.from_user.full_name,
-              "question": (question or "")[:3000], "status": "open", "created_at": time.time(), "answer": ""}
+              "category": category_label, "question": (question or "")[:3000],
+              "status": "open", "created_at": time.time(), "answer": ""}
     tickets[ticket_id] = ticket
     if len(tickets) > 500:
         for old_id, old in sorted(tickets.items(), key=lambda kv: float(kv[1].get("created_at", 0)))[:100]:
             if old.get("status") != "open": tickets.pop(old_id, None)
     state_touch(True)
-    await m.answer("Ваш вопрос передан агенту поддержки. Ожидайте ответа здесь.")
-    await notify_admin("🆘 <b>Новое обращение поддержки</b>\n"
-        f"ID: <code>{ticket_id}</code>\nПользователь: {html.escape(ticket['name'][:80])} (@{html.escape(ticket['username'])})\n"
-        f"Telegram ID: <code>{ticket['uid']}</code>\n\nВопрос:\n{html.escape(ticket['question'][:2500])}\n\n"
-        f"Ответить: <code>/reply {ticket_id} текст ответа</code>\nЗакрыть: <code>/close_ticket {ticket_id}</code>")
+    await m.answer(f"✅ <b>Обращение #{ticket_id} создано.</b>\nТема: {html.escape(category_label)}\n\n"
+                   "Ответ поддержки придёт сюда же, в этот чат. Ваши личные контакты не публикуются.", parse_mode="HTML",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Меню поддержки", callback_data="support_menu")]]))
 
 
 @dp.message(Command("tickets"))
@@ -6272,7 +6306,7 @@ async def main_admin_tickets(m: types.Message):
     if not opened:
         return await m.answer("Открытых обращений нет.")
     for t in sorted(opened, key=lambda x: float(x.get("created_at", 0)))[:30]:
-        await m.answer(f"🆘 <b>#{html.escape(t['id'])}</b> · <code>{t.get('uid')}</code>\n{html.escape(str(t.get('question',''))[:2500])}\nОтвет: <code>/reply {t['id']} текст</code>", parse_mode="HTML")
+        await m.answer(f"🆘 <b>#{html.escape(t['id'])}</b> · {html.escape(str(t.get('category', 'Другое')))}\n{html.escape(str(t.get('question',''))[:2500])}\nОтвет: <code>/reply {t['id']} текст</code>", parse_mode="HTML")
 
 
 @dp.message(Command("reply"))
@@ -6295,15 +6329,9 @@ async def main_admin_reply(m: types.Message):
     await m.answer("✅ Ответ отправлен пользователю.")
 
 
-SUPPORT_WAITING_AGENT = set()
-
 @dp.message(Command("support", "helpdesk"))
 async def support_command(m: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 Автоответ по IXCLY", callback_data="support_auto")],
-        [InlineKeyboardButton(text="🧑‍💻 Написать агенту", callback_data="support_agent")],
-    ])
-    await m.answer("🆘 <b>Поддержка IXCLY</b>\nВыберите автоответ или обращение к человеку.", parse_mode="HTML", reply_markup=kb)
+    await show_support_menu(m)
 
 
 @dp.message()
@@ -6311,15 +6339,16 @@ async def fallback_message(m: types.Message):
     text_in = (m.text or m.caption or "").strip()
     if text_in and not text_in.startswith("/"):
         if m.from_user.id in SUPPORT_WAITING_AGENT:
-            SUPPORT_WAITING_AGENT.discard(m.from_user.id)
-            return await create_support_ticket(m, text_in)
+            category = SUPPORT_WAITING_AGENT.pop(m.from_user.id, "other")
+            return await create_support_ticket(m, text_in, category)
         answer = support_faq_answer(text_in)
         if answer:
             return await m.answer(answer)
         if any(x in text_in.lower() for x in ("поддержка:", "вопрос поддержке", "оператор:", "агент:", "help:")):
-            return await create_support_ticket(m, text_in)
+            return await create_support_ticket(m, text_in, "other")
         if not re.fullmatch(r"[A-Za-z0-9]{2,12}", text_in):
-            return await create_support_ticket(m, text_in)
+            return await m.answer("Чтобы написать в поддержку, откройте меню 🆘 Поддержка и выберите тему обращения.",
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Открыть поддержку", callback_data="support_menu")]]))
     try:
         await m.delete()
     except Exception:
@@ -6339,19 +6368,26 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
-        if data == "support_auto" and msg:
+        if data in ("support_menu", "support_auto", "support_agent") and msg:
             await safe_answer(cb)
-            return await msg.answer("🤖 Напишите вопрос о функциях IXCLY: сигналы, подписка, VIP, оплата, Paper Trading или настройки.")
-        if data == "support_agent" and msg:
+            SUPPORT_WAITING_AGENT.pop(uid, None)
+            return await show_support_menu(msg)
+        if data.startswith("support:cat:") and msg:
             await safe_answer(cb)
-            SUPPORT_WAITING_AGENT.add(uid)
-            return await msg.answer("🧑‍💻 Напишите одним сообщением ваш вопрос. Я передам его агенту поддержки.")
+            category = data.split(":", 2)[2]
+            if category not in SUPPORT_CATEGORIES:
+                category = "other"
+            SUPPORT_WAITING_AGENT[uid] = category
+            return await msg.answer(f"✍️ <b>{html.escape(SUPPORT_CATEGORIES[category])}</b>\n\n"
+                                    "Опишите вопрос одним сообщением. Можно добавить детали ошибки и шаги, после которых она возникла.\n"
+                                    "Я создам обращение, а ответ придёт сюда же.", parse_mode="HTML",
+                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="support_menu")]]))
         if data == "show_docs" and msg:
             await safe_answer(cb)
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Политика конфиденциальности", url=DOCS_PRIVACY)],
                 [InlineKeyboardButton(text="Пользовательское соглашение (оферта)", url=DOCS_OFFER)],
-                [InlineKeyboardButton(text=f"🆘 Поддержка {ads_get()['support']}", url=f"https://t.me/{ads_get()['support'].lstrip('@')}")]])
+                [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")]])
             return await msg.answer("📄 <b>Документы IXCLY PRO</b>\nВыберите нужный пункт:", reply_markup=kb, parse_mode="HTML")
         if data.startswith("buy:"):
             await safe_answer(cb)
@@ -6490,7 +6526,7 @@ if admin_dp:
         if not opened:
             return await m.answer("Открытых обращений нет.")
         for t in sorted(opened, key=lambda x: float(x.get("created_at", 0)))[:30]:
-            await m.answer(f"🆘 <b>#{html.escape(t['id'])}</b> · {html.escape(str(t.get('name',''))[:60])} · <code>{t.get('uid')}</code>\n"
+            await m.answer(f"🆘 <b>#{html.escape(t['id'])}</b> · {html.escape(str(t.get('name',''))[:60])} · {html.escape(str(t.get('category', 'Другое')))}\n"
                            f"{html.escape(str(t.get('question',''))[:2500])}\n\nОтвет: <code>/reply {t['id']} текст</code>", parse_mode="HTML")
 
     @admin_dp.message(Command("reply"))
