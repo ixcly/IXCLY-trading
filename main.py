@@ -341,7 +341,8 @@ scan_skip = {}
 nav_stack = {}
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
-last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "secs": 0}
+last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "sent": 0, "secs": 0, "diagnostic": "Сканирование ещё не выполнялось", "reasons": []}
+last_no_signal_notice = 0.0
 scanner_ranking = []  # top-50 кандидатов последнего прохода, без свечных массивов
 market_bias = {"bias": 0, "title_ru": "Нет данных", "summary": "", "impact": "Нейтральный фон", "coins": "BTC, ETH",
                "published": "", "link": "", "engine": "none", "ts": 0}
@@ -3283,6 +3284,26 @@ def signal_recipients(coin, side):
     return out
 
 
+async def notify_no_signal_users(reason, details=""):
+    """Редкое персональное уведомление: сканер не нашёл/не опубликовал новые сигналы."""
+    global last_no_signal_notice
+    now = time.time()
+    if now - last_no_signal_notice < 1800:
+        return
+    last_no_signal_notice = now
+    body = ("ℹ️ <b>Новых сигналов пока нет</b>\n"
+            f"Причина: {html.escape(str(reason))}\n"
+            + (html.escape(str(details)) + "\n" if details else "")
+            + "\nЭто не ошибка и не прогноз: бот не будет создавать слабый сигнал ради количества.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Открыть Mini App", web_app=WebAppInfo(url=webapp_link(tab="signals")))]] ) if WEBAPP_URL else None
+    for cid in signal_recipients("", ""):
+        try:
+            await _send_new(cid, body, kb, None)
+            await asyncio.sleep(0.03)
+        except Exception as e:
+            log.debug("No-signal notice %s: %s", cid, e)
+
+
 async def scan_once(send=True):
     """Единый проход сканера: сначала блокировки, затем сетевые проверки и анализ."""
     global scanner_ranking
@@ -3290,18 +3311,34 @@ async def scan_once(send=True):
         return []
     async with scan_lock:
         t0 = time.time()
+        def _scan_paused(reason):
+            last_scan_info.update(ts=int(time.time()), secs=int(time.time() - t0), diagnostic=reason,
+                                  universe=0, stage1=0, stage2=0, backtest_ok=0, final=0, sent=0, reasons=[])
+            state_touch(False)
         rss_now = _current_rss_mb()
         if rss_now is not None and rss_now >= float(os.getenv("RAM_SCAN_STOP_MB", "440")):
+            _scan_paused(f"Сканирование остановлено защитой памяти: RAM {rss_now:.1f} MB достигла порога")
+            if send:
+                await notify_no_signal_users(last_scan_info["diagnostic"])
             log.error("Сканер пропущен: RAM %.1f MB достигла защитного порога", rss_now)
             if alert_once("ram_guard", 1800):
                 await notify_admin(f"⚠️ IXCLY RAM guard: {rss_now:.1f} MB. Сканирование приостановлено до следующего цикла.")
             return []
         if time.time() < news_blackout_until:
             if not await maybe_lift_blackout():
+                _scan_paused("Пауза после критической новости: ждём снижения новостного риска")
+                if send:
+                    await notify_no_signal_users(last_scan_info["diagnostic"])
                 return []
         if streak_pause():
+            _scan_paused("Защитная пауза после серии неудачных сигналов")
+            if send:
+                await notify_no_signal_users(last_scan_info["diagnostic"])
             return []
         if await check_macro_calendar():
+            _scan_paused("Пауза из-за важной макроэкономической публикации (ФРС/CPI)")
+            if send:
+                await notify_no_signal_users(last_scan_info["diagnostic"])
             set_blackout(1800, "macro")
             if alert_once("macro", 2 * 3600):
                 await notify_admin("🏦 Макро-новость (ФРС/CPI): сканер на паузе 30 минут.")
@@ -3312,6 +3349,9 @@ async def scan_once(send=True):
                     pause_mins=30))
             return []
         if await btc_shock():
+            _scan_paused("Пауза из-за резкого движения BTC и повышенной волатильности")
+            if send:
+                await notify_no_signal_users(last_scan_info["diagnostic"])
             set_blackout(1800, "shock")
             if alert_once("shock", 2 * 3600):
                 await notify_admin("⚠ Шок BTC: сканер на паузе 30 минут.")
@@ -3338,19 +3378,32 @@ async def scan_once(send=True):
 
         async def s1(coin):
             if time.time() < scan_skip.get(coin, 0):
+                _rej("временный cooldown недоступной монеты")
                 return
             async with sem:
                 try:
                     tf2, _ = await get_market_data_light(coin, ("4h", "1d"))
                 except LookupError:
+                    _rej("монета недоступна на выбранном рынке")
                     scan_skip[coin] = time.time() + 6 * 3600
                     return
-                except Exception:
+                except Exception as e:
+                    _rej("ошибка/нет данных биржи")
+                    log.debug("Stage1 %s: %s", coin, e)
                     return
                 q = quick_check(tf2)
                 if q:
                     rank = scanner_rank_score(tf2, q[1])
                     stage1.append((coin, tf2, rank))
+                else:
+                    if "4h" not in tf2 or "1d" not in tf2:
+                        _rej("нет данных 4h/1d")
+                    elif max((tf2["4h"]["long_prob"] + tf2["1d"]["long_prob"]) / 2, 100 - (tf2["4h"]["long_prob"] + tf2["1d"]["long_prob"]) / 2) < CONF_STAGE1:
+                        _rej(f"сила ниже Stage 1 ({CONF_STAGE1:.0f})")
+                    elif tf2["4h"].get("adx", 0) < 10:
+                        _rej("слабый тренд ADX<10")
+                    else:
+                        _rej("не прошёл первичный фильтр")
                 await asyncio.sleep(0.15)
 
         await asyncio.gather(*[s1(c) for c in universe])
@@ -3378,7 +3431,7 @@ async def scan_once(send=True):
                 if setup["valid"]:
                     stage2.append((sc, tf_data, setup))
                 else:
-                    _rej(setup["reject"][:28])
+                    _rej(setup.get("reject") or "не прошёл фильтр сетапа")
 
         await asyncio.gather(*[s2(i) for i in stage1])
 
@@ -3406,12 +3459,15 @@ async def scan_once(send=True):
                 res["quality_score"] = score_signal(res)
                 res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
                                          else "C" if res["quality_score"] >= 62 else "D")
-                if res["verdict"] == "ENTER" and res["quality_score"] >= float(os.getenv("MIN_SIGNAL_QUALITY", "62")):
+                min_quality = float(os.getenv("MIN_SIGNAL_QUALITY", "62"))
+                if res["verdict"] == "ENTER" and res["quality_score"] >= min_quality:
                     final.append(res)
                     analysis_cache[coin] = (time.time(), 60, res)
                     save_analysis_db(coin, res)
+                elif res["verdict"] != "ENTER":
+                    _rej("сетап получил рекомендацию ЖДАТЬ")
                 else:
-                    _rej("ИИ: ЖДАТЬ")
+                    _rej(f"качество ниже порога {min_quality:.0f} ({res['quality_score']:.0f})")
 
         await asyncio.gather(*[s3(i) for i in stage2])
         final.sort(key=lambda r: r["strength"], reverse=True)
@@ -3428,13 +3484,22 @@ async def scan_once(send=True):
             used_groups = set()
             for r in final:
                 key = f"{r['coin']}:{r['side']}"
-                if key in busy or now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
+                if key in busy:
+                    _rej("по монете уже есть активный сигнал")
                     continue
-                if len(new_items) >= 3 or abs(r["entry"] - r["price"]) / r["price"] > 0.03:
+                if now - signal_sent_at.get(f"{r['coin']}:{'L' if r['is_long'] else 'S'}", 0) < SIGNAL_COOLDOWN:
+                    _rej("период ожидания после прошлого сигнала")
+                    continue
+                if len(new_items) >= 3:
+                    _rej("лимит 3 новых сигнала за проход")
+                    continue
+                if abs(r["entry"] - r["price"]) / max(r["price"], 1e-12) > 0.03:
+                    _rej("цена ушла от точки входа более чем на 3%")
                     continue
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
                 if grp is not None:
                     if (grp, r["side"]) in used_groups:
+                        _rej("корреляционный фильтр: уже выбран похожий актив")
                         continue
                     used_groups.add((grp, r["side"]))
                 signal_sent_at[f"{r['coin']}:{'L' if r['is_long'] else 'S'}"] = now
@@ -3457,11 +3522,34 @@ async def scan_once(send=True):
                 stats["signals"] += len(new_items)
                 for item, r in new_items:
                     await deliver_new_signal(item, r)
+        top_items = sorted(rej.items(), key=lambda kv: -kv[1])[:6]
+        top = "; ".join(f"{k}: {v}" for k, v in top_items)
+        sent_count = len(new_items)
+        if sent_count:
+            diagnostic = f"Найдено и опубликовано сигналов: {sent_count}"
+        elif final:
+            diagnostic = "Сетапы найдены, но не прошли ограничения публикации (активный сигнал, cooldown, корреляция или лимит за проход)"
+        elif not stage1:
+            diagnostic = "Кандидаты не прошли первичный фильтр силы/ADX или не получены данные 4h/1d"
+        elif not stage2:
+            diagnostic = "Первичные кандидаты есть, но сетапы не подтвердились на дополнительных таймфреймах/фильтрах"
+        elif bt_pass < len(stage2):
+            diagnostic = "Часть сетапов остановлена слабым бэктестом или ошибкой построения анализа"
+        else:
+            diagnostic = "Сетапы прошли анализ, но получили ЖДАТЬ или качество ниже минимального порога"
+        last_scan_info.update(ts=int(time.time()), stage1=len(stage1), stage2=len(stage2), backtest_ok=bt_pass,
+                              universe=len(universe), final=len(final), sent=sent_count, secs=int(time.time() - t0),
+                              diagnostic=diagnostic, reasons=[{"reason": k, "count": v} for k, v in top_items])
+        state_touch(False)
+        log.info("Сканер: %s → %s → %s → backtest %s → final %s → sent %s; %s",
+                 len(universe), len(stage1), len(stage2), bt_pass, len(final), sent_count, diagnostic)
         if send:
-            top = "; ".join(f"{k}: {v}" for k, v in sorted(rej.items(), key=lambda kv: -kv[1])[:5])
             await notify_admin(f"🔍 <b>Скан завершён</b> за {last_scan_info['secs']} с\n"
-                               f"Монет: {len(universe)} → {len(stage1)} → {len(stage2)} · бэктест {bt_pass} · ✅ <b>{len(final)}</b>\n"
-                               f"🧾 Отсев: {top or '—'}")
+                               f"Монет: {len(universe)} → {len(stage1)} → {len(stage2)} · бэктест {bt_pass} · итог {len(final)} · отправлено {sent_count}\n"
+                               f"🧾 Причина: {html.escape(diagnostic)}\nОтсев: {html.escape(top or '—')}")
+            if sent_count == 0:
+                await notify_no_signal_users(diagnostic,
+                    f"Скан: {len(universe)} монет → {len(stage1)} кандидатов → {len(stage2)} сетапов → {len(final)} готовых → 0 опубликовано. " + ("Основной отсев: " + top if top else "Фильтры рынка пока не нашли подходящих входов."))
         gc.collect()
         return final
 
