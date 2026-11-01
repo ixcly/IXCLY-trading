@@ -134,7 +134,7 @@ tg.BackButton.onClick(()=>{const p=STACK.pop();if(p)go(p[0],p[1],true)});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPoll()});
 const botUser=()=>(S.bot||'').replace('@','');
 const openBot=cmd=>tg.openTelegramLink(`https://t.me/${botUser()}?start=${cmd}`);
-const openSupport=()=>tg.openTelegramLink('https://t.me/'+(S.access&&S.access.support||S.ads_support||'@ixcly').replace('@',''));
+const openSupport=()=>openBot('support');
 const shareText=text=>tg.openTelegramLink('https://t.me/share/url?text='+encodeURIComponent(text));
 async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.closed)S=Object.assign(S,m);return m}
 
@@ -394,7 +394,7 @@ ${renderAd(a)}
 <small>Вебхук: новые сигналы и итоги дублируются POST-запросом на ваш сервер.</small>
 <input id="wh" placeholder="https://your-server.com/api/signal" value="${esc(S.webhook||'')}" style="margin-top:8px"><button class="btn s" style="margin-top:6px" onclick="wh()">Сохранить вебхук</button>
 <button class="btn s" style="margin-top:10px" onclick="csv()">📥 Выгрузить историю сигналов (CSV) в чат</button></details>
-<div class="card lst row" onclick="openSupport()"><span>🆘 Поддержка ${esc(a.support||'')}</span><span class="m">›</span></div>
+<div class="card lst row" onclick="openSupport()"><span>🆘 Поддержка через бота</span><span class="m">›</span></div>
 <h2>📄 Документы и поддержка</h2>
 <div class="card lst" onclick="tg.openLink('https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-IXCLY-PRO-10-31')"><div class="row"><span>Политика конфиденциальности</span><span class="m">›</span></div></div>
 <div class="card lst" onclick="tg.openLink('https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31')"><div class="row"><span>Пользовательское соглашение (оферта)</span><span class="m">›</span></div></div>
