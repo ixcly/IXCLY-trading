@@ -63,17 +63,6 @@ input:focus{border-color:var(--ac);box-shadow:0 0 0 3px rgba(139,124,255,.12)}
 .tb b{font-size:10px;letter-spacing:.1px;border-radius:12px;padding:5px 1px}.tb b span{font-size:20px;margin-bottom:2px}.tb b.on{background:rgba(53,224,189,.09);color:var(--up)}
 #toast{background:#17243d;border:1px solid rgba(139,124,255,.5);box-shadow:0 10px 30px #0008;font-weight:700}
 #sheet{background:#0d172b;border-color:var(--ln);box-shadow:0 -18px 50px #0008}
-/* IXCLY MAX 2.0 — graphite / violet premium palette */
-:root{--bg:#07070d;--c:#11111b;--c2:#191827;--ln:rgba(157,132,255,.22);--t:#f4f1ff;--m:#a39bbd;--ac:#9b7cff;--y:#ffd58a}
-body{background:radial-gradient(680px 330px at 100% -6%,rgba(125,82,255,.28),transparent 66%),radial-gradient(480px 260px at -12% 20%,rgba(104,70,190,.13),transparent 64%),linear-gradient(180deg,#0b0a13 0%,#07070d 58%);}
-h1 span{background:linear-gradient(100deg,#c0a7ff 5%,#8b6cff 88%);-webkit-background-clip:text;background-clip:text;color:transparent}
-.btn{background:linear-gradient(105deg,#7654e8,#aa83ff);color:#fff;box-shadow:0 7px 20px rgba(130,91,240,.22)}
-.btn.s{background:rgba(31,27,48,.94);border-color:rgba(157,132,255,.24);color:#eee9ff}
-.fb{background:rgba(25,22,39,.92);border-color:rgba(157,132,255,.2)}
-.fb.on{background:linear-gradient(130deg,#7654e8,#a887ff);color:#fff;border-color:transparent;box-shadow:0 6px 18px rgba(130,91,240,.2)}
-.tb b.on{background:rgba(155,124,255,.13);color:#bca8ff}
-.stk{background:linear-gradient(#0b0a13 72%,rgba(11,10,19,.88))}
-#toast{border-color:rgba(157,132,255,.58)}
 /* Large, unmistakable advertising placement — never inside the search field */
 .ad-hero{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:11px;padding:17px;margin:12px 0 16px;border-radius:20px;border:1px solid rgba(139,124,255,.52);background:radial-gradient(260px 140px at 100% 0%,rgba(143,116,255,.32),transparent 72%),linear-gradient(135deg,#182344 0%,#111b35 52%,#102d38 100%);box-shadow:0 12px 32px rgba(49,38,130,.2)}
 .ad-hero:after{content:"";position:absolute;width:150px;height:150px;right:-62px;bottom:-90px;border:1px solid rgba(92,232,212,.25);border-radius:50%;box-shadow:0 0 0 18px rgba(92,232,212,.035),0 0 0 38px rgba(92,232,212,.025);pointer-events:none}
@@ -145,7 +134,7 @@ tg.BackButton.onClick(()=>{const p=STACK.pop();if(p)go(p[0],p[1],true)});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPoll()});
 const botUser=()=>(S.bot||'').replace('@','');
 const openBot=cmd=>tg.openTelegramLink(`https://t.me/${botUser()}?start=${cmd}`);
-const openSupport=()=>openBot('support');
+const openSupport=()=>tg.openTelegramLink('https://t.me/'+(S.access&&S.access.support||S.ads_support||'@ixcly').replace('@',''));
 const shareText=text=>tg.openTelegramLink('https://t.me/share/url?text='+encodeURIComponent(text));
 async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.closed)S=Object.assign(S,m);return m}
 
@@ -166,17 +155,11 @@ function openAd(){if(!ACTIVE_AD_URL)return;try{tg.openLink(ACTIVE_AD_URL)}catch(
 
 /* ---------- Экран оплаты и подписка ---------- */
 function planCards(plans){
-    const hasOffer=(plans||[]).some(p=>Number(p.discount_pct)>0);
-    const label=(plans||[]).find(p=>p.offer_label)?.offer_label||'';
-    const until=(plans||[]).find(p=>Number(p.offer_until)>0)?.offer_until||0;
-    const hours=until?Math.max(1,Math.ceil((until-Date.now()/1000)/3600)):0;
-    return `${hasOffer?`<div class="card" style="border-color:var(--gold,#e8b84b);margin-bottom:10px"><b>🎁 ${esc(label||'Персональная скидка')}</b><br><small>Действует ещё ${hours>=24?Math.ceil(hours/24)+' дн.':hours+' ч.'}. Цена зафиксируется при создании счёта.</small></div>`:''}
-    <div class="g">${(plans||[]).map(p=>`
+    return `<div class="g">${plans.map(p=>`
         <div class="card" style="text-align:center; cursor:pointer;" onclick="confirmBuy(${p.days}, ${p.stars})">
             <b>${esc(p.title)}</b>
-            ${Number(p.discount_pct)>0?`<small style="display:block;text-decoration:line-through;opacity:.65;margin-top:5px">${p.original_stars}⭐</small><span class="pill" style="display:inline-block;margin-top:3px">−${p.discount_pct}%</span>`:''}
             <h2 class="num" style="margin:6px 0 2px">${p.stars}⭐</h2>
-            <small>${p.days} дн.${p.days===90?' · ≈266⭐/мес':p.days===365?' · ≈208⭐/мес':''}</small>
+            <small>${p.days} дн.</small>
         </div>
     `).join('')}</div>`
 }
@@ -254,7 +237,7 @@ const b=x=>`<div class="fb ${SF==x[0]?'on':''}" onclick="P.signals('${x[0]}')">$
 const rf=j.refresh||{};const liq=await api('liquidations',{},1,true);const intel=await api('intel',{},1,true);const liqItems=(liq.items||[]).slice(-8).reverse();
 V().innerHTML=`<h1>Актуальные <span>сигналы</span></h1>
 ${renderAd(S.access)}
-${intel&&!intel.error?`<div class="card"><div class="row"><b>🧠 Signal Intelligence</b><span class="pill">IXCLY MAX 2.0</span></div><div class="lv"><span>Режим рынка</span><b>${esc(intel.regime||'Нет данных')}</b></div>${(intel.heatmap||[]).length?`<div class="section-kicker">Движение монет</div>${(intel.heatmap||[]).slice(0,5).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':(Number(x.change_pct)>0?'+':'')+Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}`:''}</div>`:''}
+${intel&&!intel.error?`<div class="card"><div class="row"><b>🧠 Signal Intelligence 2.0</b><small>RAM ${intel.rss_mb==null?'—':intel.rss_mb+' MB'} · peak ${intel.peak_rss_mb==null?'—':intel.peak_rss_mb+' MB'}</small></div><div class="lv"><span>Режим рынка</span><b>${esc(intel.regime||'—')}</b></div><div class="lv"><span>Signal Memory</span><b>${intel.memory&&intel.memory.trades?`${intel.memory.win_rate}% · ${intel.memory.trades} сделок`:'накапливаем статистику'}</b></div><div class="lv"><span>Adaptive Scanner</span><b>${esc(intel.adaptive?.mode||'balanced')} · порог ${intel.adaptive?.threshold??'—'}</b></div><div class="lv"><span>Риск новостей</span><b>${esc(intel.news_risk?.severity||'low')} · ${intel.news_risk?.critical_score??0}</b></div><div class="lv"><span>Market Panic</span><b>${esc(intel.market_panic?.level||'normal')} · ${intel.market_panic?.score??0}/100</b></div>${(intel.ranking||[]).slice(0,5).map(x=>`<div class="lv"><span>#${x.rank} ${esc(x.coin)} · ${esc(x.direction)}</span><b class="num">${Number(x.score).toFixed(1)} балла</b></div>`).join('')}${(intel.ranking||[]).length?`<details style="margin-top:8px"><summary class="m">Показать полный рейтинг · ${intel.ranking.length} монет</summary>${intel.ranking.slice(5).map(x=>`<div class="lv"><span>#${x.rank} ${esc(x.coin)} · ${esc(x.direction)}</span><b class="num">${Number(x.score).toFixed(1)}</b></div>`).join('')}</details>`:''}${(intel.heatmap||[]).slice(0,3).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}</div>`:''}
 ${liqItems.length?`<div class="card"><div class="row"><b>💥 Ликвидации за последний час</b><small>Binance Futures</small></div>${liqItems.map(x=>`<div class="lv"><span>${esc(x.coin)} · ${x.side==='LONG'?'ликвидация лонгов':'ликвидация шортов'}</span><b class="num">$${Number(x.notional).toLocaleString('en',{maximumFractionDigits:0})}</b></div>`).join('')}</div>`:''}
 <div class="section-kicker">Быстрый поиск рынка</div><div class="search-wrap"><span aria-hidden="true">⌕</span><input id="q" placeholder="Найти монету · BTC, SOL…" autocapitalize="characters" onkeydown="if(event.key=='Enter')sq()"><button class="btn" onclick="sq()">Найти</button></div>
 <button id="rf" class="btn s" onclick="refreshAll()" ${rf.running?'disabled':''}>${rf.running?`⏳ Обновляю ${rf.done}/${rf.total}`:'🔄 Обновить все данные'}</button>
@@ -277,7 +260,11 @@ return `<div class="row"><h1>${r.coin} ${side(r.side)}</h1><b style="color:${ok?
 ${r.img?`<div class="card" style="padding:6px"><img class="ch" src="${r.img}"></div>`:''}
 <div class="card"><div class="row"><small>${esc(r.type)} · ${esc(r.regime)}</small><b class="num">Conf ${r.strength}%</b></div><div class="bar" style="margin:8px 0"><i style="width:${r.strength}%"></i></div>
 <div class="g" style="gap:6px">${['1d','4h','1h','15m'].filter(t=>lp[t]!=null).map(t=>`<div class="pill" style="text-align:center">${t}: <b class="${lp[t]>=50?'up':'dn'}">${lp[t]}%</b> лонг</div>`).join('')}</div>
-<small style="display:block;margin-top:6px">RSI 4h ${r.rsi} · ADX ${r.adx} · 📰 ${esc(r.news_status)} · 🌍 BTC ${esc(r.btc_txt)}${r.fng!=null?' · F&G '+r.fng:''}</small>
+<small style="display:block;margin-top:6px">MTF ${esc(r.tf_consensus||'—')} · RSI 4h ${r.rsi} · ADX ${r.adx} · 📰 ${esc(r.news_status)} · 🌍 BTC ${esc(r.btc_txt)}${r.fng!=null?' · F&G '+r.fng:''}</small>
+<small style="display:block;margin-top:5px">VWAP ${r.indicators?.vwap_side==='above'?'выше':'ниже'} · OBV ${r.indicators?.obv_trend==='inflow'?'приток':'отток'} · ATR ${r.indicators?.atr_pct??'—'}%</small>
+${r.funding_rate!=null||r.oi_change_pct!=null?`<small style="display:block;margin-top:4px">Funding ${r.funding_rate==null?'—':(Number(r.funding_rate)*100).toFixed(4)+'%'} · OI ${r.oi_change_pct==null?'—':(Number(r.oi_change_pct)>0?'+':'')+r.oi_change_pct+'%'}</small>`:''}
+${r.breakout?.state&&r.breakout.state!=='range'?`<small style="display:block;margin-top:4px" class="${String(r.breakout.state).startsWith('fake_')?'dn':'up'}">Пробой: ${esc(r.breakout.state)}</small>`:''}
+${r.anti_fomo?.penalty?`<small class="dn" style="display:block">⚠ Anti-FOMO: ${esc(r.anti_fomo.reason||'цена растянута')}</small>`:''}
 ${r.fake_breakout?'<small class="dn" style="display:block">⚠ Ложный пробой (тонкий объём)</small>':''}${r.corr?`<small class="dn" style="display:block">⚠ ${esc(r.corr)}</small>`:''}</div>
 <div class="card"><div class="lv"><span>📥 Вход (лимит)</span><b class="num">${f(r.entry)}</b></div>
 ${(!r.position||r.waiting_entry)?`<label class="m" for="customEntry">Ваша цена входа на бирже</label>
@@ -357,53 +344,10 @@ function paperPanel(p){
  <small class="m" style="display:block;margin-top:10px">Paper Trading использует доступные котировки и модельные комиссии. Результаты не равны фактическому исполнению на бирже.</small></div>`;
 }
 
-function paperAnalyticsPanel(a){
- if(!a||a.error)return '';const pf=a.profit_factor==null?'—':a.profit_factor;const curve=a.equity_curve||[];const mx=Math.max(1,...curve.map(Number));
- return `<div class="card"><div class="row"><b>📊 Paper Analytics</b><span class="pill">${a.trades||0} сделок</span></div>
- <div class="g"><div class="card"><small>Win Rate</small><h2 class="num">${a.win_rate||0}%</h2></div><div class="card"><small>Net PnL</small><h2 class="num ${(a.net_pnl||0)>=0?'up':'dn'}">${(a.net_pnl||0)>=0?'+':''}${Number(a.net_pnl||0).toFixed(2)}</h2></div><div class="card"><small>Profit Factor</small><h2 class="num">${pf}</h2></div><div class="card"><small>Max Drawdown</small><h2 class="num dn">${a.max_drawdown_pct||0}%</h2></div></div>
- <small class="m">${a.wins||0} побед · ${a.losses||0} убытков · ${a.breakeven||0} около нуля · средний PnL ${Number(a.avg_pnl||0).toFixed(2)} USDT</small>
- ${curve.length>1?`<div class="section-kicker">Кривая виртуального капитала</div><div class="eq">${curve.map(v=>`<i style="height:${Math.max(4,Number(v)/mx*100)}%;background:var(--ac)"></i>`).join('')}</div>`:''}
- <small class="m">Расчёт по закрытым Paper-сделкам активного счёта. Модельное исполнение не гарантирует биржевые результаты.</small></div>`;
-}
-
-/* ---------- IXCLY MAX control centre ---------- */
-function maxControlPanel(d){
- const p=d.performance||{},ss=d.system_signals||{},sc=d.scanner||{},mon=d.monitor||{},dd=d.dedupe||{},alerts=d.alerts||[],moves=sc.movers||[];
- const age=v=>v==null?'—':v<60?`${v} сек.`:v<3600?`${Math.floor(v/60)} мин.`:`${(v/3600).toFixed(1)} ч.`;
- return `<div class="card" style="border-color:rgba(155,124,255,.42)">
- <div class="row"><b>⚡ IXCLY MAX CONTROL</b><span class="pill">8 модулей</span></div>
- <div class="g" style="margin-top:10px">
- <div class="card"><small>Signal Performance</small><h2 class="num">${p.win_rate||0}%</h2><small>${p.wins||0}W · ${p.losses||0}L · ${Number(p.net_pnl_pct||0)>=0?'+':''}${p.net_pnl_pct||0}%</small></div>
- <div class="card"><small>Система сигналов</small><h2 class="num">${ss.win_rate||0}%</h2><small>${ss.wins||0}W · ${ss.losses||0}L</small></div>
- </div>
- <div class="lv"><span>Market Scanner 2.0</span><b>${sc.active_signals||0} активных · ${sc.live_coins||0} монет</b></div>
- <div class="lv"><span>Anti-Duplicate</span><b class="up">${dd.enabled?'Включён':'Выключен'}</b></div>
- <div class="lv"><span>Защита от повторов / cooldown</span><b>${dd.active_signal_locks||0} блокировок · ${dd.recent_cooldowns||0} пауз</b></div>
- ${moves.length?`<div class="section-kicker">Рынок · самые активные</div>${moves.slice(0,5).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':(Number(x.change_pct)>0?'+':'')+Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}`:''}
- <div class="section-kicker">Smart Risk Manager</div><div class="g"><input id="mxEntry" type="number" step="any" placeholder="Цена входа"><input id="mxStop" type="number" step="any" placeholder="Stop Loss"></div>
- <div class="g" style="margin-top:7px"><select id="mxSide"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select><button class="btn s" onclick="mxCalcRisk()">Рассчитать риск</button></div><div id="mxRiskResult"></div>
- <div class="section-kicker">Smart Alerts · ${alerts.length}/20</div>
- ${alerts.length?alerts.map((a,i)=>`<div class="lv"><span>${esc(a.coin)} ${esc(a.op)} ${esc(a.price)}</span><button class="pill" onclick="mxDeleteAlert(${i})">Удалить</button></div>`).join(''):'<small class="m">Активных ценовых алертов нет. Создайте их в карточке монеты.</small>'}
- <div class="section-kicker">API Monitor · Backup Monitor</div>
- <div class="lv"><span>Работа сервиса</span><b>${age(mon.uptime_seconds)}</b></div>
- <div class="lv"><span>Последнее сканирование</span><b>${age(mon.scan_age_seconds)}</b></div>
- <div class="lv"><span>Новостной движок</span><b>${esc(mon.news_engine||'нет данных')}</b></div>
- <div class="lv"><span>Telegram backup</span><b>${esc(mon.backup_status||'нет данных')}</b></div>
- <div class="lv"><span>Возраст backup</span><b>${age(mon.backup_age_seconds)}</b></div>
- <div class="lv"><span>Бэкап ожидает отправки</span><b>${mon.backup_pending?'Да':'Нет'}</b></div>
- <button class="btn s" style="margin-top:10px" onclick="mxRefresh()">↻ Обновить панель</button>
- </div>`;
-}
-async function mxCalcRisk(){const entry=$('#mxEntry').value,stop=$('#mxStop').value,side=$('#mxSide').value;if(!entry||!stop)return toast('Введите вход и Stop Loss');const j=await api('risk_calc',{entry,stop,side});const el=$('#mxRiskResult');if(!el)return;if(j.error){el.innerHTML=`<small class="dn">${esc(j.error)}</small>`;return;}el.innerHTML=`<div class="card"><div class="row"><b>Рекомендуемый объём</b><b class="num">${Number(j.position_usdt).toFixed(2)} USDT</b></div><div class="lv"><span>Количество</span><b>${j.quantity}</b></div><div class="lv"><span>Риск деньгами</span><b>${j.risk_usdt} USDT (${j.risk_pct}%)</b></div><div class="lv"><span>Дистанция до SL</span><b>${j.stop_distance_pct}%</b></div>${j.warning?'<small class="dn">Риск уменьшен с учётом лимита общего открытого риска.</small>':''}</div>`;}
-async function mxDeleteAlert(i){const j=await api('alert_del',{idx:i});if(!j.error){toast(j.msg||'Алерт удалён');mxRefresh()}}
-async function mxRefresh(){const d=await api('max_dashboard',{},1,true);if(!d.error){const el=$('#max-control');if(el)el.innerHTML=maxControlPanel(d);}}
-
 /* ---------- Портфель ---------- */
-P.portfolio=async()=>{const [j,paper,max,paperStats]=await Promise.all([api('portfolio'),api('paper_get'),api('max_dashboard',{},1,true),api('paper_analytics',{},1,true)]);if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
+P.portfolio=async()=>{const [j,paper]=await Promise.all([api('portfolio'),api('paper_get')]);if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
 V().innerHTML=`<h1>Мой <span>портфель</span></h1>
 ${paper&&!paper.error?paperPanel(paper):''}
-${paperStats&&!paperStats.error?paperAnalyticsPanel(paperStats):''}
-<div id="max-control">${max&&!max.error?maxControlPanel(max):''}</div>
 ${renderAd(S.access)}
 <div class="g"><div class="card"><small>💰 Депозит</small><h2 class="num" style="margin:4px 0 8px">$${s.deposit}</h2><input id="dep" type="number" inputmode="decimal" placeholder="Новый депозит"><button class="btn s" style="margin-top:6px" onclick="setv('set_deposit','dep')">Сохранить</button></div>
 <div class="card"><small>📉 Риск на сделку</small><h2 class="num" style="margin:4px 0 8px">${s.risk_pct}%</h2><input id="rsk" type="number" inputmode="decimal" placeholder="0.1 – 10"><button class="btn s" style="margin-top:6px" onclick="setv('set_risk','rsk')">Сохранить</button></div></div>
@@ -441,7 +385,7 @@ function stl(k){const L=(window.ST.lists||{})[k]||[];$('#sl').innerHTML=`<h2>${S
 const NT=[['signals','🔥 Новые сигналы'],['pos_updates','📊 Сопровождение и итоги'],['news','📰 Новости'],['anomalies','🚨 Аномалии объёма'],['briefing','☀️ Утренний брифинг'],['liquidations','💥 Ликвидации']];
 P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=S.notif||{};const a=S.access||{};
 V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
-<div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг получит −20% на 3 дня, а после его первой оплаты вам +7 дней</div></div>
+<div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг оплатит подписку — вам +7 дней</div></div>
 <div class="card lst" onclick="go('news')"><b>📰 Новости рынка</b><div class="m" style="margin-top:4px">${esc((S.news||{}).title_ru||'Разбор последней новости')}</div></div>
 ${renderAd(a)}
 <h2>🔔 Уведомления в Telegram</h2>${NT.map(x=>`<div class="card row"><span>${x[1]}</span><div class="sw ${n[x[0]]?'on':''}" onclick="tgl('${x[0]}')"></div></div>`).join('')}
@@ -455,7 +399,7 @@ ${renderAd(a)}
 <div class="card lst" onclick="tg.openLink('https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31')"><div class="row"><span>Пользовательское соглашение (оферта)</span><span class="m">›</span></div></div>
 <div class="card lst" onclick="openSupport()"><div class="row"><span>🆘 Служба поддержки</span><span class="m">›</span></div></div>
 <p class="m" style="margin:14px 0">IXCLY PRO v${S.version}. Криптовалюта — это риск.</p>`};
-async function refShare(){const r=await api('ref_link');if(r.error)return;const t='Попробуй IXCLY PRO: получишь скидку 20% на подписку на первые 3 дня 🎁 Сигналы и сопровождение сделок 🔥';tg.openTelegramLink('https://t.me/share/url?url='+encodeURIComponent(r.link)+'&text='+encodeURIComponent(t))}
+async function refShare(){const r=await api('ref_link');if(r.error)return;const t='Попробуй IXCLY PRO: сигналы и сопровождение сделок 🔥';tg.openTelegramLink('https://t.me/share/url?url='+encodeURIComponent(r.link)+'&text='+encodeURIComponent(t))}
 async function tgl(k){const j=await api('toggle',{key:k});if(!j.error){toast(j.msg);P.more()}}
 async function wh(){const j=await api('webhook',{url:$('#wh').value});if(!j.error)toast(j.msg)}
 async function csv(){const j=await api('csv');if(!j.error)toast(j.msg)}
