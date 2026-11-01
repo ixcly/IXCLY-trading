@@ -179,36 +179,3 @@ def reset_account(store, uid, account_id=None, deposit=None):
     idx = user['accounts'].index(acc)
     user['accounts'][idx] = fresh
     return copy.deepcopy(fresh)
-
-
-def analytics(store, uid, account_id=None):
-    """Bounded performance summary for one Paper account; no market/API calls."""
-    user, acc = _get_account(store, uid, account_id)
-    history = list(acc.get('history') or [])[-MAX_HISTORY_PER_ACCOUNT:]
-    pnls = [float(x.get('pnl', 0.0) or 0.0) for x in history]
-    wins = [x for x in pnls if x > 1e-9]
-    losses = [x for x in pnls if x < -1e-9]
-    gross_profit = sum(wins)
-    gross_loss = -sum(losses)
-    equity = float(acc.get('initial_balance', 0.0))
-    peak = equity
-    max_dd = 0.0
-    curve = [round(equity, 2)]
-    for pnl in pnls:
-        equity += pnl
-        peak = max(peak, equity)
-        if peak > 0:
-            max_dd = max(max_dd, (peak - equity) / peak * 100)
-        curve.append(round(equity, 2))
-    n = len(pnls)
-    return {
-        'account_id': acc.get('id'), 'account_name': acc.get('name'), 'trades': n,
-        'wins': len(wins), 'losses': len(losses),
-        'breakeven': n - len(wins) - len(losses),
-        'win_rate': round(len(wins) / n * 100, 2) if n else 0.0,
-        'net_pnl': round(sum(pnls), 2),
-        'avg_pnl': round(sum(pnls) / n, 2) if n else 0.0,
-        'profit_factor': round(gross_profit / gross_loss, 2) if gross_loss else (None if not gross_profit else '∞'),
-        'max_drawdown_pct': round(max_dd, 2), 'equity_curve': curve[-41:],
-        'history': history[-10:],
-    }
