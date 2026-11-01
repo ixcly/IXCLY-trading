@@ -3274,7 +3274,7 @@ async def scan_once(send=True):
                 await asyncio.sleep(0.15)
 
         await asyncio.gather(*[s1(c) for c in universe])
-        stage1 = sorted(stage1, key=lambda x: x[2], reverse=True)[:30]
+        stage1 = sorted(stage1, key=lambda x: x[2], reverse=True)[:50]
 
         async def s2(item):
             sc, tf2, _ = item
