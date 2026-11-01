@@ -1,0 +1,474 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>IXCLY PRO</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#070a16;--c:#0f1429;--c2:#18203f;--ln:#26305a;--t:#eaf0ff;--m:#8190b8;--up:#2de2c6;--dn:#ff5c8a;--ac:#7b6cff;--y:#ffc46b}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+body{background:radial-gradient(700px 380px at 90% -8%,#2a1f6e 0,transparent 62%),radial-gradient(500px 300px at -10% 30%,#0b3a55 0,transparent 60%),var(--bg);color:var(--t);font:14px/1.4 "Trebuchet MS",system-ui,sans-serif;padding:calc(10px + env(safe-area-inset-top)) 12px calc(88px + env(safe-area-inset-bottom))}
+h1{font:800 21px/1.1 "Trebuchet MS",sans-serif}h1 span{background:linear-gradient(90deg,var(--up),var(--ac));-webkit-background-clip:text;color:transparent}
+h2{font-size:14px;margin:16px 0 8px}small,.m{color:var(--m);font-size:12px}
+.card{background:linear-gradient(160deg,var(--c),#0c1122);border:1px solid var(--ln);border-radius:16px;padding:12px;margin:8px 0}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}.g{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.up{color:var(--up)}.dn{color:var(--dn)}.num{font-family:ui-monospace,Menlo,monospace}
+.btn{border:0;border-radius:13px;padding:12px 14px;font:700 14px "Trebuchet MS",sans-serif;color:#061018;background:linear-gradient(90deg,var(--up),#5ad0ff);width:100%;transition:transform .1s;text-align:center;display:block}
+.btn:active{transform:scale(.97)}.btn.s{background:var(--c2);color:var(--t);border:1px solid var(--ln)}.btn.d{background:rgba(255,92,138,.16);color:var(--dn);border:1px solid #5a2440}
+input{width:100%;background:var(--c2);border:1px solid var(--ln);color:var(--t);border-radius:12px;padding:11px;font-size:15px;outline:0}
+.bar{height:8px;border-radius:9px;background:var(--c2);overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--ac),var(--up));transition:width .4s}
+.tag{display:inline-block;padding:2px 8px;border-radius:7px;font-size:11px;font-weight:700}.tag.L{background:rgba(45,226,198,.15);color:var(--up)}.tag.S{background:rgba(255,92,138,.15);color:var(--dn)}
+.lv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px dashed var(--ln)}.lv:last-child{border:0}
+.sw{width:46px;height:26px;border-radius:99px;background:var(--c2);border:1px solid var(--ln);position:relative;flex:none}.sw:after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--m);transition:.2s}
+.sw.on{background:rgba(45,226,198,.25)}.sw.on:after{left:22px;background:var(--up)}
+.stk{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg) 85%,transparent);padding:6px 0 4px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
+.fb{padding:10px 2px;border-radius:12px;background:var(--c2);border:1px solid var(--ln);color:var(--m);font:700 12.5px "Trebuchet MS",sans-serif;text-align:center;line-height:1.2}
+.fb b{display:block;font-size:17px;color:var(--t);font-family:ui-monospace,Menlo,monospace}
+.fb.on{background:var(--up);color:#061018;border-color:var(--up)}.fb.on b{color:#061018}.fb:active{transform:scale(.95)}
+.sig{display:flex;justify-content:space-between;align-items:center;padding:12px;margin:8px 0;border-radius:14px;background:linear-gradient(160deg,var(--c),#0c1122);border:1px solid var(--ln)}
+.pill{font-size:11px;padding:4px 9px;border-radius:99px;background:var(--c2);color:var(--m);border:1px solid var(--ln)}
+.live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);box-shadow:0 0 8px var(--up);margin-right:5px;animation:pulse 1.6s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.tb{position:fixed;left:0;right:0;bottom:0;display:flex;background:rgba(7,10,22,.95);backdrop-filter:blur(12px);border-top:1px solid var(--ln);padding:6px 2px calc(6px + env(safe-area-inset-bottom))}
+.tb b{flex:1;text-align:center;font-size:10.5px;color:var(--m);padding:5px 0;font-weight:600}.tb b span{display:block;font-size:19px}.tb b.on{color:var(--up)}
+#toast{position:fixed;left:50%;top:calc(12px + env(safe-area-inset-top));transform:translate(-50%,-90px);background:var(--c2);border:1px solid var(--ac);padding:9px 16px;border-radius:12px;transition:.25s;z-index:30;max-width:92%;text-align:center}#toast.on{transform:translate(-50%,0)}
+.ld{display:grid;place-items:center;height:50vh}.ld i{width:34px;height:34px;border-radius:50%;border:3px solid var(--ln);border-top-color:var(--up);animation:r .8s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
+img.ch{width:100%;border-radius:12px;display:block}.lst{cursor:pointer}
+.eq{display:flex;align-items:flex-end;gap:2px;height:70px;margin-top:8px}.eq i{flex:1;border-radius:2px 2px 0 0;min-height:3px}
+#sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);opacity:0;pointer-events:none;transition:.2s;z-index:20}#sheet-bg.on{opacity:1;pointer-events:auto}
+#sheet{position:fixed;left:0;right:0;bottom:0;transform:translateY(105%);transition:.25s;background:var(--c);border-top:1px solid var(--ln);border-radius:20px 20px 0 0;padding:12px 16px calc(16px + env(safe-area-inset-bottom));z-index:21}
+#sheet.on{transform:translateY(0)}.grab{width:40px;height:4px;border-radius:4px;background:var(--ln);margin:0 auto 12px}#sheet h3{font:800 16px "Trebuchet MS",sans-serif}
+details summary{cursor:pointer;color:var(--t);font-weight:700;padding:6px 0}
+
+/* IXCLY MAX visual refresh: premium terminal, mobile-first */
+:root{--bg:#060914;--c:#0d1426;--c2:#131e35;--ln:rgba(139,164,220,.17);--t:#f2f6ff;--m:#91a0bd;--up:#35e0bd;--dn:#ff668d;--ac:#8b7cff;--y:#ffd078}
+html{background:var(--bg);scroll-behavior:smooth}
+body{max-width:760px;margin:0 auto;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:radial-gradient(650px 300px at 100% -5%,rgba(107,82,255,.24),transparent 65%),radial-gradient(500px 260px at -15% 18%,rgba(0,191,190,.13),transparent 62%),linear-gradient(180deg,#080d1b 0%,#060914 55%);letter-spacing:.05px}
+h1{font-size:25px;letter-spacing:-.8px;margin:4px 0 14px;font-weight:850}
+h1 span{background:linear-gradient(100deg,#53ebce 5%,#8c83ff 88%);-webkit-background-clip:text;background-clip:text;color:transparent}
+h2{font-size:14px;font-weight:800;letter-spacing:.15px;margin:20px 2px 9px}
+.card,.sig{background:linear-gradient(145deg,rgba(17,27,49,.97),rgba(10,17,32,.98));border:1px solid var(--ln);border-radius:19px;padding:15px;margin:10px 0;box-shadow:0 10px 28px rgba(0,0,0,.14)}
+.card{backdrop-filter:blur(10px)}
+.row{gap:10px}.m,small{color:var(--m)}
+.btn{min-height:44px;border-radius:14px;background:linear-gradient(105deg,#40e2c2,#67c9f5);box-shadow:0 7px 18px rgba(49,213,194,.12);font-family:inherit;font-weight:800;letter-spacing:.1px}
+.btn.s{background:rgba(25,39,66,.9);box-shadow:none;border:1px solid var(--ln);color:#e6edff}
+.btn.d{background:rgba(255,91,133,.1);border-color:rgba(255,91,133,.3)}
+input{min-height:44px;border-radius:14px;background:#101a30;border-color:rgba(139,164,220,.22);font-family:inherit}
+input:focus{border-color:var(--ac);box-shadow:0 0 0 3px rgba(139,124,255,.12)}
+.pill{border-color:rgba(139,164,220,.18);background:rgba(22,34,57,.9);color:#b6c5e3;padding:5px 9px}
+.fb{border-radius:14px;background:rgba(17,29,51,.88);border-color:var(--ln);padding:11px 4px;font-family:inherit}
+.fb.on{background:linear-gradient(130deg,#35dfbd,#69c8ef);color:#07131c;border-color:transparent;box-shadow:0 6px 18px rgba(53,224,189,.13)}
+.fb b{margin-top:5px;font-size:18px}.stk{position:sticky;top:0;padding:8px 0 7px;background:linear-gradient(#080d1b 72%,rgba(8,13,27,.88));backdrop-filter:blur(12px)}
+.sig{padding:14px;border-radius:16px;transition:transform .15s,border-color .15s}.sig:active,.lst:active{transform:scale(.985)}
+.lv{border-bottom-color:rgba(139,164,220,.12);padding:9px 0;gap:12px}.bar{height:7px;background:#1b2944}.bar i{border-radius:8px}
+.tb{max-width:760px;margin:0 auto;background:rgba(7,12,25,.94);border-top:1px solid rgba(139,164,220,.18);padding:8px 4px calc(8px + env(safe-area-inset-bottom));box-shadow:0 -12px 35px rgba(0,0,0,.25)}
+.tb b{font-size:10px;letter-spacing:.1px;border-radius:12px;padding:5px 1px}.tb b span{font-size:20px;margin-bottom:2px}.tb b.on{background:rgba(53,224,189,.09);color:var(--up)}
+#toast{background:#17243d;border:1px solid rgba(139,124,255,.5);box-shadow:0 10px 30px #0008;font-weight:700}
+#sheet{background:#0d172b;border-color:var(--ln);box-shadow:0 -18px 50px #0008}
+/* IXCLY MAX 2.0 — graphite / violet premium palette */
+:root{--bg:#07070d;--c:#11111b;--c2:#191827;--ln:rgba(157,132,255,.22);--t:#f4f1ff;--m:#a39bbd;--ac:#9b7cff;--y:#ffd58a}
+body{background:radial-gradient(680px 330px at 100% -6%,rgba(125,82,255,.28),transparent 66%),radial-gradient(480px 260px at -12% 20%,rgba(104,70,190,.13),transparent 64%),linear-gradient(180deg,#0b0a13 0%,#07070d 58%);}
+h1 span{background:linear-gradient(100deg,#c0a7ff 5%,#8b6cff 88%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn{background:linear-gradient(105deg,#7654e8,#aa83ff);color:#fff;box-shadow:0 7px 20px rgba(130,91,240,.22)}
+.btn.s{background:rgba(31,27,48,.94);border-color:rgba(157,132,255,.24);color:#eee9ff}
+.fb{background:rgba(25,22,39,.92);border-color:rgba(157,132,255,.2)}
+.fb.on{background:linear-gradient(130deg,#7654e8,#a887ff);color:#fff;border-color:transparent;box-shadow:0 6px 18px rgba(130,91,240,.2)}
+.tb b.on{background:rgba(155,124,255,.13);color:#bca8ff}
+.stk{background:linear-gradient(#0b0a13 72%,rgba(11,10,19,.88))}
+#toast{border-color:rgba(157,132,255,.58)}
+/* Large, unmistakable advertising placement — never inside the search field */
+.ad-hero{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:11px;padding:17px;margin:12px 0 16px;border-radius:20px;border:1px solid rgba(139,124,255,.52);background:radial-gradient(260px 140px at 100% 0%,rgba(143,116,255,.32),transparent 72%),linear-gradient(135deg,#182344 0%,#111b35 52%,#102d38 100%);box-shadow:0 12px 32px rgba(49,38,130,.2)}
+.ad-hero:after{content:"";position:absolute;width:150px;height:150px;right:-62px;bottom:-90px;border:1px solid rgba(92,232,212,.25);border-radius:50%;box-shadow:0 0 0 18px rgba(92,232,212,.035),0 0 0 38px rgba(92,232,212,.025);pointer-events:none}
+.ad-top{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}
+.ad-label{display:inline-flex;align-items:center;gap:6px;color:#c4baff;background:rgba(139,124,255,.17);border:1px solid rgba(171,157,255,.25);border-radius:99px;padding:5px 9px;font-size:10px;font-weight:900;letter-spacing:1px;text-transform:uppercase}
+.ad-sponsored{font-size:10px;color:#a8b5d2;letter-spacing:.3px}
+.ad-copy{position:relative;z-index:1;font-size:15px;line-height:1.45;font-weight:750;color:#f2f5ff;overflow-wrap:anywhere}
+.ad-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative;z-index:1}
+.ad-foot small{font-size:11px;color:#aebbd7}
+.ad-cta{width:auto;min-width:125px;min-height:38px;padding:9px 14px;border-radius:12px;background:linear-gradient(100deg,#a99bff,#64d8d0);color:#091326;font-size:12px;font-weight:900;box-shadow:none}
+.ad-hero .ad-icon{font-size:23px;line-height:1}
+.search-wrap{display:flex;gap:8px;align-items:center;margin:14px 0 12px;padding:8px;border-radius:17px;background:rgba(15,25,45,.9);border:1px solid var(--ln)}
+.search-wrap input{border:0;background:transparent;box-shadow:none;padding:8px 7px;min-width:0}
+.search-wrap .btn{width:88px;min-height:40px;padding:8px}
+.section-kicker{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#8495b9;font-weight:900;margin:16px 2px 7px}
+@media(min-width:600px){body{padding-left:20px;padding-right:20px}.ad-hero{padding:20px}.g{gap:10px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style></head><body>
+<div id="toast"></div>
+<div id="sheet-bg" onclick="closeSheet()"></div>
+<div id="sheet"><div class="grab"></div><h3 id="sh-title"></h3><small id="sh-sub"></small>
+<input id="sh-val" type="text" inputmode="decimal" placeholder="Цена" style="margin-top:10px">
+<div class="g" style="margin-top:12px"><button class="btn s" onclick="closeSheet()">Отмена</button><button class="btn" onclick="submitSheet()">Создать алерт</button></div></div>
+<div id="v"><div class="ld"><i></i></div></div>
+<div class="tb">
+<b data-t="signals" onclick="tab('signals')"><span>🔥</span>Сигналы</b>
+<b data-t="portfolio" onclick="tab('portfolio')"><span>💼</span>Портфель</b>
+<b data-t="analytics" onclick="tab('analytics')"><span>📊</span>Аналитика</b>
+<b data-t="sub" onclick="tab('sub')"><span>💎</span>Подписка</b>
+<b data-t="more" onclick="tab('more')"><span>⚙️</span>Ещё</b></div>
+<script>
+const tg=Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#070a16');tg.setBackgroundColor('#070a16')}catch(e){}
+const $=s=>document.querySelector(s),V=()=>$('#v');
+const hap=()=>{try{tg.HapticFeedback.impactOccurred('light')}catch(e){}};
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const f=p=>{if(p==null)return'—';p=+p;const a=Math.abs(p);return a>=1000?p.toLocaleString('en',{maximumFractionDigits:2}):a>=1?p.toFixed(4):a>=.01?p.toFixed(5):p.toFixed(8)};
+const pc=(p,e,s='LONG')=>(((s==='SHORT'?-1:1)*(p-e)/e)*100).toFixed(1)+'%';
+const side=s=>`<span class="tag ${s=='LONG'?'L':'S'}">${s}</span>`;
+const TI={'Краткосрочный':'⚡','Среднесрочный':'⏳','Долгосрочный':'🛡'};
+const q=new URLSearchParams(location.search);
+const P={};let S={},CUR=null,STACK=[],SF='Все',CUR_COIN=null,PT=null,SHEET_COIN=null;
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
+async function api(a,p,tries=2,silent=false){
+  for(let i=0;i<tries;i++){
+    try{
+      const r=await fetch('/api/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({},p,{initData:tg.initData}))});
+      if(r.status>=500) throw new Error('http '+r.status);
+      const j=await r.json();
+      if(j.error&&!j.closed&&!silent) toast('⚠ '+j.error);
+      return j;
+    }catch(e){
+      if(i===tries-1){if(!silent)toast('Нет связи с сервером');return{error:1,net:1}}
+      await new Promise(res=>setTimeout(res,1200));
+    }
+  }
+  return{error:1};
+}
+function stopPoll(){clearInterval(PT);PT=null}
+function stopAll(){stopPoll();closeSheet()}
+function setTab(p){const map={coin:'signals',analytics:'analytics',sub:'sub',news:'more',paywall:'sub'};const t=map[p]||p;document.querySelectorAll('.tb b').forEach(b=>b.classList.toggle('on',b.dataset.t===t))}
+async function go(p,a,back){
+  if(!back&&CUR)STACK.push(CUR);CUR=[p,a];hap();setTab(p);
+  if(STACK.length)tg.BackButton.show();else tg.BackButton.hide();
+  if(p!=='coin')stopPoll();scrollTo(0,0);V().innerHTML='<div class="ld"><i></i></div>';
+  await P[p](a);
+}
+function tab(t){stopAll();STACK=[];CUR=null;go(t)}
+tg.BackButton.onClick(()=>{const p=STACK.pop();if(p)go(p[0],p[1],true)});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPoll()});
+const botUser=()=>(S.bot||'').replace('@','');
+const openBot=cmd=>tg.openTelegramLink(`https://t.me/${botUser()}?start=${cmd}`);
+const openSupport=()=>openBot('support');
+const shareText=text=>tg.openTelegramLink('https://t.me/share/url?text='+encodeURIComponent(text));
+async function refreshMe(){const m=await api('me',{},2,true);if(!m.error||m.closed)S=Object.assign(S,m);return m}
+
+/* --- РЕКЛАМА --- */
+let ACTIVE_AD_URL='';
+function renderAd(a){
+    if(!a || !String(a.ad||'').trim()) return '';
+    let safeUrl='';
+    try{const u=new URL(String(a.ad_url||''));if(u.protocol==='https:'||u.protocol==='http:')safeUrl=u.href}catch(e){}
+    ACTIVE_AD_URL=safeUrl;
+    return `<section class="ad-hero" aria-label="Реклама">
+      <div class="ad-top"><span class="ad-label"><span class="ad-icon">✦</span> Спецпредложение</span><span class="ad-sponsored">РЕКЛАМА</span></div>
+      <div class="ad-copy">${esc(a.ad)}</div>
+      <div class="ad-foot"><small>Партнёр IXCLY</small>${safeUrl?'<button class="btn ad-cta" onclick="openAd()">Подробнее&nbsp; ↗</button>':''}</div>
+    </section>`;
+}
+function openAd(){if(!ACTIVE_AD_URL)return;try{tg.openLink(ACTIVE_AD_URL)}catch(e){location.href=ACTIVE_AD_URL}}
+
+/* ---------- Экран оплаты и подписка ---------- */
+function planCards(plans){
+    const hasOffer=(plans||[]).some(p=>Number(p.discount_pct)>0);
+    const label=(plans||[]).find(p=>p.offer_label)?.offer_label||'';
+    const until=(plans||[]).find(p=>Number(p.offer_until)>0)?.offer_until||0;
+    const hours=until?Math.max(1,Math.ceil((until-Date.now()/1000)/3600)):0;
+    return `${hasOffer?`<div class="card" style="border-color:var(--gold,#e8b84b);margin-bottom:10px"><b>🎁 ${esc(label||'Персональная скидка')}</b><br><small>Действует ещё ${hours>=24?Math.ceil(hours/24)+' дн.':hours+' ч.'}. Цена зафиксируется при создании счёта.</small></div>`:''}
+    <div class="g">${(plans||[]).map(p=>`
+        <div class="card" style="text-align:center; cursor:pointer;" onclick="confirmBuy(${p.days}, ${p.stars})">
+            <b>${esc(p.title)}</b>
+            ${Number(p.discount_pct)>0?`<small style="display:block;text-decoration:line-through;opacity:.65;margin-top:5px">${p.original_stars}⭐</small><span class="pill" style="display:inline-block;margin-top:3px">−${p.discount_pct}%</span>`:''}
+            <h2 class="num" style="margin:6px 0 2px">${p.stars}⭐</h2>
+            <small>${p.days} дн.${p.days===90?' · ≈266⭐/мес':p.days===365?' · ≈208⭐/мес':''}</small>
+        </div>
+    `).join('')}</div>`
+}
+function confirmBuy(days, price) {
+    tg.showPopup({
+        title: 'Подтверждение оплаты',
+        message: `Вы уверены, что хотите оформить подписку на ${days} дней за ${price} ⭐?`,
+        buttons: [
+            {id: 'cancel', type: 'cancel', text: 'Отмена'},
+            {id: 'buy', type: 'default', text: 'Оплатить ⭐'}
+        ]
+    }, function(buttonId) {
+        if (buttonId === 'buy') {
+            processPayment(days);
+        }
+    });
+}
+async function processPayment(days) {
+    tg.showProgress();
+    try {
+        const res = await fetch('/api/create_stars_invoice', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ days: days, initData: tg.initData })
+        });
+        const data = await res.json();
+        tg.hideProgress();
+        if (data.error) { toast('⚠ ' + data.error); return; }
+        tg.openInvoice(data.link, function(status) {
+            if (status === 'paid') {
+                toast('✅ Оплата прошла успешно!');
+                setTimeout(() => P.sub(), 1500);
+            } else if (status === 'cancelled') { toast('Оплата отменена'); } 
+            else { toast('Ошибка оплаты'); }
+        });
+    } catch (e) {
+        tg.hideProgress();
+        toast('Ошибка сети');
+    }
+}
+function promoBox(){return `<div class="row" style="margin-top:6px"><input id="pc" placeholder="Промокод" autocapitalize="characters"><button class="btn" style="width:110px" onclick="promoApply()">Активировать</button></div>`}
+async function promoApply(){const code=($('#pc').value||'').trim();if(!code)return toast('Введите промокод');const j=await api('promo_apply',{code});if(j.msg){toast(j.msg);const m=await refreshMe();if(!m.closed&&!m.error)go('signals')}}
+
+P.paywall=()=>{const a=S.access||{};
+V().innerHTML=`<h1>IXCLY <span>PRO</span></h1>
+<div class="card"><b style="font-size:16px">🔒 Доступ закрыт</b><br><small>Пробный период закончился или не активирован. Сигналы, сопровождение сделок и аналитика доступны по подписке.</small></div>
+${renderAd(a)}
+${planCards(a.plans||[])}
+<h2>🎟 Промокод</h2>${promoBox()}
+<button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
+
+P.sub=async()=>{await refreshMe();const a=S.access||{};
+if(!a.ok&&!a.free){return P.paywall()}
+V().innerHTML=`<h1>Моя <span>подписка</span></h1>${a.status==='Навсегда'?'<div class="card" style="text-align:center;border-color:var(--up)"><b>♾ Доступ навсегда</b><br><small>Спасибо за поддержку проекта!</small></div>':''}
+<div class="card"><div class="row"><small>Статус</small><b>${esc(a.status)}</b></div>
+<div class="row"><small>Осталось</small><b class="num">${a.free?'∞':(a.days_left+' дн.')}</b></div>
+${a.free?'':`<div class="bar" style="margin-top:8px"><i style="width:${Math.min(100,a.days_left/30*100)}%"></i></div>`}</div>
+${renderAd(a)}
+<h2>Тарифы</h2>${planCards(a.plans||[])}
+<h2>🎟 Промокод</h2>${promoBox()}
+<button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
+
+/* ---------- Сигналы ---------- */
+function sigRow(x){const p=x.live_price;const quality=x.quality_score!=null?`<span class="pill">Q ${Number(x.quality_score).toFixed(0)} · ${esc(x.quality_label||'—')}</span>`:'';const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
+return `<div class="sig lst" onclick="go('coin','${x.coin}')"><div style="flex:1"><div class="row" style="justify-content:flex-start;gap:8px"><b>${x.coin}</b>${side(x.side)}<span class="pill">${TI[x.type]||''} ${x.strength||0}%</span>${quality}</div>
+<small class="num">Вход ${f(x.entry)} · TP1 ${f(x.tp1)} · SL ${f(x.sl1)}</small><div>${live}</div></div><span class="m" style="font-size:20px">›</span></div>`}
+function sq(){const v=($('#q').value||'').toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/USDT$/,'');if(v)go('coin',v)}
+
+P.signals=async(flt)=>{if(flt)SF=flt;const j=await api('signals',{flt:SF});
+if(j.closed)return P.paywall();
+if(j.error){V().innerHTML=`<div class="card">${esc(j.error)}</div><button class="btn s" onclick="go('signals')">Повторить</button>`;return}
+const c=j.counts||{};const T=[['Все','📋','Все'],['Краткосрочный','⚡','Кратко'],['Среднесрочный','⏳','Средне'],['Долгосрочный','🛡','Долго']];
+const M=[['mode:aggressive','🟢','Агрессивн.'],['mode:balanced','🟡','Баланс'],['mode:conservative','🔴','Консерв.']];
+const b=x=>`<div class="fb ${SF==x[0]?'on':''}" onclick="P.signals('${x[0]}')">${x[1]} ${x[2]}<b>${c[x[0]]||0}</b></div>`;
+const rf=j.refresh||{};const liq=await api('liquidations',{},1,true);const intel=await api('intel',{},1,true);const liqItems=(liq.items||[]).slice(-8).reverse();
+V().innerHTML=`<h1>Актуальные <span>сигналы</span></h1>
+${renderAd(S.access)}
+${intel&&!intel.error?`<div class="card"><div class="row"><b>🧠 Signal Intelligence</b><span class="pill">IXCLY MAX 2.0</span></div><div class="lv"><span>Режим рынка</span><b>${esc(intel.regime||'Нет данных')}</b></div>${(intel.heatmap||[]).length?`<div class="section-kicker">Движение монет</div>${(intel.heatmap||[]).slice(0,5).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':(Number(x.change_pct)>0?'+':'')+Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}`:''}</div>`:''}
+${liqItems.length?`<div class="card"><div class="row"><b>💥 Ликвидации за последний час</b><small>Binance Futures</small></div>${liqItems.map(x=>`<div class="lv"><span>${esc(x.coin)} · ${x.side==='LONG'?'ликвидация лонгов':'ликвидация шортов'}</span><b class="num">$${Number(x.notional).toLocaleString('en',{maximumFractionDigits:0})}</b></div>`).join('')}</div>`:''}
+<div class="section-kicker">Быстрый поиск рынка</div><div class="search-wrap"><span aria-hidden="true">⌕</span><input id="q" placeholder="Найти монету · BTC, SOL…" autocapitalize="characters" onkeydown="if(event.key=='Enter')sq()"><button class="btn" onclick="sq()">Найти</button></div>
+<button id="rf" class="btn s" onclick="refreshAll()" ${rf.running?'disabled':''}>${rf.running?`⏳ Обновляю ${rf.done}/${rf.total}`:'🔄 Обновить все данные'}</button>
+${rf.running?`<div class="bar" style="margin-top:6px"><i style="width:${rf.total?rf.done/rf.total*100:0}%"></i></div>`:''}
+<div class="stk"><div class="grid4">${T.map(b).join('')}</div><div class="grid3">${M.map(b).join('')}</div></div>
+${j.market?`<div class="card m" style="font-size:12px">📊 ${esc(j.market).slice(0,220)}</div>`:''}
+${j.items.length?j.items.map(sigRow).join(''):'<div class="card m">В этой категории сигналов нет. Монеты с рекомендацией «ЖДАТЬ» сюда не попадают.</div>'}`;
+if(rf.running)setTimeout(()=>{if(CUR&&CUR[0]==='signals')P.signals(SF)},2000)};
+async function refreshAll(){const j=await api('refresh_all');if(j.error)return;toast('Обновляю все данные…');
+const tick=async()=>{const s=await api('refresh_status',{},2,true);if(s.error)return;
+if(s.running){const b=$('#rf');if(b)b.textContent=`⏳ Обновляю ${s.done}/${s.total}`;setTimeout(tick,2000)}
+else{toast(`Готово${s.removed?' · снято из сигналов: '+s.removed:''}`);if(CUR&&CUR[0]==='signals')P.signals(SF)}};setTimeout(tick,1200)}
+
+/* ---------- Монета: цена каждые 5 с, позиция, алерты ---------- */
+function drawCoin(r){const L=r.live||{},lp=L.long_prob||{};const age=L.ts?Math.round(Date.now()/1000-L.ts):null;
+const ok=r.verdict=='ENTER';const price=L.price||r.price;const pos=r.position;
+const myAlerts=(S.alerts||[]).map((a,i)=>({...a,i})).filter(a=>a.coin===r.coin);
+return `<div class="row"><h1>${r.coin} ${side(r.side)}</h1><b style="color:${ok?'var(--up)':'var(--y)'}">${ok?'✅ ВХОДИТЬ':'⏳ ЖДАТЬ'}</b></div>
+<div class="row" style="margin:4px 0"><small><span class="live"></span>live · <span id="lp" class="num">${f(price)}</span>${age!=null?' · обновлено '+(age<60?'сейчас':age+' с назад'):''}</small><small>${r.signal_active?'🔥 в сигналах':''}</small></div>
+${r.img?`<div class="card" style="padding:6px"><img class="ch" src="${r.img}"></div>`:''}
+<div class="card"><div class="row"><small>${esc(r.type)} · ${esc(r.regime)}</small><b class="num">Conf ${r.strength}%</b></div><div class="bar" style="margin:8px 0"><i style="width:${r.strength}%"></i></div>
+<div class="g" style="gap:6px">${['1d','4h','1h','15m'].filter(t=>lp[t]!=null).map(t=>`<div class="pill" style="text-align:center">${t}: <b class="${lp[t]>=50?'up':'dn'}">${lp[t]}%</b> лонг</div>`).join('')}</div>
+<small style="display:block;margin-top:6px">RSI 4h ${r.rsi} · ADX ${r.adx} · 📰 ${esc(r.news_status)} · 🌍 BTC ${esc(r.btc_txt)}${r.fng!=null?' · F&G '+r.fng:''}</small>
+${r.fake_breakout?'<small class="dn" style="display:block">⚠ Ложный пробой (тонкий объём)</small>':''}${r.corr?`<small class="dn" style="display:block">⚠ ${esc(r.corr)}</small>`:''}</div>
+<div class="card"><div class="lv"><span>📥 Вход (лимит)</span><b class="num">${f(r.entry)}</b></div>
+${(!r.position||r.waiting_entry)?`<label class="m" for="customEntry">Ваша цена входа на бирже</label>
+<input id="customEntry" type="text" inputmode="decimal" autocomplete="off" placeholder="Например: ${f(r.entry)}" value="${r.waiting_entry?String(r.entry):''}" style="margin:7px 0">
+<button class="btn s" onclick="saveEntry('${r.coin}',${!!r.waiting_entry})">${r.waiting_entry?'✏️ Обновить лимит и TP/SL':'📌 Поставить лимит по моей цене'}</button>
+<small style="display:block;margin-top:6px">Уровни TP/SL пересчитываются от указанной цены и сохраняются в боте и Mini App.</small>`:`<small>Фактическая цена входа сохранена в сопровождении сделки.</small>`}
+${r.tps.map((p,i)=>`<div class="lv"><span>🎯 TP${i+1}</span><b class="num up">${f(p)} <small>${pc(p,r.entry,r.side)}</small></b></div>`).join('')}
+${r.current_sl!=null?`<div class="lv"><span>🛡 Стоп сейчас${r.trailing?' (трейлинг)':''}</span><b class="num dn" id="cursl">${f(r.current_sl)}</b></div>`:''}
+${r.sls.map((p,i)=>`<div class="lv"><span>🛡 SL${i+1}</span><b class="num dn">${f(p)} <small>${pc(p,r.entry,r.side)}</small></b></div>`).join('')}
+${pos?`<div class="lv"><span>Результат сейчас</span><b class="num" id="pnl">—</b></div>`:''}</div>
+<div class="card"><small>⚖ ${esc(r.leverage)}</small><div class="lv"><span>Размер позиции</span><b class="num">$${(r.pos_usdt||0).toFixed(0)} ≈ ${(r.pos_usdt/r.entry||0).toPrecision(3)} ${esc(r.coin)}</b></div>
+<div class="lv"><span>Риск на сделку</span><b class="num">$${(r.risk_usdt||0).toFixed(0)}</b></div><div class="lv"><span>Ликвидация при x20</span><b class="num dn">${f(r.liq_x20)}</b></div>
+${r.bt?`<small>🧪 Бэктест ${r.bt.days} дн.: ${r.bt.trades} сд · TP1 ${r.bt.winrate}% · ${r.bt.avg_r}R · PF ${r.bt.pf}</small>`:''}</div>
+${r.correlation&&Object.keys(r.correlation).length?`<div class="card"><b>🔗 Корреляция 1h</b>${Object.entries(r.correlation).map(([c,v])=>`<div class="lv"><span>${esc(c)}</span><b class="num ${Math.abs(v)>=.7?'dn':''}">${v>0?'+':''}${v}</b></div>`).join('')}<small>Коэффициент Пирсона по последним 48 часовым доходностям; это оценка, не гарантия совместного движения.</small></div>`:''}
+${r.comment?`<div class="card">💬 <b>Аналитик (${esc(r.risk_lvl)} риск)</b><br><small>${esc(r.comment)}</small></div>`:''}
+${r.reasons&&r.reasons.length?`<div class="card"><b>📈 Почему</b>${r.reasons.map(x=>`<div class="m">• ${esc(x)}</div>`).join('')}${r.patterns&&r.patterns.length?`<div class="m" style="margin-top:6px">🕯 ${esc(r.patterns.join('; '))}</div>`:''}</div>`:''}
+${renderAd(S.access)}
+${pos?(r.waiting_entry?`<button class="btn d" onclick="act('pos_close','${r.coin}')">✖ Отменить сопровождение лимита</button>`:`<button class="btn d" onclick="act('pos_close','${r.coin}')">❌ Закрыть сделку по рынку</button>`):`<button class="btn" onclick="saveEntry('${r.coin}',false)">✅ Подтвердить мой лимит и включить сопровождение</button>`}
+<button class="btn s" style="margin-top:8px;border:1px solid var(--a);" onclick="paperOpenFromCoin('${r.coin}')">🧪 Открыть виртуальную сделку в Paper Trading</button>
+<div class="g" style="margin-top:8px"><button class="btn s" onclick="P.coin('${r.coin}',1)">🔄 Пересчитать</button><button class="btn s" onclick="act('fav_${r.in_fav?'del':'add'}','${r.coin}')">${r.in_fav?'⭐ В избранном':'💾 В избранное'}</button></div>
+<button class="btn s" style="margin-top:8px" onclick="alertFor('${r.coin}',${price})">🔔 Алерт на цену</button>
+${myAlerts.length?`<div class="card" style="margin-top:8px"><small>Ваши алерты</small>${myAlerts.map(a=>`<div class="row" style="margin-top:6px"><b class="num ${a.op=='>'?'up':'dn'}">${a.op} ${f(a.price)}</b><button class="pill" onclick="delAlert(${a.i},'${r.coin}')">🗑 удалить</button></div>`).join('')}</div>`:''}
+<p class="m" style="margin:12px 0">⚠ Не финансовая рекомендация. Входите только лимитным ордером.</p>`}
+P.coin=async(c,force)=>{CUR_COIN=c;stopPoll();const r=await api('coin',{coin:c,force:!!force});
+if(r.closed)return P.paywall();
+if(r.error){V().innerHTML=`<div class="card">${esc(r.error)}</div>`;return}
+if(r.price_only){V().innerHTML=`<h1>${c}</h1><div class="card">💰 Цена: <b class="num">${f(r.price)}</b><br><small>Свечи недоступны, анализ невозможен.</small></div>`;return}
+V().innerHTML=`<div id="cbox">${drawCoin(r)}</div>`;
+if(r.position){const p=await api('price',{coin:c},2,true);if(p.pnl!=null){const pn=$('#pnl');if(pn){pn.textContent=(p.pnl>0?'+':'')+p.pnl+'%';pn.className='num '+(p.pnl>=0?'up':'dn')}}}
+PT=setInterval(async()=>{if(!CUR||CUR[0]!=='coin'||CUR_COIN!==c)return stopPoll();
+  const d=await api('price',{coin:c},1,true);if(d.error||d.price==null)return;
+  const pe=$('#lp');if(pe)pe.textContent=f(d.price);
+  if(d.sl!=null){const cs=$('#cursl');if(cs)cs.textContent=f(d.sl)}
+  if(d.pnl!=null){const pn=$('#pnl');if(pn){pn.textContent=(d.pnl>0?'+':'')+d.pnl+'%';pn.className='num '+(d.pnl>=0?'up':'dn')}}
+},5000)};
+async function saveEntry(c,editing){let raw=($('#customEntry').value||'').trim().replace(/\s/g,'').replace(',','.');const n=Number(raw);if(!(n>0&&Number.isFinite(n)))return toast('Введите корректную цену больше нуля');hap();const j=await api(editing?'pos_set_entry':'pos_enter',{coin:c,entry_price:n});if(j.error)return;toast(j.msg||'Цена входа сохранена');await refreshMe();if(CUR&&CUR[0]==='coin')P.coin(c);else if(CUR)go(CUR[0],CUR[1],1)}
+async function act(a,c,extra={}){hap();const j=await api(a,Object.assign({coin:c},extra));if(j.error)return;toast(j.msg||'Готово');
+if(CUR&&CUR[0]==='coin')P.coin(c);else if(CUR)go(CUR[0],CUR[1],1)}
+function alertFor(c,p){SHEET_COIN=c;$('#sh-title').textContent='Алерт на цену: '+c;$('#sh-sub').textContent='Сейчас '+f(p)+'. Сообщу, когда цена пересечёт уровень.';$('#sh-val').value=String(+p);$('#sheet-bg').classList.add('on');$('#sheet').classList.add('on')}
+function closeSheet(){$('#sheet-bg').classList.remove('on');$('#sheet').classList.remove('on')}
+async function submitSheet(){let v=($('#sh-val').value||'').replace(/\s/g,'');v=v.includes('.')?v.replace(/,/g,''):v.replace(',','.');const n=parseFloat(v);if(!(n>0))return toast('Введите число');const j=await api('alert_add',{coin:SHEET_COIN,price:n});if(!j.error){toast(j.msg);closeSheet();await refreshMe()}}
+async function delAlert(i,c){const j=await api('alert_del',{idx:i});if(!j.error){await refreshMe();P.coin(c)}}
+
+/* ---------- PAPER TRADING 2.0: отдельный виртуальный контур ---------- */
+async function paperOpenFromCoin(c){
+  const j=await api('paper_open',{coin:c});if(j.error)return;
+  toast(j.msg||'Виртуальная сделка открыта');tab('portfolio');
+}
+async function paperSelect(id){const j=await api('paper_select',{account_id:id});if(!j.error){toast(j.msg);P.portfolio()}}
+async function paperCreate(){
+  const name=($('#paperName').value||'Тестовая стратегия').trim();
+  const deposit=Number($('#paperDeposit').value||1000);
+  if(!(deposit>=10&&Number.isFinite(deposit)))return toast('Минимальный виртуальный депозит — 10 USDT');
+  const j=await api('paper_create',{name,deposit,kind:'strategy'});if(!j.error){toast(j.msg);P.portfolio()}
+}
+async function paperClose(c){const j=await api('paper_close',{coin:c});if(!j.error){toast(j.msg);P.portfolio()}}
+async function paperReset(){
+  const a=window.PAPER_ACTIVE;if(!a)return;
+  const yes=confirm('Сбросить виртуальный счёт? Открытых позиций быть не должно. История этого счёта будет очищена.');
+  if(!yes)return;const j=await api('paper_reset',{account_id:a.id});if(!j.error){toast(j.msg);P.portfolio()}
+}
+function paperPanel(p){
+ const a=p.active||{},accounts=p.accounts||[],positions=Object.entries(a.positions||{}),hist=(a.history||[]).slice().reverse();window.PAPER_ACTIVE=a;
+ return `<div class="card" style="border:1px solid rgba(139,124,255,.38);background:radial-gradient(240px 120px at 100% 0%,rgba(139,124,255,.18),transparent 70%),var(--card)">
+ <div class="row"><b>🧪 PAPER TRADING</b><span class="tag L">ВИРТУАЛЬНО</span></div>
+ <small class="m">Без реальных ордеров. Отдельный счёт, комиссии и проскальзывание учитываются в результате.</small>
+ <label class="m" style="display:block;margin-top:10px">Активный виртуальный счёт</label>
+ <select id="paperAccount" onchange="paperSelect(this.value)" style="width:100%;margin:6px 0 10px">${accounts.map(x=>`<option value="${esc(x.id)}" ${x.id===p.active_account?'selected':''}>${esc(x.name)}${x.primary?' · основной':''}</option>`).join('')}</select>
+ <div class="g"><div class="card"><small>Баланс</small><h2 class="num">${Number(a.balance||0).toFixed(2)} USDT</h2></div><div class="card"><small>Equity</small><h2 class="num">${Number(a.equity||0).toFixed(2)} USDT</h2></div><div class="card"><small>Реализованный PnL</small><h2 class="num ${a.realized_pnl>=0?'up':'dn'}">${a.realized_pnl>=0?'+':''}${Number(a.realized_pnl||0).toFixed(2)}</h2></div><div class="card"><small>Нереализованный PnL</small><h2 class="num ${a.unrealized_pnl>=0?'up':'dn'}">${a.unrealized_pnl>=0?'+':''}${Number(a.unrealized_pnl||0).toFixed(2)}</h2></div></div>
+ <div class="lv"><span>Риск / сделка</span><b>${Number(a.risk_pct||1)}%</b></div><div class="lv"><span>Комиссия / сторона</span><b>${Number(a.fee_pct||0.1)}%</b></div><div class="lv"><span>Проскальзывание / сторона</span><b>${Number(a.slippage_pct||0.02)}%</b></div>
+ <h3 style="margin:14px 0 8px">Открытые виртуальные позиции (${positions.length})</h3>
+ ${positions.length?positions.map(([c,x])=>`<div class="card"><div class="row"><b>${esc(c)} ${side(x.side)}</b><b class="num ${(x.pnl_pct||0)>=0?'up':'dn'}">${x.pnl_pct==null?'—':(x.pnl_pct>0?'+':'')+x.pnl_pct+'%'}</b></div><small class="m">Вход ${f(x.entry)} · mark ${f(x.mark_price)} · SL ${f(x.stop)} · объём ${Number(x.notional||0).toFixed(2)} USDT</small><button class="btn d" style="margin-top:8px" onclick="paperClose('${esc(c)}')">Закрыть виртуально по рынку</button></div>`).join(''):'<div class="card m">Пока нет виртуальных сделок. Открой монету и нажми «Открыть виртуальную сделку».</div>'}
+ <h3 style="margin:14px 0 8px">Создать дополнительный счёт / стратегию</h3><input id="paperName" placeholder="Название стратегии" maxlength="32"><input id="paperDeposit" type="number" min="10" value="1000" placeholder="Депозит USDT" style="margin-top:7px"><button class="btn s" style="margin-top:8px" onclick="paperCreate()">＋ Создать тестовый счёт</button>
+ <button class="btn s" style="margin-top:8px" onclick="paperReset()">↻ Сбросить активный счёт</button>
+ <h3 style="margin:14px 0 8px">История Paper Trading</h3>
+ ${hist.length?hist.slice(0,12).map(t=>`<div class="lv"><span>${esc(t.coin)} ${t.side} · ${esc(t.reason||'manual')}</span><b class="num ${(t.pnl||0)>=0?'up':'dn'}">${(t.pnl||0)>=0?'+':''}${Number(t.pnl||0).toFixed(2)} USDT</b></div>`).join(''):'<small class="m">Закрытые виртуальные сделки появятся здесь.</small>'}
+ <small class="m" style="display:block;margin-top:10px">Paper Trading использует доступные котировки и модельные комиссии. Результаты не равны фактическому исполнению на бирже.</small></div>`;
+}
+
+function paperAnalyticsPanel(a){
+ if(!a||a.error)return '';const pf=a.profit_factor==null?'—':a.profit_factor;const curve=a.equity_curve||[];const mx=Math.max(1,...curve.map(Number));
+ return `<div class="card"><div class="row"><b>📊 Paper Analytics</b><span class="pill">${a.trades||0} сделок</span></div>
+ <div class="g"><div class="card"><small>Win Rate</small><h2 class="num">${a.win_rate||0}%</h2></div><div class="card"><small>Net PnL</small><h2 class="num ${(a.net_pnl||0)>=0?'up':'dn'}">${(a.net_pnl||0)>=0?'+':''}${Number(a.net_pnl||0).toFixed(2)}</h2></div><div class="card"><small>Profit Factor</small><h2 class="num">${pf}</h2></div><div class="card"><small>Max Drawdown</small><h2 class="num dn">${a.max_drawdown_pct||0}%</h2></div></div>
+ <small class="m">${a.wins||0} побед · ${a.losses||0} убытков · ${a.breakeven||0} около нуля · средний PnL ${Number(a.avg_pnl||0).toFixed(2)} USDT</small>
+ ${curve.length>1?`<div class="section-kicker">Кривая виртуального капитала</div><div class="eq">${curve.map(v=>`<i style="height:${Math.max(4,Number(v)/mx*100)}%;background:var(--ac)"></i>`).join('')}</div>`:''}
+ <small class="m">Расчёт по закрытым Paper-сделкам активного счёта. Модельное исполнение не гарантирует биржевые результаты.</small></div>`;
+}
+
+/* ---------- IXCLY MAX control centre ---------- */
+function maxControlPanel(d){
+ const p=d.performance||{},ss=d.system_signals||{},sc=d.scanner||{},mon=d.monitor||{},dd=d.dedupe||{},alerts=d.alerts||[],moves=sc.movers||[];
+ const age=v=>v==null?'—':v<60?`${v} сек.`:v<3600?`${Math.floor(v/60)} мин.`:`${(v/3600).toFixed(1)} ч.`;
+ return `<div class="card" style="border-color:rgba(155,124,255,.42)">
+ <div class="row"><b>⚡ IXCLY MAX CONTROL</b><span class="pill">8 модулей</span></div>
+ <div class="g" style="margin-top:10px">
+ <div class="card"><small>Signal Performance</small><h2 class="num">${p.win_rate||0}%</h2><small>${p.wins||0}W · ${p.losses||0}L · ${Number(p.net_pnl_pct||0)>=0?'+':''}${p.net_pnl_pct||0}%</small></div>
+ <div class="card"><small>Система сигналов</small><h2 class="num">${ss.win_rate||0}%</h2><small>${ss.wins||0}W · ${ss.losses||0}L</small></div>
+ </div>
+ <div class="lv"><span>Market Scanner 2.0</span><b>${sc.active_signals||0} активных · ${sc.live_coins||0} монет</b></div>
+ <div class="lv"><span>Anti-Duplicate</span><b class="up">${dd.enabled?'Включён':'Выключен'}</b></div>
+ <div class="lv"><span>Защита от повторов / cooldown</span><b>${dd.active_signal_locks||0} блокировок · ${dd.recent_cooldowns||0} пауз</b></div>
+ ${moves.length?`<div class="section-kicker">Рынок · самые активные</div>${moves.slice(0,5).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':(Number(x.change_pct)>0?'+':'')+Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}`:''}
+ <div class="section-kicker">Smart Risk Manager</div><div class="g"><input id="mxEntry" type="number" step="any" placeholder="Цена входа"><input id="mxStop" type="number" step="any" placeholder="Stop Loss"></div>
+ <div class="g" style="margin-top:7px"><select id="mxSide"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select><button class="btn s" onclick="mxCalcRisk()">Рассчитать риск</button></div><div id="mxRiskResult"></div>
+ <div class="section-kicker">Smart Alerts · ${alerts.length}/20</div>
+ ${alerts.length?alerts.map((a,i)=>`<div class="lv"><span>${esc(a.coin)} ${esc(a.op)} ${esc(a.price)}</span><button class="pill" onclick="mxDeleteAlert(${i})">Удалить</button></div>`).join(''):'<small class="m">Активных ценовых алертов нет. Создайте их в карточке монеты.</small>'}
+ <div class="section-kicker">API Monitor · Backup Monitor</div>
+ <div class="lv"><span>Работа сервиса</span><b>${age(mon.uptime_seconds)}</b></div>
+ <div class="lv"><span>Последнее сканирование</span><b>${age(mon.scan_age_seconds)}</b></div>
+ <div class="lv"><span>Новостной движок</span><b>${esc(mon.news_engine||'нет данных')}</b></div>
+ <div class="lv"><span>Telegram backup</span><b>${esc(mon.backup_status||'нет данных')}</b></div>
+ <div class="lv"><span>Возраст backup</span><b>${age(mon.backup_age_seconds)}</b></div>
+ <div class="lv"><span>Бэкап ожидает отправки</span><b>${mon.backup_pending?'Да':'Нет'}</b></div>
+ <button class="btn s" style="margin-top:10px" onclick="mxRefresh()">↻ Обновить панель</button>
+ </div>`;
+}
+async function mxCalcRisk(){const entry=$('#mxEntry').value,stop=$('#mxStop').value,side=$('#mxSide').value;if(!entry||!stop)return toast('Введите вход и Stop Loss');const j=await api('risk_calc',{entry,stop,side});const el=$('#mxRiskResult');if(!el)return;if(j.error){el.innerHTML=`<small class="dn">${esc(j.error)}</small>`;return;}el.innerHTML=`<div class="card"><div class="row"><b>Рекомендуемый объём</b><b class="num">${Number(j.position_usdt).toFixed(2)} USDT</b></div><div class="lv"><span>Количество</span><b>${j.quantity}</b></div><div class="lv"><span>Риск деньгами</span><b>${j.risk_usdt} USDT (${j.risk_pct}%)</b></div><div class="lv"><span>Дистанция до SL</span><b>${j.stop_distance_pct}%</b></div>${j.warning?'<small class="dn">Риск уменьшен с учётом лимита общего открытого риска.</small>':''}</div>`;}
+async function mxDeleteAlert(i){const j=await api('alert_del',{idx:i});if(!j.error){toast(j.msg||'Алерт удалён');mxRefresh()}}
+async function mxRefresh(){const d=await api('max_dashboard',{},1,true);if(!d.error){const el=$('#max-control');if(el)el.innerHTML=maxControlPanel(d);}}
+
+/* ---------- Портфель ---------- */
+P.portfolio=async()=>{const [j,paper,max,paperStats]=await Promise.all([api('portfolio'),api('paper_get'),api('max_dashboard',{},1,true),api('paper_analytics',{},1,true)]);if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
+V().innerHTML=`<h1>Мой <span>портфель</span></h1>
+${paper&&!paper.error?paperPanel(paper):''}
+${paperStats&&!paperStats.error?paperAnalyticsPanel(paperStats):''}
+<div id="max-control">${max&&!max.error?maxControlPanel(max):''}</div>
+${renderAd(S.access)}
+<div class="g"><div class="card"><small>💰 Депозит</small><h2 class="num" style="margin:4px 0 8px">$${s.deposit}</h2><input id="dep" type="number" inputmode="decimal" placeholder="Новый депозит"><button class="btn s" style="margin-top:6px" onclick="setv('set_deposit','dep')">Сохранить</button></div>
+<div class="card"><small>📉 Риск на сделку</small><h2 class="num" style="margin:4px 0 8px">${s.risk_pct}%</h2><input id="rsk" type="number" inputmode="decimal" placeholder="0.1 – 10"><button class="btn s" style="margin-top:6px" onclick="setv('set_risk','rsk')">Сохранить</button></div></div>
+<div class="card"><div class="row"><small>⚠ Открытый риск</small><b class="num">${j.open_risk.toFixed(1)}% / ${s.max_open_risk}%</b></div><div class="bar" style="margin-top:6px"><i style="width:${Math.min(100,j.open_risk/s.max_open_risk*100)}%"></i></div></div>
+<h2>⚙️ Режим торговли</h2><div class="grid3">${[['aggressive','🟢 Агрессивн.'],['balanced','🟡 Баланс'],['conservative','🔴 Консерв.']].map(x=>`<div class="fb ${j.mode==x[0]?'on':''}" onclick="mode('${x[0]}')">${x[1]}</div>`).join('')}</div>
+<h2>📈 Открытые сделки</h2>${pos.length?pos.map(([c,p])=>`<div class="card"><div class="row lst" onclick="go('coin','${c}')"><b>${c} ${side(p.side)}</b><b class="num ${p.pnl>=0?'up':'dn'}">${p.waiting_entry?'ждём вход':(p.pnl>=0?'+':'')+p.pnl+'%'}</b></div>
+<small class="num">Вход ${f(p.entry_price)} · сейчас ${f(p.price)} · SL ${f(p.sl1)}<br>${p.hit_tp1?'✅':'⏳'}TP1 ${p.hit_tp2?'✅':'⏳'}TP2 ${p.hit_tp3?'✅':'⏳'}TP3</small>
+<button class="btn d" style="margin-top:8px" onclick="act('pos_close','${c}')">❌ Закрыть по рынку</button></div>`).join(''):'<div class="card m">Открытых сделок нет. Откройте монету и нажмите «Вошёл в сделку».</div>'}
+<h2>⭐ Избранное</h2>${(j.saved||[]).length?j.saved.map(s=>`<div class="card row"><b class="lst" onclick="go('coin','${s.coin}')">⭐ ${s.coin}</b><button class="pill" onclick="act('fav_del','${s.coin}')">🗑</button></div>`).join(''):'<div class="card m">Пусто.</div>'}
+<h2>📜 Последние входы</h2>${(j.history||[]).length?j.history.slice().reverse().map(t=>`<div class="card"><div class="row"><b>${t.coin} ${side(t.side)}</b><small>${new Date(t.entered_at*1000).toLocaleString('ru',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</small></div><small class="num">Вход ${f(t.entry)} · TP1 ${f(t.tp1)} · SL ${f(t.sl1)}</small></div>`).join(''):'<div class="card m">Входов ещё не было.</div>'}`};
+async function setv(a,id){const v=$('#'+id).value;const j=await api(a,{value:v});if(!j.error){toast(j.msg);P.portfolio()}}
+async function mode(m){const j=await api('set_mode',{value:m});if(!j.error){toast(j.msg);P.portfolio()}}
+
+/* ---------- Аналитика: моя и системная ---------- */
+const STN={active:'⏳ В работе',win:'✅ Успешные',loss:'❌ Убыточные',expired:'⌛ Истекли',cancelled:'🚫 Снятые',missed:'🚫 Упущено'};
+P.analytics=async()=>{const [m,g]=await Promise.all([api('mystats'),api('stats')]);if(m.error||g.error)return;window.ST=g;
+const mine=!m.n?'<div class="card m">Закрытых сделок пока нет. Итог каждой сделки запишется сюда автоматически.</div>':`
+<div class="g"><div class="card"><small>🎯 Винрейт</small><h2 class="num up" style="margin:4px 0 0">${m.wr}%</h2><small>${m.wins}W · ${m.losses}L · ${m.be}BE</small></div>
+<div class="card"><small>💵 Итого</small><h2 class="num ${m.usd>=0?'up':'dn'}" style="margin:4px 0 0">${m.usd>=0?'+':''}${m.usd}$</h2><small>${m.pnl}% суммарно</small></div>
+<div class="card"><small>⚖ Ср. R · PF</small><h2 class="num" style="margin:4px 0 0">${m.avg_r} · ${m.pf??'—'}</h2></div>
+<div class="card"><small>📉 Просадка</small><h2 class="num dn" style="margin:4px 0 0">${m.max_dd}$</h2><small>мат. ожидание ${m.expectancy}R</small></div></div>
+<div class="card"><small>Кривая баланса (последние 40)</small>${(()=>{const mx=Math.max(1,...m.equity.map(Math.abs));return `<div class="eq">${m.equity.map(v=>`<i style="height:${Math.max(4,Math.abs(v)/mx*100)}%;background:${v>=0?'var(--up)':'var(--dn)'}"></i>`).join('')}</div>`})()}</div>
+<div class="card"><div class="lv"><span>Лонг / Шорт</span><b>${m.wr_long??'—'}% / ${m.wr_short??'—'}%</b></div><div class="lv"><span>Серия</span><b>${m.streak} ${m.streak_kind=='win'?'побед':m.streak_kind=='loss'?'убытков':'в ноль'}</b></div>
+<div class="lv"><span>🏆 Лучшая</span><b class="up">${m.best.coin} ${m.best.pnl}%</b></div><div class="lv"><span>💀 Худшая</span><b class="dn">${m.worst.coin} ${m.worst.pnl}%</b></div></div>
+<h2>Последние сделки</h2>${m.last.map(t=>`<div class="card"><div class="row"><b>${t.coin} ${side(t.side)}</b><b class="num ${t.pnl>=0?'up':'dn'}">${t.pnl>=0?'+':''}${t.pnl}%</b></div><small class="num">Вход ${f(t.entry)} → Выход ${f(t.exit)} · ${t.r}R · ${esc(t.reason)}</small>
+<button class="pill" style="margin-top:6px" onclick="shareText('Я закрыл ${t.coin} (${t.side}) с результатом ${t.pnl>=0?'+':''}${t.pnl}% в IXCLY PRO! 🔥')">📤 Поделиться</button></div>`).join('')}`;
+V().innerHTML=`<h1>Моя <span>аналитика</span></h1>${mine}
+${renderAd(S.access)}
+<h2>📡 Система</h2><div class="grid3">${['win','loss','active'].map(k=>`<div class="fb" onclick="stl('${k}')">${STN[k]}<b>${g.counts[k]||0}</b></div>`).join('')}</div>
+<div class="grid3" style="margin-top:6px">${['missed','expired','cancelled'].map(k=>`<div class="fb" onclick="stl('${k}')">${STN[k]}<b>${g.counts[k]||0}</b></div>`).join('')}</div>
+<small style="display:block;margin-top:6px">Винрейт системы: <b>${g.wr.toFixed(1)}%</b></small><div id="sl"></div>`};
+function stl(k){const L=(window.ST.lists||{})[k]||[];$('#sl').innerHTML=`<h2>${STN[k]}</h2>`+(L.length?L.map(x=>`<div class="sig lst" onclick="go('coin','${x.coin}')"><span><b>${x.coin}</b> ${side(x.side)}</span><small class="num">${x.cancel_reason?esc(x.cancel_reason).slice(0,60):'Вход '+f(x.entry)}</small></div>`).join(''):'<div class="card m">Пусто</div>')}
+
+/* ---------- Ещё: новости, уведомления, настройки ---------- */
+const NT=[['signals','🔥 Новые сигналы'],['pos_updates','📊 Сопровождение и итоги'],['news','📰 Новости'],['anomalies','🚨 Аномалии объёма'],['briefing','☀️ Утренний брифинг'],['liquidations','💥 Ликвидации']];
+P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=S.notif||{};const a=S.access||{};
+V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
+<div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг получит −20% на 3 дня, а после его первой оплаты вам +7 дней</div></div>
+<div class="card lst" onclick="go('news')"><b>📰 Новости рынка</b><div class="m" style="margin-top:4px">${esc((S.news||{}).title_ru||'Разбор последней новости')}</div></div>
+${renderAd(a)}
+<h2>🔔 Уведомления в Telegram</h2>${NT.map(x=>`<div class="card row"><span>${x[1]}</span><div class="sw ${n[x[0]]?'on':''}" onclick="tgl('${x[0]}')"></div></div>`).join('')}
+<details class="card"><summary>⚙️ Настройки для продвинутых</summary>
+<small>Вебхук: новые сигналы и итоги дублируются POST-запросом на ваш сервер.</small>
+<input id="wh" placeholder="https://your-server.com/api/signal" value="${esc(S.webhook||'')}" style="margin-top:8px"><button class="btn s" style="margin-top:6px" onclick="wh()">Сохранить вебхук</button>
+<button class="btn s" style="margin-top:10px" onclick="csv()">📥 Выгрузить историю сигналов (CSV) в чат</button></details>
+<div class="card lst row" onclick="openSupport()"><span>🆘 Поддержка ${esc(a.support||'')}</span><span class="m">›</span></div>
+<h2>📄 Документы и поддержка</h2>
+<div class="card lst" onclick="tg.openLink('https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-IXCLY-PRO-10-31')"><div class="row"><span>Политика конфиденциальности</span><span class="m">›</span></div></div>
+<div class="card lst" onclick="tg.openLink('https://telegra.ph/PUBLICHNAYA-OFERTA-POLZOVATELSKOE-SOGLASHENIE-IXCLY-PRO-10-31')"><div class="row"><span>Пользовательское соглашение (оферта)</span><span class="m">›</span></div></div>
+<div class="card lst" onclick="openSupport()"><div class="row"><span>🆘 Служба поддержки</span><span class="m">›</span></div></div>
+<p class="m" style="margin:14px 0">IXCLY PRO v${S.version}. Криптовалюта — это риск.</p>`};
+async function refShare(){const r=await api('ref_link');if(r.error)return;const t='Попробуй IXCLY PRO: получишь скидку 20% на подписку на первые 3 дня 🎁 Сигналы и сопровождение сделок 🔥';tg.openTelegramLink('https://t.me/share/url?url='+encodeURIComponent(r.link)+'&text='+encodeURIComponent(t))}
+async function tgl(k){const j=await api('toggle',{key:k});if(!j.error){toast(j.msg);P.more()}}
+async function wh(){const j=await api('webhook',{url:$('#wh').value});if(!j.error)toast(j.msg)}
+async function csv(){const j=await api('csv');if(!j.error)toast(j.msg)}
+P.news=async()=>{const j=await api('news');if(j.error)return;const b=j.bias||{};
+V().innerHTML=`<h1>Новости <span>рынка</span></h1><div class="card"><div class="row"><small>${esc(b.published||'')}</small><b class="${b.bias>0?'up':b.bias<0?'dn':''}">${b.bias>0?'🟢 Бычий':b.bias<0?'🔴 Медвежий':'⚪ Нейтральный'}</b></div>
+<h2>${esc(b.title_ru)}</h2><div class="m">${esc(b.summary)}</div><p style="margin-top:8px">${esc(b.impact)}</p><small>🪙 ${esc(b.coins)}</small></div>
+<div class="card" style="white-space:pre-line;font-size:13px">${j.html}</div>`};
+
+/* ---------- Поиск по ссылке и старт ---------- */
+(async()=>{const me=await api('me');
+if(me.closed){S=me;const c=q.get('coin');return go('paywall')}
+if(me.error){V().innerHTML='<div class="card">Нет связи с сервером. Закройте приложение и откройте снова.</div><button class="btn s" onclick="location.reload()">Повторить</button>';return}
+S=me;const c=q.get('coin'),t=q.get('tab');
+if(c)go('coin',c);else if(t&&P[t])go(t);else go('signals');
+})();
+</script></body></html>
