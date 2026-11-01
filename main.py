@@ -37,7 +37,7 @@ import aiohttp
 import feedparser
 import numpy as np
 import pandas as pd
-from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, cleanup as cleanup_intelligence)
+from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, scan_diagnostic_summary, cleanup as cleanup_intelligence)
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -341,7 +341,10 @@ scan_skip = {}
 nav_stack = {}
 stats = {"signals": 0, "news_sent": 0, "broadcasts": 0, "started": time.time()}
 bot_flags = {"news_enabled": True, "alerts_enabled": True}
-last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "sent": 0, "secs": 0, "diagnostic": "Сканирование ещё не выполнялось", "reasons": []}
+last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "sent": 0, "secs": 0,
+                  "bt_rejected": 0, "bt_unavailable": 0, "bt_errors": 0, "bt_error_examples": [],
+                  "analysis_errors": 0, "analysis_wait": 0, "quality_rejected": 0, "analysis_error_examples": [],
+                  "diagnostic": "Сканирование ещё не выполнялось", "reasons": []}
 last_no_signal_notice = 0.0
 scanner_ranking = []  # top-50 кандидатов последнего прохода, без свечных массивов
 market_bias = {"bias": 0, "title_ru": "Нет данных", "summary": "", "impact": "Нейтральный фон", "coins": "BTC, ETH",
@@ -3291,10 +3294,13 @@ async def notify_no_signal_users(reason, details=""):
     if now - last_no_signal_notice < 1800:
         return
     last_no_signal_notice = now
+    technical_issue = "ошибка" in str(reason).lower()
+    disclaimer = ("\n⚠️ Обнаружен технический сбой. Он отдельно зафиксирован для проверки; слабые сигналы не будут публиковаться."
+                  if technical_issue else
+                  "\nЭто не ошибка и не прогноз: бот не будет создавать слабый сигнал ради количества.")
     body = ("ℹ️ <b>Новых сигналов пока нет</b>\n"
             f"Причина: {html.escape(str(reason))}\n"
-            + (html.escape(str(details)) + "\n" if details else "")
-            + "\nЭто не ошибка и не прогноз: бот не будет создавать слабый сигнал ради количества.")
+            + (html.escape(str(details)) + "\n" if details else "") + disclaimer)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Открыть Mini App", web_app=WebAppInfo(url=webapp_link(tab="signals")))]] ) if WEBAPP_URL else None
     for cid in signal_recipients("", ""):
         try:
@@ -3313,7 +3319,9 @@ async def scan_once(send=True):
         t0 = time.time()
         def _scan_paused(reason):
             last_scan_info.update(ts=int(time.time()), secs=int(time.time() - t0), diagnostic=reason,
-                                  universe=0, stage1=0, stage2=0, backtest_ok=0, final=0, sent=0, reasons=[])
+                                  universe=0, stage1=0, stage2=0, backtest_ok=0, final=0, sent=0, reasons=[],
+                                  bt_rejected=0, bt_unavailable=0, bt_errors=0, bt_error_examples=[],
+                                  analysis_errors=0, analysis_wait=0, quality_rejected=0, analysis_error_examples=[])
             state_touch(False)
         rss_now = _current_rss_mb()
         if rss_now is not None and rss_now >= float(os.getenv("RAM_SCAN_STOP_MB", "440")):
@@ -3375,6 +3383,14 @@ async def scan_once(send=True):
 
         sem = asyncio.Semaphore(2)
         stage1, stage2, final, bt_pass = [], [], [], 0
+        bt_rejected = 0
+        bt_unavailable = 0
+        bt_errors = 0
+        bt_error_examples = []
+        analysis_errors = 0
+        analysis_wait = 0
+        quality_rejected = 0
+        analysis_error_examples = []
 
         async def s1(coin):
             if time.time() < scan_skip.get(coin, 0):
@@ -3438,36 +3454,69 @@ async def scan_once(send=True):
         sem3 = asyncio.Semaphore(2)
 
         async def s3(item):
-            nonlocal bt_pass
+            nonlocal bt_pass, bt_rejected, bt_unavailable, bt_errors, analysis_errors, analysis_wait, quality_rejected
             coin, tf_data, setup = item
             async with sem3:
-                bt = await get_backtest(coin)
-                if bt is not None and bt["trades"] >= BT_MIN_TRADES and not bt_ok(bt):
-                    _rej("бэктест слабый")
-                    return
+                try:
+                    bt = await get_backtest(coin)
+                except Exception as e:
+                    bt = None
+                    bt_errors += 1
+                    if len(bt_error_examples) < 3:
+                        bt_error_examples.append(f"{coin}: {type(e).__name__}: {str(e)[:180]}")
+                    _rej("ошибка получения истории бэктеста")
+                    log.exception("Ошибка получения бэктеста %s", coin)
+                else:
+                    if bt is not None and not isinstance(bt, dict):
+                        bt_errors += 1
+                        if len(bt_error_examples) < 3:
+                            bt_error_examples.append(f"{coin}: некорректный формат результата бэктеста")
+                        _rej("некорректный результат бэктеста")
+                        bt = None
+                    if bt is None or bt.get("trades", 0) < BT_MIN_TRADES:
+                        bt_unavailable += 1
+                try:
+                    if bt is not None and bt.get("trades", 0) >= BT_MIN_TRADES and not bt_ok(bt):
+                        bt_rejected += 1
+                        _rej("бэктест слабый")
+                        return
+                except Exception as e:
+                    bt_errors += 1
+                    if len(bt_error_examples) < 3:
+                        bt_error_examples.append(f"{coin}: {type(e).__name__}: {str(e)[:180]}")
+                    _rej("ошибка проверки бэктеста")
+                    log.exception("Ошибка проверки бэктеста %s", coin)
+                    bt = None
+                    bt_unavailable += 1
                 bt_pass += 1
                 try:
                     res = await build_analysis(coin, tf_data, setup, bt, ctx, "scan")
+                    # Дополнительный детерминированный контроль качества: score факторов, не вероятность прибыли.
+                    primary_tf = tf_data.get("4h") or tf_data.get("1h") or {}
+                    primary_df = primary_tf.get("df") if isinstance(primary_tf, dict) else None
+                    res["market_regime"] = market_regime(primary_df)
+                    res["volume_anomaly"] = volume_anomaly(primary_df)
+                    res["quality_score"] = score_signal(res)
+                    res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
+                                             else "C" if res["quality_score"] >= 62 else "D")
+                    min_quality = float(os.getenv("MIN_SIGNAL_QUALITY", "62"))
+                    if res["verdict"] == "ENTER" and res["quality_score"] >= min_quality:
+                        final.append(res)
+                        analysis_cache[coin] = (time.time(), 60, res)
+                        save_analysis_db(coin, res)
+                    elif res["verdict"] != "ENTER":
+                        analysis_wait += 1
+                        _rej("сетап получил рекомендацию ЖДАТЬ")
+                    else:
+                        quality_rejected += 1
+                        _rej(f"качество ниже порога {min_quality:.0f} ({res['quality_score']:.0f})")
                 except Exception as e:
-                    log.info(f"Сборка {coin}: {e}")
+                    analysis_errors += 1
+                    if len(analysis_error_examples) < 3:
+                        analysis_error_examples.append(f"{coin}: {type(e).__name__}: {str(e)[:180]}")
+                    _rej("ошибка построения анализа")
+                    log.exception("Ошибка построения анализа %s", coin)
                     return
-                # Дополнительный детерминированный контроль качества: это score факторов, не вероятность прибыли.
-                primary_tf = tf_data.get("4h") or tf_data.get("1h") or {}
-                primary_df = primary_tf.get("df") if isinstance(primary_tf, dict) else None
-                res["market_regime"] = market_regime(primary_df)
-                res["volume_anomaly"] = volume_anomaly(primary_df)
-                res["quality_score"] = score_signal(res)
-                res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
-                                         else "C" if res["quality_score"] >= 62 else "D")
-                min_quality = float(os.getenv("MIN_SIGNAL_QUALITY", "62"))
-                if res["verdict"] == "ENTER" and res["quality_score"] >= min_quality:
-                    final.append(res)
-                    analysis_cache[coin] = (time.time(), 60, res)
-                    save_analysis_db(coin, res)
-                elif res["verdict"] != "ENTER":
-                    _rej("сетап получил рекомендацию ЖДАТЬ")
-                else:
-                    _rej(f"качество ниже порога {min_quality:.0f} ({res['quality_score']:.0f})")
 
         await asyncio.gather(*[s3(i) for i in stage2])
         final.sort(key=lambda r: r["strength"], reverse=True)
@@ -3533,23 +3582,34 @@ async def scan_once(send=True):
             diagnostic = "Кандидаты не прошли первичный фильтр силы/ADX или не получены данные 4h/1d"
         elif not stage2:
             diagnostic = "Первичные кандидаты есть, но сетапы не подтвердились на дополнительных таймфреймах/фильтрах"
-        elif bt_pass < len(stage2):
-            diagnostic = "Часть сетапов остановлена слабым бэктестом или ошибкой построения анализа"
         else:
-            diagnostic = "Сетапы прошли анализ, но получили ЖДАТЬ или качество ниже минимального порога"
+            diagnostic = scan_diagnostic_summary(
+                bt_rejected=bt_rejected, analysis_errors=analysis_errors, wait_count=analysis_wait,
+                quality_rejected=quality_rejected, bt_unavailable=bt_unavailable, bt_errors=bt_errors)
         last_scan_info.update(ts=int(time.time()), stage1=len(stage1), stage2=len(stage2), backtest_ok=bt_pass,
                               universe=len(universe), final=len(final), sent=sent_count, secs=int(time.time() - t0),
+                              bt_rejected=bt_rejected, bt_unavailable=bt_unavailable, bt_errors=bt_errors,
+                              bt_error_examples=bt_error_examples, analysis_errors=analysis_errors, analysis_wait=analysis_wait,
+                              quality_rejected=quality_rejected, analysis_error_examples=analysis_error_examples,
                               diagnostic=diagnostic, reasons=[{"reason": k, "count": v} for k, v in top_items])
         state_touch(False)
         log.info("Сканер: %s → %s → %s → backtest %s → final %s → sent %s; %s",
                  len(universe), len(stage1), len(stage2), bt_pass, len(final), sent_count, diagnostic)
         if send:
+            technical_lines = ("\n\n<b>Технические ошибки:</b>\n" + "\n".join(
+                html.escape(str(e)) for e in (bt_error_examples + analysis_error_examples)[:5])
+                if bt_error_examples or analysis_error_examples else "")
             await notify_admin(f"🔍 <b>Скан завершён</b> за {last_scan_info['secs']} с\n"
-                               f"Монет: {len(universe)} → {len(stage1)} → {len(stage2)} · бэктест {bt_pass} · итог {len(final)} · отправлено {sent_count}\n"
-                               f"🧾 Причина: {html.escape(diagnostic)}\nОтсев: {html.escape(top or '—')}")
+                               f"Монет: {len(universe)} → {len(stage1)} → {len(stage2)} · к анализу допущено {bt_pass} · итог {len(final)} · отправлено {sent_count}\n"
+                               f"🧾 Причина: {html.escape(diagnostic)}\nОтсев: {html.escape(top or '—')}" + technical_lines)
             if sent_count == 0:
+                breakdown = (f"Бэктест отклонил: {bt_rejected}; ошибок получения истории: {bt_errors}; "
+                             f"ошибок анализа: {analysis_errors}; ЖДАТЬ: {analysis_wait}; "
+                             f"качество ниже порога: {quality_rejected}; без истории: {bt_unavailable}.")
                 await notify_no_signal_users(diagnostic,
-                    f"Скан: {len(universe)} монет → {len(stage1)} кандидатов → {len(stage2)} сетапов → {len(final)} готовых → 0 опубликовано. " + ("Основной отсев: " + top if top else "Фильтры рынка пока не нашли подходящих входов."))
+                    f"Скан: {len(universe)} монет → {len(stage1)} кандидатов → {len(stage2)} сетапов → "
+                    f"{len(final)} готовых → 0 опубликовано. {breakdown} "
+                    + ("Основной отсев: " + top if top else "Фильтры рынка пока не нашли подходящих входов."))
         gc.collect()
         return final
 
@@ -6296,6 +6356,25 @@ async def create_support_ticket(m: types.Message, question: str, category: str =
     await m.answer(f"✅ <b>Обращение #{ticket_id} создано.</b>\nТема: {html.escape(category_label)}\n\n"
                    "Ответ поддержки придёт сюда же, в этот чат. Ваши личные контакты не публикуются.", parse_mode="HTML",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Меню поддержки", callback_data="support_menu")]]))
+
+
+@dp.message(Command("scan_report"))
+async def main_admin_scan_report(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    x = last_scan_info
+    if not x.get("ts"):
+        return await m.answer("Сканирование ещё не выполнялось.")
+    errors = (x.get("bt_error_examples") or []) + (x.get("analysis_error_examples") or [])
+    body = ("🔎 <b>Отчёт последнего сканирования</b>\n"
+            f"Монеты: {x.get('universe', 0)} → Stage 1: {x.get('stage1', 0)} → Stage 2: {x.get('stage2', 0)}\n"
+            f"К анализу допущено: {x.get('backtest_ok', 0)} · слабый бэктест: {x.get('bt_rejected', 0)} · без истории: {x.get('bt_unavailable', 0)} · ошибок истории: {x.get('bt_errors', 0)}\n"
+            f"Ошибок анализа: {x.get('analysis_errors', 0)} · ЖДАТЬ: {x.get('analysis_wait', 0)} · качество: {x.get('quality_rejected', 0)}\n"
+            f"Готово: {x.get('final', 0)} · опубликовано: {x.get('sent', 0)}\n"
+            f"Причина: {html.escape(str(x.get('diagnostic', '—')))}")
+    if errors:
+        body += "\n\n<b>Технические ошибки:</b>\n" + "\n".join(html.escape(str(e)) for e in errors[:3])
+    await m.answer(body, parse_mode="HTML")
 
 
 @dp.message(Command("tickets"))
