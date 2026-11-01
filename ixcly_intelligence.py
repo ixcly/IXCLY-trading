@@ -382,3 +382,24 @@ def cleanup(now=None):
             _cache.pop(key, None)
     while len(_cache) > CACHE_MAX:
         _cache.popitem(last=False)
+
+
+def scan_diagnostic_summary(bt_rejected=0, analysis_errors=0, wait_count=0,
+                            quality_rejected=0, bt_unavailable=0, bt_errors=0):
+    """Build a truthful no-signal summary; never conflate backtest rejects with exceptions."""
+    parts = []
+    if bt_rejected:
+        parts.append(f"слабый бэктест: {int(bt_rejected)}")
+    if bt_errors:
+        parts.append(f"ошибка получения истории бэктеста: {int(bt_errors)}")
+    if analysis_errors:
+        parts.append(f"ошибка построения анализа: {int(analysis_errors)}")
+    if wait_count:
+        parts.append(f"рекомендация ЖДАТЬ: {int(wait_count)}")
+    if quality_rejected:
+        parts.append(f"качество ниже порога: {int(quality_rejected)}")
+    if bt_unavailable:
+        parts.append(f"недостаточно истории для бэктеста: {int(bt_unavailable)}")
+    if not parts:
+        return "Новых сигналов нет: сетапы не прошли итоговую проверку."
+    return "Новых сигналов нет. Причины: " + "; ".join(parts) + "."
