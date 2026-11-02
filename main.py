@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v3.1 PRO
+IXCLY Trading Bot v4.4 MAX COGNITIVE
 
 - 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
 - Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
@@ -26,6 +26,7 @@ import signal
 import sys
 import threading
 import time
+import tempfile
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from threading import Thread
@@ -35,10 +36,17 @@ import socket
 
 import aiohttp
 import feedparser
+from ixcly_news import extract_rss_text, parse_article_html, assess_news_coverage, cap_critical_score
+import ixcly_billing as billing  # заказы Stars, проверка платежей, статусы доступа
 import numpy as np
 import pandas as pd
 from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, breakeven_trigger_reached, close_warning_confirmed,
-                               scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence)
+                               scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence,
+                               forecast_scenarios, early_movement_assessment, liquidation_risk_assessment,
+                               signal_quality_breakdown, strategy_performance, self_audit_summary)
+from ixcly_brain import (market_fingerprint, signal_fingerprint, decision_brain, liquidity_path,
+                        news_reaction_assessment, strategy_dna, counterfactual_lab, replay_signal,
+                        regime_transition_assessment, signal_fragility, evidence_conflict_map, score_calibration)
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -158,11 +166,7 @@ def home():
 
 @app.route("/health")
 def health():
-    # Lightweight liveness/readiness probe: no exchange or Telegram API calls here.
-    age = time.time() - float(runtime.get("heartbeat_ts", 0) or 0)
-    alive = bool(runtime.get("heartbeat_ts")) and age < 900
-    return jsonify({"status": "ok" if alive else "starting", "heartbeat_age_s": int(age),
-                    "rss_mb": _current_rss_mb()}), (200 if alive else 503)
+    return "ok"
 
 
 @app.route("/status")
@@ -172,8 +176,6 @@ def status_page():
         "main_bot": runtime["main_bot"], "admin_bot": runtime["admin_bot"], "news_engine": market_bias.get("engine"),
         "last_scan": (None if is_memory_guard_reason(last_scan_info.get("diagnostic", "")) else dict(last_scan_info)),
         "peak_rss_mb": _rss_mb(), "rss_mb": _current_rss_mb(),
-        "heartbeat_age_s": int(max(0, time.time() - float(runtime.get("heartbeat_ts", 0) or 0))),
-        "background": dict(runtime.get("background", {})),
     })
 
 
@@ -242,8 +244,8 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.1-MAX-INTEL"
-runtime = {"main_bot": "?", "admin_bot": "не запущен", "background": {}, "heartbeat_ts": 0.0}
+VERSION = "4.5.0-BILLING"
+runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
 CONF_STAGE1 = float(os.getenv("CONF_STAGE1", "55"))
@@ -369,13 +371,30 @@ _alert_sent = {}
 # =====================================================================
 # ХРАНИЛИЩЕ СОСТОЯНИЯ (память + файл + бэкап в Telegram)
 # =====================================================================
-STATE_FILE = "bot_state.json"
+# Render: /var/data доступен только при корректно подключённом и доступном диске.
+# На Render Free при PermissionError используем временный каталог, чтобы бот не падал.
+_REQUESTED_DATA_DIR = (os.getenv("IXCLY_DATA_DIR") or os.getenv("RENDER_DISK_PATH") or ".").strip() or "."
+_DATA_DIR = _REQUESTED_DATA_DIR
+_DATA_DIR_FALLBACK = False
+try:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+except PermissionError as _data_dir_error:
+    _DATA_DIR = os.getenv("IXCLY_FALLBACK_DATA_DIR") or os.path.join(tempfile.gettempdir(), "ixcly_data")
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    _DATA_DIR_FALLBACK = True
+    log.warning("Нет доступа к IXCLY_DATA_DIR=%s (%s). Используется временное хранилище %s; данные могут исчезнуть после перезапуска/деплоя.",
+                _REQUESTED_DATA_DIR, _data_dir_error, _DATA_DIR)
+STATE_FILE = os.path.join(_DATA_DIR, "bot_state.json")
+LEGACY_STATE_FILE = os.path.join(os.getcwd(), "bot_state.json")
+LOCAL_BACKUP_FILES = (STATE_FILE + ".bak", STATE_FILE + ".bak2")
+BACKUP_INTERVAL = max(900, int(os.getenv("IXCLY_BACKUP_INTERVAL", "21600")))  # 6 часов по умолчанию
 STATE_LOCK = threading.RLock()
-STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}, "payments": {"orders": {}, "charges": {}}}
+STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}, "orders": {}, "payments": {}}
 state_dirty = False
 backup_dirty = False
 last_backup_ts = 0.0
-STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper", "support_tickets", "payments")
+STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper", "support_tickets",
+              "orders", "payments")  # orders/payments — заказы и платежи Stars, переживают рестарт и попадают в бэкап
 
 
 def state_touch(important=True):
@@ -442,14 +461,49 @@ def restore_state(data, force=False):
     return n
 
 
-def load_state_file():
-    if not os.path.exists(STATE_FILE):
-        return
+def _read_state_candidate(path):
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            restore_state(json.load(f), force=True)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("users", {}), dict):
+            raise ValueError("неверная структура состояния")
+        return data
     except Exception as e:
-        log.error(f"Не удалось прочитать {STATE_FILE}: {e}")
+        log.warning(f"Файл состояния {path} недоступен: {e}")
+        return None
+
+
+def load_state_file():
+    """Загружает основной файл, затем локальные резервные копии и legacy-путь."""
+    candidates = [STATE_FILE, *LOCAL_BACKUP_FILES]
+    if os.path.abspath(LEGACY_STATE_FILE) != os.path.abspath(STATE_FILE):
+        candidates.append(LEGACY_STATE_FILE)
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        data = _read_state_candidate(path)
+        if data is None:
+            continue
+        n = restore_state(data, force=True)
+        log.info(f"Состояние загружено из {path}; пользователей: {n}")
+        if path != STATE_FILE:
+            state_touch(False)
+        return n
+    log.warning("Локальное состояние не найдено; при старте будет выполнена попытка восстановления из Telegram.")
+    return 0
+
+
+def _rotate_local_backups():
+    """Сохраняет две предыдущие версии перед атомарной заменой основного JSON."""
+    try:
+        if os.path.exists(LOCAL_BACKUP_FILES[0]):
+            import shutil
+            shutil.copy2(LOCAL_BACKUP_FILES[0], LOCAL_BACKUP_FILES[1])
+        if os.path.exists(STATE_FILE):
+            import shutil
+            shutil.copy2(STATE_FILE, LOCAL_BACKUP_FILES[0])
+    except Exception as e:
+        log.warning(f"Не удалось обновить локальные резервные копии: {e}")
 
 
 def flush_state():
@@ -473,6 +527,9 @@ def flush_state():
         try:
             with open(STATE_FILE + ".tmp", "w", encoding="utf-8") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            _rotate_local_backups()
             os.replace(STATE_FILE + ".tmp", STATE_FILE)
             state_dirty = False
         except Exception as e:
@@ -1213,6 +1270,25 @@ def add_indicators(df):
     hh, ll = h.rolling(14).max(), l.rolling(14).min()
     df["wr"] = (-100 * (hh - c) / (hh - ll).replace(0, np.nan)).fillna(-50)
 
+    # Дополнительные контекстные индикаторы: поток денег, каналы и режим волатильности.
+    mf_mult = (((c - l) - (h - c)) / (h - l).replace(0, np.nan)).fillna(0.0)
+    mf_vol = mf_mult * v
+    df["cmf"] = (mf_vol.rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)).fillna(0.0)
+    kc_mid = c.ewm(span=20, adjust=False).mean()
+    kc_atr = df["atr"]
+    df["kc_upper"] = kc_mid + 1.5 * kc_atr
+    df["kc_lower"] = kc_mid - 1.5 * kc_atr
+    df["kc_pos"] = ((c - df["kc_lower"]) /
+                    (df["kc_upper"] - df["kc_lower"]).replace(0, np.nan)).clip(-1, 2).fillna(0.5)
+    dc_hi = h.shift(1).rolling(20).max()
+    dc_lo = l.shift(1).rolling(20).min()
+    df["donchian_pos"] = ((c - dc_lo) / (dc_hi - dc_lo).replace(0, np.nan)).clip(-1, 2).fillna(0.5)
+    atr_pct = (df["atr"] / c.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    df["atr_pct"] = atr_pct.fillna(0.0)
+    df["volatility_percentile"] = atr_pct.rolling(100, min_periods=30).rank(pct=True).fillna(0.5)
+    df["volume_pressure"] = (((c - o) / (h - l).replace(0, np.nan)) *
+                             (v / v.rolling(20).mean().replace(0, np.nan))).clip(-5, 5).fillna(0.0)
+
     df["obv"] = (np.sign(c.diff()) * v).fillna(0).cumsum()
     df["obv_ema"] = df["obv"].ewm(span=20, adjust=False).mean()
     df["rel_vol"] = (v / v.rolling(20).mean().replace(0, np.nan)).fillna(1.0)
@@ -1271,7 +1347,14 @@ def add_scores(df):
     div = np.where(df["div_bull"].values, 15, 0) - np.where(df["div_bear"].values, 15, 0)
     brk = np.where(df["brk_up"].values, 10, 0) - np.where(df["brk_dn"].values, 10, 0)
     vwap_s = np.where(c > df["vwap"].values, 5, -5)
-    pa = np.clip((pat + vol_conf + obv_s + div + brk + vwap_s) * 1.3, -100, 100)
+    # CMF подтверждает направление денежного потока; Donchian/Keltner оценивают положение цены.
+    cmf_s = np.clip(df["cmf"].values * 35, -8, 8)
+    donchian_s = np.clip((df["donchian_pos"].values - 0.5) * 10, -5, 5)
+    kc_s = np.clip((df["kc_pos"].values - 0.5) * 6, -3, 3)
+    vol_pressure_s = np.clip(df["volume_pressure"].values * 1.5, -6, 6)
+    legacy_pa = (pat + vol_conf + obv_s + div + brk + vwap_s) * 1.3
+    new_context = (cmf_s + donchian_s + kc_s + vol_pressure_s) * 0.45
+    pa = np.clip(legacy_pa + new_context, -100, 100)
 
     w_t = np.where(trending, 0.5, np.where(ranging, 0.25, 0.4))
     w_m = np.where(trending, 0.2, np.where(ranging, 0.45, 0.3))
@@ -1312,6 +1395,18 @@ def explain_last(df):
         add(18, 1, "Бычья дивергенция RSI")
     if r["div_bear"]:
         add(18, -1, "Медвежья дивергенция RSI")
+    if r.get("cmf", 0) >= 0.08:
+        add(8, 1, f"CMF: приток капитала ({r['cmf']:+.2f})")
+    elif r.get("cmf", 0) <= -0.08:
+        add(8, -1, f"CMF: отток капитала ({r['cmf']:+.2f})")
+    if r.get("volatility_percentile", 0.5) >= 0.90:
+        add(7, 0, "Волатильность в верхних 10% истории: риск резких колебаний")
+    elif r.get("volatility_percentile", 0.5) <= 0.15:
+        add(5, 0, "Низкая волатильность: возможна фаза сжатия")
+    if r.get("donchian_pos", 0.5) >= 0.95:
+        add(7, 1, "Цена у верхней границы канала Donchian")
+    elif r.get("donchian_pos", 0.5) <= 0.05:
+        add(7, -1, "Цена у нижней границы канала Donchian")
     if r["bb_pct"] < 0:
         add(12, 1, "Цена под нижней полосой Боллинджера")
     elif r["bb_pct"] > 1:
@@ -1911,6 +2006,7 @@ NEWS_FEEDS = [
     "https://bits.media/rss/news/", "https://coinspot.io/feed/", "https://www.rbc.ru/crypto/rss",
 ]
 _news_cache = {"ts": 0.0, "entries": []}
+_news_article_cache = {}  # URL -> enriched source data; short TTL avoids repeated publisher requests.
 BROWSER_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
 
 
@@ -1934,6 +2030,67 @@ async def get_news_entries():
         entries.sort(key=lambda x: getattr(x, "published_parsed", None) or time.gmtime(0), reverse=True)
         _news_cache.update(ts=time.time(), entries=entries[:10])
     return _news_cache["entries"]
+
+
+async def enrich_news_entry(entry):
+    """Получает доступный текст новости: RSS -> публичная HTML-страница -> метаданные."""
+    url = str(getattr(entry, "link", "") or "").strip()
+    now = time.time()
+    cached = _news_article_cache.get(url)
+    if url and cached and now - cached.get("ts", 0) < 900:
+        return dict(cached)
+
+    rss_text = extract_rss_text(entry)
+    best_text = rss_text
+    method = "rss_content" if len(rss_text) >= 60 else "rss_title_only"
+    description = rss_text[:1200]
+    page_title = ""
+
+    # Полную страницу запрашиваем только когда RSS не дал содержательного текста.
+    if len(rss_text) < 500 and url.startswith(("https://", "http://")):
+        try:
+            async with http.get(url, headers=BROWSER_UA,
+                                timeout=aiohttp.ClientTimeout(total=7),
+                                allow_redirects=True) as response:
+                content_type = response.headers.get("Content-Type", "").lower()
+                if response.status == 200 and "html" in content_type:
+                    raw = await response.content.read(800_000)
+                    charset = response.charset or "utf-8"
+                    page = raw.decode(charset, errors="replace")
+                    extracted = parse_article_html(page)
+                    page_title = extracted.get("title", "")
+                    page_body = extracted.get("body", "") or ""
+                    page_desc = extracted.get("description", "") or ""
+                    if len(page_body) > len(best_text):
+                        best_text = page_body
+                        method = extracted.get("method", "html_article")
+                    elif len(page_desc) > len(best_text):
+                        best_text = page_desc
+                        method = "open_graph_or_meta_description"
+                    if page_desc:
+                        description = page_desc[:1200]
+                elif response.status in (401, 402, 403, 451):
+                    method = "publisher_restricted"
+                elif response.status in (429, 503):
+                    method = "publisher_rate_limited"
+        except Exception as exc:
+            log.debug("Не удалось извлечь текст новости %s: %s", url, exc)
+            if not rss_text:
+                method = "page_fetch_failed"
+
+    coverage = assess_news_coverage(best_text)
+    result = {"text": best_text[:12000], "description": description,
+              "page_title": page_title, "method": method,
+              "level": coverage["level"], "confidence": coverage["confidence"],
+              "text_chars": coverage["text_chars"], "ts": now}
+    if url:
+        _news_article_cache[url] = result
+        # Keep memory bounded on the 512 MB service.
+        if len(_news_article_cache) > 60:
+            oldest = sorted(_news_article_cache, key=lambda k: _news_article_cache[k].get("ts", 0))[:20]
+            for key in oldest:
+                _news_article_cache.pop(key, None)
+    return result
 
 
 def _normalise_image_url(url):
@@ -2077,16 +2234,35 @@ async def update_market_bias(force=False):
                 return
             entry = entries[0]
             link, now = getattr(entry, "link", ""), time.time()
-            if not force and market_bias.get("link") == link and market_bias.get("engine") not in ("none", "fallback"):
+            if not force and market_bias.get("link") == link and market_bias.get("engine") not in ("none", "fallback", "preliminary"):
                 market_bias["ts"] = now
                 return
-            title = html.unescape(getattr(entry, "title", "") or "")
-            summary = clean_summary(getattr(entry, "summary", ""))
+            title = html.unescape(getattr(entry, "title", "") or "").strip()
+            source = await enrich_news_entry(entry)
+            title = title or str(source.get("page_title", "") or "").strip()
+            summary = source.get("text", "") or source.get("description", "") or ""
             published = get_moscow_time_from_entry(entry)
-            prompt = f"""Ты редактор новостной ленты крипторынка. Используй ТОЛЬКО факты из источника.
+            level = source.get("level", "title_only")
+            confidence = source.get("confidence", "low")
+            source_method = source.get("method", "rss_title_only")
+
+            if level == "title_only":
+                # Заголовок можно показать и перевести, но нельзя выдавать его за фактический разбор.
+                title_ru = await translate_text(title)
+                summary_ru = "Предварительно по заголовку: " + clean_news_field(title_ru, 220, 1)
+                impact_ru = ("По одному заголовку нельзя надёжно определить направление рынка. "
+                             "Нужны подтверждение в других источниках и реакция цены и объёма.")
+                bias = 0
+                coins = ", ".join(mentioned_coins(title)) or "Не указаны в источнике"
+                engine = "preliminary"
+                title_ru = clean_news_field(title_ru, 140, 1) or title[:140]
+            else:
+                prompt = f"""Ты редактор новостной ленты крипторынка. Используй ТОЛЬКО факты из переданного источника.
 Не додумывай суммы, виновников, последствия, тикеры и причинно-следственные связи.
 Не называй криптовалюты акциями. Если актив не назван прямо, укажи в COINS: Не указаны.
 Не повторяй заголовок в SUMMARY. Не используй нумерацию и списки.
+УРОВЕНЬ ИСТОЧНИКА: {level}; символов текста: {source.get('text_chars', 0)}; метод: {source_method}.
+Если источник неполный, обязательно назови вывод предварительным и не заполняй пробелы догадками.
 Верни ровно 5 полей, каждое с новой строки:
 BIAS: BULLISH или BEARISH или NEUTRAL
 TITLE_RU: точный перевод заголовка, до 140 символов
@@ -2095,37 +2271,47 @@ IMPACT: 1-2 коротких предложения, осторожное объ
 COINS: только тикеры, прямо подтверждённые текстом, через запятую; иначе Не указаны
 
 ЗАГОЛОВОК: {title[:350]}
-ТЕКСТ ИСТОЧНИКА: {summary[:1200]}"""
-            text, engine = await ask_ai_named(prompt, validate=_valid_news_ai)
-            if text and _valid_news_ai(text):
-                p = parse_news_ai(text)
-                up = p.get("BIAS", "").upper()
-                bias = 1 if ("BULL" in up or "БЫЧ" in up) else -1 if ("BEAR" in up or "МЕДВ" in up) else 0
-                summary_ru = clean_news_field(p.get("SUMMARY", ""), 320, 2)
-                impact_ru = clean_news_field(p.get("IMPACT", ""), 240, 2)
-                allowed = {"BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TON", "AVAX", "LINK", "DOT", "LTC", "TRX", "USDT", "USDC"}
-                raw_coins = p.get("COINS", "").upper()
-                coin_tokens = [x for x in re.findall(r"\b[A-Z]{2,8}\b", raw_coins) if x in allowed]
-                source_coins = mentioned_coins(f"{title} {summary}")
-                coins = ", ".join(dict.fromkeys(coin_tokens or source_coins)) or "Не указаны в источнике"
-                if not summary_ru:
-                    summary_ru = clean_news_field(await translate_text(summary or title), 320, 2)
-                if not impact_ru:
-                    impact_ru = IMPACT_TEMPLATES[bias]
-                market_bias = {"bias": bias, "title_ru": clean_news_field(p["TITLE_RU"], 140, 1),
-                               "summary": summary_ru, "impact": impact_ru, "coins": coins,
-                               "published": published, "link": link, "engine": engine, "ts": now}
-            else:
-                bias = news_sentiment(f"{title}. {summary}")
-                title_ru = await translate_text(title)
-                summary_ru = clean_news_field(await translate_text(summary) if summary else title_ru, 320, 2)
-                market_bias = {"bias": bias, "title_ru": clean_news_field(title_ru, 140, 1),
-                               "summary": summary_ru, "impact": IMPACT_TEMPLATES[bias],
-                               "coins": ", ".join(mentioned_coins(f"{title} {summary}")) or "Не указаны в источнике",
-                               "published": published, "link": link, "engine": "fallback", "ts": now}
-            # Severity/relevance is computed locally from the source text. It does not
-            # turn a single headline into an automatic global signal shutdown.
+ТЕКСТ ИСТОЧНИКА: {summary[:6000]}"""
+                text, engine = await ask_ai_named(prompt, validate=_valid_news_ai)
+                if text and _valid_news_ai(text):
+                    p = parse_news_ai(text)
+                    up = p.get("BIAS", "").upper()
+                    bias = 1 if ("BULL" in up or "БЫЧ" in up) else -1 if ("BEAR" in up or "МЕДВ" in up) else 0
+                    summary_ru = clean_news_field(p.get("SUMMARY", ""), 320, 2)
+                    impact_ru = clean_news_field(p.get("IMPACT", ""), 240, 2)
+                    allowed = {"BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TON", "AVAX", "LINK", "DOT", "LTC", "TRX", "USDT", "USDC"}
+                    raw_coins = p.get("COINS", "").upper()
+                    coin_tokens = [x for x in re.findall(r"\b[A-Z]{2,8}\b", raw_coins) if x in allowed]
+                    source_coins = mentioned_coins(f"{title} {summary}")
+                    coins = ", ".join(dict.fromkeys(coin_tokens or source_coins)) or "Не указаны в источнике"
+                    if not summary_ru:
+                        summary_ru = clean_news_field(await translate_text(summary or title), 320, 2)
+                    if not impact_ru:
+                        impact_ru = IMPACT_TEMPLATES[bias]
+                    title_ru = clean_news_field(p.get("TITLE_RU", ""), 140, 1)
+                else:
+                    # Резервный путь: только доступный RSS/страничный текст, без выдуманных деталей.
+                    bias = news_sentiment(f"{title}. {summary}") if len(summary) >= 180 else 0
+                    title_ru = clean_news_field(await translate_text(title), 140, 1)
+                    summary_ru = clean_news_field(await translate_text(summary), 320, 2) if summary else "Недостаточно данных для пересказа."
+                    impact_ru = ("Оценка предварительная: направление рынка требует подтверждения ценой, объёмом и независимыми источниками."
+                                 if level == "partial" else IMPACT_TEMPLATES[bias])
+                    coins = ", ".join(mentioned_coins(f"{title} {summary}")) or "Не указаны в источнике"
+                    engine = "fallback"
+                if level == "partial":
+                    summary_ru = "Предварительно: " + (summary_ru or "доступна только часть материала")
+                    impact_ru = "Предварительная оценка. " + (impact_ru or "Нужны дополнительные подтверждения.")
+
+            market_bias = {"bias": bias, "title_ru": title_ru,
+                           "summary": summary_ru, "impact": impact_ru, "coins": coins,
+                           "published": published, "link": link, "engine": engine, "ts": now,
+                           "analysis_level": level, "confidence": confidence,
+                           "source_method": source_method, "source_text_chars": source.get("text_chars", 0)}
+            # Severity/relevance is computed locally from available source text; it never
+            # treats a missing body as proof of a neutral event or triggers a panic by itself.
             crit_score, _crit_reason = classify_critical(title, summary)
+            # A headline-only/partial record must not trigger a market-wide panic state.
+            crit_score = cap_critical_score(crit_score, level)
             market_bias["severity"] = "critical" if crit_score >= 7 else "high" if crit_score >= 5 else "medium" if crit_score >= 3 else "low"
             market_bias["critical_score"] = int(crit_score)
             state_touch(False)
@@ -2136,16 +2322,25 @@ COINS: только тикеры, прямо подтверждённые тек
 def format_news_post(nb, limit=1000):
     """Короткая новостная карточка в одном стиле для Telegram."""
     emoji = {1: "🟢", 0: "⚪", -1: "🔴"}.get(nb.get("bias", 0), "⚪")
+    level = nb.get("analysis_level", "full")
     label = {1: "Позитивно", 0: "Нейтрально", -1: "Негативно"}.get(nb.get("bias", 0), "Нейтрально")
+    if level == "title_only":
+        emoji, label = "⚪", "Недостаточно данных · предварительно"
+    elif level == "partial":
+        label = "Предварительно · " + label.lower()
     link = f'\n\n🔗 <a href="{html.escape(nb["link"], quote=True)}">Источник</a>' if nb.get("link") else ""
     title = clean_news_field(nb.get("title_ru", ""), 140, 1)
     summary = clean_news_field(nb.get("summary", ""), 300, 2) or "В источнике недостаточно подробностей для краткого пересказа."
     impact = clean_news_field(nb.get("impact", ""), 220, 2) or IMPACT_TEMPLATES.get(nb.get("bias", 0), IMPACT_TEMPLATES[0])
     coins = clean_news_field(nb.get("coins", ""), 90, 1) or "Не указаны в источнике"
+    coverage = (f"\n<em>Основа: {html.escape(str(nb.get('source_method', 'RSS')))} · "
+                f"уверенность: {html.escape(str(nb.get('confidence', 'low')))} · "
+                f"текста: {int(nb.get('source_text_chars', 0) or 0)} знаков</em>"
+                if level in ("partial", "title_only") else "")
     text = (f"📰 <b>{html.escape(title)}</b>\n"
             f"🕒 <i>{html.escape(nb.get('published', ''))}</i>\n\n"
             f"📌 <b>Суть</b>\n{html.escape(summary)}\n\n"
-            f"📊 <b>Влияние</b>\n{emoji} <b>{label}.</b> {html.escape(impact)}\n\n"
+            f"📊 <b>Влияние</b>\n{emoji} <b>{label}.</b> {html.escape(impact)}{coverage}\n\n"
             f"🪙 <b>Монеты:</b> {html.escape(coins)}{link}")
     return trim_html(text, limit)
 
@@ -2172,13 +2367,19 @@ async def get_news_batch_text():
     used = set()
     for entry in entries[:3]:
         title = html.unescape(getattr(entry, "title", "") or "").strip()
-        summary = clean_summary(getattr(entry, "summary", ""))
+        source = await enrich_news_entry(entry)
+        summary = source.get("text", "") or source.get("description", "") or ""
         if not title:
             continue
         title_ru = clean_news_field(await translate_text(title), 150, 1) or title[:150]
         summary_ru = clean_news_field(await translate_text(summary), 260, 2) if summary else ""
-        sentiment = news_sentiment(f"{title} {summary}")
-        label = "🟢 Позитивный фон" if sentiment > 0 else "🔴 Негативный фон" if sentiment < 0 else "⚪ Нейтрально / недостаточно данных"
+        sentiment = news_sentiment(f"{title} {summary}") if len(summary) >= 180 else 0
+        if source.get("level") == "title_only":
+            label = "⚪ Предварительно · только заголовок, данных недостаточно"
+        elif source.get("level") == "partial":
+            label = "⚪ Предварительная оценка · источник неполный"
+        else:
+            label = "🟢 Позитивный фон" if sentiment > 0 else "🔴 Негативный фон" if sentiment < 0 else "⚪ Нейтрально"
         coins = ", ".join(mentioned_coins(f"{title} {summary}")) or "Не указаны в источнике"
         link = getattr(entry, "link", "") or ""
         key = (title.lower(), link)
@@ -2189,6 +2390,8 @@ async def get_news_batch_text():
         if summary_ru:
             out.append(html.escape(summary_ru))
         out.append(f"{label} · Монеты: {html.escape(coins)}")
+        if source.get("level") != "full":
+            out.append(f"<i>Источник: {html.escape(str(source.get('method', 'RSS')))} · уверенность: {html.escape(str(source.get('confidence', 'low')))}</i>")
         if link:
             out.append(f'<a href="{html.escape(link, quote=True)}">Источник</a>')
     return trim_html("\n\n".join(out), 3900)
@@ -3084,6 +3287,37 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "atr_stop_multiplier": atr_stop_multiplier(info.get("adx"), (info.get("atr", 0) / info.get("price", 1) * 100)),
         "sr": info.get("sr", {}),
     }
+    # IXCLY Decision Brain: explainable research layer; does not execute orders.
+    try:
+        _brain_df = info.get("df")
+        _brain_news = setup.get("extras", {}).get("news_risk", {})
+        _brain_early = early_movement_assessment(
+            _brain_df, setup.get("extras", {}).get("oi_pct"),
+            setup.get("extras", {}).get("imbalance"),
+            setup.get("extras", {}).get("funding"),
+            volume_anomaly(_brain_df) if _brain_df is not None else None)
+        _brain_crowd = liquidation_risk_assessment(
+            setup.get("extras", {}).get("funding"),
+            setup.get("extras", {}).get("oi_pct"),
+            setup.get("extras", {}).get("price_pct"))
+        _brain_ctx = {"news_risk": _brain_news}
+        _brain_ctx["orderbook_bid_share"] = setup.get("extras", {}).get("imbalance")
+        res["market_fingerprint"] = market_fingerprint(coin, _brain_df, load_signal_history())
+        res["signal_dna"] = signal_fingerprint(res, setup, _brain_ctx)
+        res["decision_brain"] = decision_brain(res["signal_dna"], _brain_early, _brain_crowd,
+                                                 _brain_news, res.get("bt"))
+        res["regime_transition"] = regime_transition_assessment(_brain_df) if _brain_df is not None else {"status": "insufficient_data"}
+        res["signal_fragility"] = signal_fragility(res["signal_dna"])
+        res["evidence_conflict_map"] = evidence_conflict_map(
+            res.get("side"), {"orderbook_bid_share": setup.get("extras", {}).get("imbalance"),
+                               "funding": setup.get("extras", {}).get("funding"),
+                               "news_bias": setup.get("extras", {}).get("news_bias")}, _brain_df)
+        # Only severe, low-score contradictions can downgrade an ENTER; legacy filters remain intact.
+        if res.get("verdict") == "ENTER" and res["decision_brain"].get("action") == "BLOCK":
+            res["verdict"] = "WAIT"
+            res["comment"] = "Decision Brain: " + res["decision_brain"].get("reason", "повышенный риск")
+    except Exception as _brain_err:
+        log.debug("Decision Brain analysis skipped for %s: %s", coin, _brain_err)
     res["text"] = render_caption(res)
     return res
 
@@ -3292,6 +3526,68 @@ def signal_recipients(coin, side):
     return out
 
 
+def format_no_signal_message(reason, details=""):
+    """Читабельный Telegram-отчёт без потери диагностических чисел."""
+    raw = str(details or "")
+    reason_text = html.escape(str(reason or "Сетапы не прошли итоговую проверку."))
+    scan_match = re.search(
+        r"Скан:\s*(\d+)\s*монет\s*→\s*(\d+)\s*кандидатов\s*→\s*(\d+)\s*сетапов\s*→\s*(\d+)\s*готовых\s*→\s*(\d+)\s*опубликовано",
+        raw, re.I)
+    stats_match = re.search(
+        r"Бэктест отклонил:\s*(\d+);\s*ошибок получения истории:\s*(\d+);\s*ошибок анализа:\s*(\d+);\s*ЖДАТЬ:\s*(\d+);\s*качество ниже порога:\s*(\d+);\s*без истории:\s*(\d+)",
+        raw, re.I)
+    reject_match = re.search(r"Основной отсев:\s*(.*)$", raw, re.I | re.S)
+    lines = [
+        "ℹ️ <b>Новых сигналов пока нет</b>",
+        "",
+        "🧭 <b>Итог сканирования</b>",
+        ("<i>Ни один сетап не прошёл все проверки для публикации.</i>"
+         if stats_match else f"<i>{reason_text}</i>"),
+    ]
+    if scan_match:
+        a, b, c, d, e = scan_match.groups()
+        lines += [
+            f"🔎 Проверено монет: <b>{a}</b>",
+            f"├ Кандидаты: <b>{b}</b>",
+            f"├ Подтверждённые сетапы: <b>{c}</b>",
+            f"├ Готовы к публикации: <b>{d}</b>",
+            f"└ Опубликовано: <b>{e}</b>",
+        ]
+    if stats_match:
+        bt, hist_err, analysis_err, wait, quality, no_history = map(int, stats_match.groups())
+        lines += [
+            "",
+            "📊 <b>Почему сетапы не прошли</b>",
+            f"• Слабый результат бэктеста: <b>{bt}</b>",
+            f"• Рекомендация «ЖДАТЬ»: <b>{wait}</b>",
+            f"• Недостаточно истории: <b>{no_history}</b>",
+            f"• Качество ниже порога: <b>{quality}</b>",
+            f"• Ошибки истории / анализа: <b>{hist_err} / {analysis_err}</b>",
+        ]
+    if reject_match:
+        entries = []
+        for part in reject_match.group(1).strip().rstrip(".").split(";"):
+            part = part.strip()
+            m = re.match(r"(.+?):\s*(\d+)$", part)
+            if m:
+                entries.append((m.group(1).strip(), int(m.group(2))))
+        entries.sort(key=lambda x: x[1], reverse=True)
+        if entries:
+            lines += ["", "🧱 <b>Главные фильтры отбора</b>"]
+            for name, count in entries[:5]:
+                lines.append(f"• {html.escape(name)} — <b>{count}</b>")
+            if len(entries) > 5:
+                lines.append(f"<i>Ещё фильтров: {len(entries) - 5}</i>")
+    lines += [
+        "",
+        "🛡️ <b>Почему это нормально</b>",
+        "Бот не создаёт сигнал ради количества. Если бэктест слабый, таймфреймы спорят или вход запоздал — сетап остаётся за пределами публикации.",
+        "",
+        "💡 <i>Ожидание — тоже решение. Следующий сигнал появится только после прохождения проверок.</i>",
+    ]
+    return "\n".join(lines)
+
+
 async def notify_no_signal_users(reason, details=""):
     """Редкое персональное уведомление; внутренние события RAM доступны только администраторам."""
     global last_no_signal_notice
@@ -3303,12 +3599,9 @@ async def notify_no_signal_users(reason, details=""):
         return
     last_no_signal_notice = now
     technical_issue = "ошибка" in str(reason).lower()
-    disclaimer = ("\n⚠️ Обнаружен технический сбой. Он отдельно зафиксирован для проверки; слабые сигналы не будут публиковаться."
-                  if technical_issue else
-                  "\nЭто не ошибка и не прогноз: бот не будет создавать слабый сигнал ради количества.")
-    body = ("ℹ️ <b>Новых сигналов пока нет</b>\n"
-            f"Причина: {html.escape(str(reason))}\n"
-            + (html.escape(str(details)) + "\n" if details else "") + disclaimer)
+    disclaimer = ("\n\n⚠️ <b>Техническое замечание:</b> обнаруженная ошибка записана в журнал и проверяется отдельно."
+                  if technical_issue else "")
+    body = format_no_signal_message(reason, details) + disclaimer
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Открыть Mini App", web_app=WebAppInfo(url=webapp_link(tab="signals")))]] ) if WEBAPP_URL else None
     for cid in signal_recipients("", ""):
         try:
@@ -3593,6 +3886,11 @@ async def scan_once(send=True):
                         "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "quality_score": r.get("quality_score"),
                         "quality_label": r.get("quality_label"), "market_regime": r.get("market_regime"),
                         "volume_anomaly": r.get("volume_anomaly"),
+                        "market_fingerprint": (r.get("market_fingerprint") or {}).get("features", {}),
+                        "signal_dna": r.get("signal_dna"), "decision_brain": r.get("decision_brain"),
+                        "regime_transition": r.get("regime_transition"),
+                        "signal_fragility": r.get("signal_fragility"),
+                        "evidence_conflict_map": r.get("evidence_conflict_map"),
                         "memory_features": {"regime": (r.get("market_regime") or {}).get("name", "unknown"),
                                              "quality": r.get("quality_score"), "atr_pct": (r.get("indicators") or {}).get("atr_pct"),
                                              "rsi": r.get("rsi"), "adx": r.get("adx"), "btc_context": r.get("btc_txt"),
@@ -4282,8 +4580,12 @@ async def news_watcher_loop():
                                     await _send_new(cid, text, kb_nav([[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]], back=False), img)
                                     sent += 1
                                     await asyncio.sleep(0.05)
-                                except Exception:
-                                    pass
+                                except TelegramForbiddenError:
+                                    # Пользователь заблокировал бота — не тратим запросы на него в следующих рассылках
+                                    mark_users_inactive([cid])
+                                    active_chats.discard(cid)
+                                except Exception as e:
+                                    log.info(f"news send {cid}: {e}")
                             stats["news_sent"] += sent
         except Exception as e:
             log.warning(f"news_watcher: {e}", exc_info=True)
@@ -4575,39 +4877,60 @@ API_CACHE = {}
 # --- API ДЛЯ ОПЛАТЫ В WEBAPP ---
 
 
+_INVOICE_RL = {}  # uid -> ts последнего запроса счёта (антиспам)
+
+
 @app.route("/api/create_stars_invoice", methods=["POST"])
 def api_create_stars_invoice():
     d = request.get_json(silent=True) or {}
     u = tg_auth(d.get("initData", ""))
     if not u:
         return Response('{"error":"Откройте из Telegram"}', 401, mimetype="application/json")
-    
     try:
-        days = int(d.get("days", 30))
-        if days not in PLANS:
-            return jsonify({"error": "Неверный тариф"})
-            
-        price = price_for_user(int(u["id"]), days)
-        title = PLAN_TITLE[days]
+        uid = int(u["id"])
+        days = int(d.get("days", 0))
+        expected = d.get("expected_stars")
+        expected = int(expected) if expected is not None else None
+    except (TypeError, ValueError, KeyError):
+        return jsonify({"error": "Неверные данные тарифа"})
+    if days not in PLANS:
+        return jsonify({"error": "Неверный тариф. Обновите приложение и выберите тариф заново."})
+    now = time.time()
+    if now - _INVOICE_RL.get(uid, 0) < 1.5:
+        return jsonify({"error": "Слишком часто. Подождите секунду и повторите."})
+    _INVOICE_RL[uid] = now
+    if len(_INVOICE_RL) > 2000:
+        _INVOICE_RL.clear()
 
-        async def _create():
-            # Сумма зафиксирована в payload, чтобы Mini App и Telegram invoice
-            # использовали одну цену и нельзя было оплатить другой тариф.
-            return await bot.create_invoice_link(
-                title=f"IXCLY PRO · {title}",
-                description=f"Доступ к сигналам и аналитике на {days} дней",
-                payload=f"plan:{days}:{price}",
-                currency="XTR",
-                prices=[LabeledPrice(label=title, amount=price)],
-                provider_token=""
-            )
-            
-        link = asyncio.run_coroutine_threadsafe(_create(), MAIN_LOOP).result(10)
-        return jsonify({"link": link})
-        
+    async def _create():
+        a = access_payload(uid)
+        if not a["can_buy"]:
+            return {"error": billing.ERROR_TEXT["lifetime"]}
+        price = price_for_user(uid, days)
+        # Цена в окне подтверждения должна совпадать с серверной (скидка могла закончиться)
+        if expected is not None and expected != price:
+            return {"error": "Цена тарифа изменилась. Проверьте новую стоимость и подтвердите оплату ещё раз.",
+                    "price_changed": True, "stars": price}
+        with STATE_LOCK:
+            order = billing.create_order(STATE, uid, days, price, PLANS, source="app")
+        state_touch()
+        title = PLAN_TITLE[days]
+        link = await bot.create_invoice_link(
+            title=f"IXCLY PRO · {title}",
+            description=f"Доступ к сигналам и аналитике на {days} дн.",
+            payload=billing.payload_for(order),   # пользователь/тариф/сумма — в серверном заказе
+            currency="XTR",
+            prices=[LabeledPrice(label=title, amount=price)],
+            provider_token="")
+        return {"link": link, "order_id": order["id"], "days": days, "stars": price, "title": title,
+                "new_until": billing.new_expiry(_users().get(str(uid), {}).get("access"), days)}
+
+    try:
+        result = asyncio.run_coroutine_threadsafe(_create(), MAIN_LOOP).result(15)
+        return jsonify(result)
     except Exception as e:
-        log.error(f"Ошибка создания счета: {e}")
-        return jsonify({"error": "Ошибка сервера при создании счета"})
+        log.error(f"Ошибка создания счета uid={uid}: {e}")
+        return jsonify({"error": "Не удалось создать счёт. Деньги не списаны, попробуйте ещё раз."})
 
 
 @app.route("/api/<act>", methods=["POST"])
@@ -4753,6 +5076,101 @@ def _safe_float(value, default=0.0):
         return default
 
 
+_ai_center_cache = {}
+
+
+async def ai_center_snapshot(uid, coin="BTC"):
+    """One bounded snapshot assembled from existing feeds; no parallel scanner."""
+    coin = normalize_ticker(str(coin or "BTC")) or "BTC"
+    cached = _ai_center_cache.get(coin)
+    if cached and time.time() - cached[0] < 60:
+        return cached[1]
+    try:
+        tf_data, source = await get_market_data_light(coin, ("15m", "1h", "4h", "1d"))
+    except Exception:
+        tf_data, source = {}, None
+    funding = await get_funding(coin)
+    oi_state, oi_pct, oi_price_pct = await oi_price_state(coin)
+    price = None
+    info = tf_data.get("4h") or tf_data.get("1h") or {}
+    try: price = float(info.get("price") or info["df"]["close"].iloc[-1])
+    except Exception: price = await get_simple_price(coin)
+    book = await order_book_imbalance(coin, price) if price else None
+    df = info.get("df")
+    regime = market_regime(df) if df is not None else {"name":"unknown","volatility":"unknown"}
+    vol = volume_anomaly(df) if df is not None else None
+    early = early_movement_assessment(df, oi_pct, book, funding, vol)
+    news_risk = news_risk_assessment(market_bias, coin)
+    forecast = forecast_scenarios(tf_data, news_risk=news_risk)
+    crowd = liquidation_risk_assessment(funding, oi_pct, oi_price_pct)
+    active = next((x for x in get_active_signals() if x.get("coin")==coin), None)
+    quality = signal_quality_breakdown(active) if active else None
+    hist = load_signal_history()
+    mem = signal_memory_summary(hist, 120)
+    recent_liqs = [x for x in LIQUIDATIONS if time.time()-x.get("ts",0)<=3600]
+    coin_liqs = [x for x in recent_liqs if x.get("coin")==coin]
+    brain_hist = [x for x in hist if x.get("coin") == coin]
+    dna = market_fingerprint(coin, df, hist) if df is not None else {"status": "insufficient_data"}
+    liquidity = liquidity_path(df, book) if df is not None else {"status": "insufficient_data", "levels": []}
+    reaction = news_reaction_assessment({**(market_bias or {}), **(news_risk or {})}, df) if df is not None else {"status": "insufficient_data"}
+    strategy_profile = strategy_dna(hist, 5)
+    counterfactual = counterfactual_lab(brain_hist, 5)
+    active_payload = _sig_item(active) if active else None
+    brain_signal = (active.get("signal_dna") or signal_fingerprint(
+        active or {}, context={"volume_anomaly": vol, "orderbook_bid_share": book, "news_risk": news_risk})
+        if active else {"score": None, "factors": [], "conflicts": []})
+    brain_decision = decision_brain(brain_signal, early, crowd, news_risk, forecast) if active else {"action": "WAIT", "reason": "Нет активного сигнала для оценки", "trade_execution": False}
+    active_side = (active or {}).get("side")
+    if not active_side and df is not None:
+        try: active_side = "LONG" if float(df["close"].iloc[-1]) >= float(df["close"].iloc[-6]) else "SHORT"
+        except Exception: active_side = None
+    phase_transition = regime_transition_assessment(df) if df is not None else {"status": "insufficient_data"}
+    fragility = signal_fragility(brain_signal) if active else {"status": "no_active_signal", "fragility": None}
+    try: btc_context_move = await btc_move_15m()
+    except Exception: btc_context_move = None
+    evidence_map = evidence_conflict_map(active_side, {"orderbook_bid_share": book, "funding": funding,
+        "news_bias": market_bias.get("bias") if isinstance(market_bias, dict) else None,
+        "btc_change_pct": btc_context_move}, df) if df is not None else {"status": "insufficient_data"}
+    calibration = score_calibration(hist, 8)
+    result = {"coin":coin,"source":source,"price":price,"regime":regime,"volume_anomaly":vol,
+            "early_movement":early,"forecast":forecast,"funding":funding,"oi_state":oi_state,
+            "oi_change_pct":oi_pct,"oi_price_change_pct":oi_price_pct,"orderbook_bid_share":book,
+            "crowding_risk":crowd,"news_risk":news_risk,"news":{"title":market_bias.get("title_ru"),
+            "bias":market_bias.get("bias"),"severity":market_bias.get("severity"),"ts":market_bias.get("ts")},
+            "active_signal":active_payload,"quality":quality,"memory":mem,
+            "market_dna":dna,"liquidity_path":liquidity,"news_reaction":reaction,
+            "signal_dna":brain_signal,"decision_brain":brain_decision,
+            "regime_transition":phase_transition,"signal_fragility":fragility,
+            "evidence_conflict_map":evidence_map,"score_calibration":calibration,
+            "strategy_dna":strategy_profile,"counterfactual_lab":counterfactual,
+            "liquidations_1h":{"count":len(coin_liqs),"notional":round(sum(float(x.get("notional",0) or 0) for x in coin_liqs),2)},
+            "system_memory":self_audit_summary(hist,30),"generated_at":time.time()}
+    _ai_center_cache[coin] = (time.time(), result)
+    if len(_ai_center_cache) > 24:
+        oldest = sorted(_ai_center_cache.items(), key=lambda kv: kv[1][0])[:8]
+        for key, _ in oldest: _ai_center_cache.pop(key, None)
+    return result
+
+
+def _format_ai_center(x):
+    f=x.get("forecast") or {}; e=x.get("early_movement") or {}; cr=x.get("crowding_risk") or {}
+    q=x.get("quality") or {}; nr=x.get("news_risk") or {}
+    def px(v): return fmt(v) if isinstance(v,(int,float)) and v>0 else "—"
+    lines=[f"🧠 <b>IXCLY AI Command Center · {html.escape(x.get('coin','BTC'))}</b>",
+           f"Цена: <code>{px(x.get('price'))}</code> · режим: <b>{html.escape(str((x.get('regime') or {}).get('name','unknown')))}</b>",
+           f"Раннее движение: <b>{e.get('score',0)}/100 · {'наблюдать' if e.get('state')=='watch' else 'тихо'}</b>",
+           "Факторы: "+html.escape(', '.join(e.get('reasons') or ['нет подтверждений'])),
+           f"Сценарии: вверх триггер <code>{px(f.get('bull_trigger'))}</code> → цель <code>{px(f.get('bull_target'))}</code>; вниз <code>{px(f.get('bear_trigger'))}</code> → <code>{px(f.get('bear_target'))}</code>",
+           f"Funding: {x.get('funding') if x.get('funding') is not None else '—'} · OI: {x.get('oi_change_pct')}% · bids стакана: {x.get('orderbook_bid_share')}",
+           f"Риск перегруженности: <b>{html.escape(str(cr.get('level','low')))}</b> (лонги {cr.get('long_crowding_risk',0)}/100 · шорты {cr.get('short_crowding_risk',0)}/100)",
+           f"Новостной риск: {html.escape(str(nr.get('severity','low')))} · ликвидации {x.get('liquidations_1h',{}).get('count',0)} за час"]
+    if q: lines.append(f"Активный сигнал: качество {q.get('score')}/100 · класс {q.get('label')}")
+    else: lines.append("Активного сигнала по монете нет")
+    lines.append(f"Signal Memory: {x.get('memory',{}).get('win_rate','—')}% · {x.get('memory',{}).get('trades',0)} сделок")
+    lines.append("⚠️ Сценарии и риск — аналитические оценки, не гарантия результата и не команда на вход.")
+    return "\n".join(lines)
+
+
 async def mini_dispatch(uid, u, act, d):
     _users().setdefault(str(uid), {"active": True})["last_seen"] = time.time()
     if act not in FREE_ACTS and not has_access(uid):
@@ -4773,6 +5191,17 @@ async def mini_dispatch(uid, u, act, d):
                 "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150], "access": access_payload(uid), "bot": runtime["main_bot"],
                 "counts": {"signals": len(signals_for(uid)), "saved": len(get_user_saved_signals(uid)),
                            "positions": len(get_user_open_positions(uid))}}
+
+    if act == "order_status":
+        # Опрос статуса заказа после оплаты: Mini App ждёт подтверждения от бота и обновляет подписку
+        with STATE_LOCK:
+            view = billing.order_view(STATE, uid, str(d.get("order_id", ""))[:40])
+        if not view:
+            return {"error": "Заказ не найден"}
+        return {"order": view, "access": access_payload(uid)}
+
+    if act == "ai_center":
+        return await ai_center_snapshot(uid, coin or "BTC")
 
     if act == "intel":
         # Лёгкий снимок без дополнительного фонового сканера и без хранения свечных массивов.
@@ -4884,9 +5313,13 @@ async def mini_dispatch(uid, u, act, d):
             "monitor": {"uptime_seconds": round(now - stats.get("started", now)),
                         "news_engine": market_bias.get("engine", "none"),
                         "main_bot_configured": bool(runtime.get("main_bot")),
-                        "admin_backup_configured": bool(admin_bot and ADMIN_IDS),
+                        "admin_backup_configured": bool(ADMIN_IDS),
+                        "backup_bot": "admin" if admin_bot else "main",
+                        "storage_path": STATE_FILE,
+                        "local_backup_files": sum(1 for x in LOCAL_BACKUP_FILES if os.path.exists(x)),
+                        "backup_interval_seconds": BACKUP_INTERVAL,
                         "backup_age_seconds": backup_age, "backup_pending": bool(backup_dirty),
-                        "backup_status": "не настроен" if not admin_bot or not ADMIN_IDS else ("ожидает отправки" if backup_dirty else ("выполнен" if backup_age is not None else "ещё не выполнялся")),
+                        "backup_status": "нужен ADMIN_IDS" if not ADMIN_IDS else ("ожидает отправки" if backup_dirty else ("выполнен" if backup_age is not None else "ещё не выполнялся")),
                         "scan_age_seconds": round(now - scan_ts) if scan_ts else None},
         }
 
@@ -5186,7 +5619,10 @@ def bot_main_keyboard():
         rows.append([InlineKeyboardButton(text="🚀 Открыть IXCLY App", web_app=WebAppInfo(url=webapp_link()))])
     rows.append([InlineKeyboardButton(text="🔥 Сигналы", web_app=WebAppInfo(url=webapp_link(tab="signals")))] if WEBAPP_URL else
                 [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
+    rows.append([InlineKeyboardButton(text="💎 Подписка", callback_data="sub:open")])
     rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
+    rows.append([InlineKeyboardButton(text="🎓 Обучение новичка", callback_data="tutorial:start")])
+    rows.append([InlineKeyboardButton(text="📘 Инструкция и риски", callback_data="guide:open")])
     rows.append([InlineKeyboardButton(text="📄 Документы", callback_data="show_docs")])
     rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5194,6 +5630,72 @@ def bot_main_keyboard():
 
 WELCOME_BOT = ("👋 <b>IXCLY PRO</b>\n\nВся работа теперь в мини-приложении: сигналы, графики, портфель, статистика.\n"
                "Сюда я присылаю уведомления: новые сигналы, сопровождение сделок, итоги и снятые идеи.")
+
+
+# Пошаговое обучение хранит только статус/номер урока в существующем STATE пользователя.
+# Никаких новых зависимостей или отдельного хранилища не требуется.
+TUTORIAL_STEPS = [
+    ("👋 Добро пожаловать в IXCLY", 
+     "IXCLY помогает следить за крипторынком, изучать сигналы и вести статистику.\n\n"
+     "Основная работа проходит в Mini App. Откройте его кнопкой «Открыть IXCLY App» в главном меню.\n\n"
+     "Обучение займёт несколько минут. Оно объяснит основные разделы и безопасный порядок работы."),
+    ("🔥 1. Сигналы", 
+     "Откройте вкладку «Сигналы». Здесь собраны торговые идеи, которые прошли фильтры сканера.\n\n"
+     "Используйте фильтры, чтобы смотреть нужные статусы. Нажмите на монету, чтобы открыть подробный разбор.\n\n"
+     "Сигнал — это аналитическая идея, а не приказ покупать или продавать и не гарантия результата."),
+    ("🔎 2. Как читать карточку монеты", 
+     "В карточке изучите направление LONG/SHORT, цену входа, цели TP и уровень Stop Loss. Ниже могут быть причины, индикаторы, таймфреймы, риск и результаты исторической проверки.\n\n"
+     "LONG означает сценарий роста, SHORT — сценарий снижения. TP — цели фиксации, SL — уровень ограничения убытка.\n\n"
+     "Оценка качества/score не является вероятностью прибыли. Если статус WAIT или данные противоречат друг другу — не торопитесь."),
+    ("💼 3. Портфель и риск", 
+     "Во вкладке «Портфель» можно указать свой депозит и риск на сделку, выбрать режим и просматривать сопровождаемые позиции.\n\n"
+     "Начните с небольшого риска и проверьте, что понимаете размер возможного убытка до любого решения. Не увеличивайте риск ради отыгрыша."),
+    ("🧪 4. Paper Trading — тренировка без денег", 
+     "В разделе «Портфель» находится PAPER TRADING. Это виртуальный счёт: можно открыть тестовую позицию, создать отдельный счёт/стратегию, посмотреть виртуальный баланс и историю.\n\n"
+     "Paper Trading не отправляет реальные ордера на биржу. Используйте его, чтобы потренироваться и проверить подход до принятия решений на реальном рынке."),
+    ("📊 5. Аналитика", 
+     "Во вкладке «Аналитика» смотрите личные результаты и общую статистику системы: успешные/убыточные сделки, историю, просадку и другие показатели.\n\n"
+     "Одна или несколько сделок не показывают надёжность стратегии. Смотрите на выборку целиком и учитывайте комиссии, проскальзывание и рыночные условия."),
+    ("🧠 6. Раздел «Ещё»", 
+     "Во вкладке «Ещё» доступны AI Command Center, новости рынка, настройки уведомлений, приглашение друзей, поддержка и документы.\n\n"
+     "AI Command Center показывает сценарии, раннее движение, funding/OI и риск перегруженности. Это дополнительная аналитика, а не автоматическое управление сделками."),
+    ("🛡 7. Безопасный порядок работы", 
+     "Рекомендуемый порядок:\n1) изучить рынок и новость;\n2) открыть сигнал и прочитать причины;\n3) проверить вход, TP, SL и риск;\n4) при необходимости сначала потренироваться в Paper Trading;\n5) вести статистику и не менять план под влиянием эмоций.\n\n"
+     "Криптовалюты волатильны. При сомнениях лучше пропустить идею. IXCLY не гарантирует прибыль и не заменяет ваше решение."),
+]
+
+
+def tutorial_keyboard(step):
+    step = max(0, min(int(step), len(TUTORIAL_STEPS) - 1))
+    rows = []
+    nav = []
+    if step > 0:
+        nav.append(InlineKeyboardButton(text="⬅ Назад", callback_data=f"tutorial:step:{step-1}"))
+    if step < len(TUTORIAL_STEPS) - 1:
+        nav.append(InlineKeyboardButton(text="Далее ➡", callback_data=f"tutorial:step:{step+1}"))
+    else:
+        nav.append(InlineKeyboardButton(text="✅ Завершить", callback_data="tutorial:done"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⏭ Пропустить обучение", callback_data="tutorial:skip")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def tutorial_message(step):
+    step = max(0, min(int(step), len(TUTORIAL_STEPS) - 1))
+    title, body = TUTORIAL_STEPS[step]
+    return (f"🎓 <b>Обучение IXCLY · {step + 1}/{len(TUTORIAL_STEPS)}</b>\n\n"
+            f"<b>{html.escape(title)}</b>\n\n{html.escape(body)}")
+
+
+async def show_tutorial(target, step=0, edit=False):
+    text = tutorial_message(step)
+    markup = tutorial_keyboard(step)
+    if edit:
+        try:
+            return await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
+    return await target.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 def notif_keyboard(uid):
@@ -5270,6 +5772,18 @@ async def cmd_start(m: types.Message, state: FSMContext):
         pass
     if len(parts) > 1 and parts[1].lower() in ("support", "help", "helpdesk"):
         return await show_support_menu(m)
+    user_state = _users().get(user_key, {})
+    if is_first_start and not user_state.get("onboarding_done") and not user_state.get("onboarding_skipped"):
+        set_user_field(uid, onboarding_status="offered", onboarding_started_at=time.time())
+        intro = ("👋 <b>Добро пожаловать в IXCLY PRO!</b>\n\n"
+                 "Вы впервые здесь? Я могу провести короткое обучение: покажу, где искать сигналы, "
+                 "как читать анализ, пользоваться портфелем, статистикой и виртуальным Paper Trading.\n\n"
+                 "Выберите, как продолжить:")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎓 Начать обучение", callback_data="tutorial:start")],
+            [InlineKeyboardButton(text="⏭ Пропустить обучение", callback_data="tutorial:skip")],
+        ])
+        return await m.answer(intro, parse_mode="HTML", reply_markup=kb)
     await welcome_for(m.chat.id, m.from_user.id)
 
 
@@ -5875,7 +6389,7 @@ def plan_prices_for_user(uid):
                              "Приветственная скидка 10%" if kind == "welcome" else
                              f"Персональная скидка {pct}%" if pct else "") ,
              "title": PLAN_TITLE[d]} for d, s in PLANS.items()]
-FREE_ACTS = {"me", "access", "promo_apply", "support"}
+FREE_ACTS = {"me", "access", "promo_apply", "support", "order_status"}
 TG_SEM = None                            # создаётся в main (не привязано к event loop при импорте)
 COIN_RL = {}                             # uid -> ts последнего пересчёта монеты
 _ob_cache = {}
@@ -5918,9 +6432,13 @@ def grant_days(uid, days, kind):
         elif a.get("until", 0) > 9000000000:
             pass
         else:
-            base = max(time.time(), a.get("until", 0))
+            now_ts = time.time()
+            base = max(now_ts, a.get("until", 0))
+            # Бонусные дни (промокод/реферал/админ) не должны «понижать» действующую оплаченную подписку
+            keep_paid = a.get("kind") == "paid" and a.get("until", 0) > now_ts and kind != "paid"
             a["until"] = base + days * 86400
-            a["kind"] = kind
+            if not keep_paid:
+                a["kind"] = kind
             a["free"] = False
         if kind == "paid":
             a["paid_ever"] = True
@@ -5928,29 +6446,30 @@ def grant_days(uid, days, kind):
 
 
 def access_payload(uid):
+    """Единое описание доступа для бота и Mini App (старые поля сохранены для совместимости)."""
     a = _users().get(str(uid), {}).get("access") or {}
+    is_admin = int(uid) in ADMIN_IDS
+    now = time.time()
+    snap = billing.access_snapshot(a, now, is_admin)
     ok = has_access(uid)
-    until = a.get("until", 0)
-    left = max(0, until - time.time())
-    if int(uid) in ADMIN_IDS:
-        status, days_left = "Админ", 9999
-    elif until > 9000000000 or a.get("free"):
-        status, days_left = "Навсегда", 9999
-    elif ok:
-        status = "пробный период" if a.get("kind") == "trial" else "подписка"
-        days_left = int(-(-left // 86400))
-    else:
-        status, days_left = "закрыт", 0
-    is_vip = int(uid) in ADMIN_IDS or bool(a.get("free")) or a.get("kind") in ("paid", "lifetime")
+    status = {"admin": "Админ", "lifetime": "Навсегда", "trial": "пробный период",
+              "active": "подписка", "expired": "закрыт"}[snap["code"]]
+    is_vip = is_admin or bool(a.get("free")) or a.get("kind") in ("paid", "lifetime")
     ad = ads_get()
     show_ad = bool(ad.get("on") and not is_vip)
-    return {"ok": ok, "status": status, "days_left": days_left, "hours_left": int(left // 3600) % 24,
-            "until": until, "free": bool(a.get("free")), "vip": is_vip,
-            "plans": plan_prices_for_user(uid),
-            "offer": ({"pct": int(discount_offer_for(uid).get("pct", 0)),
-                       "until": int(discount_offer_for(uid).get("until", 0)),
-                       "label": plan_prices_for_user(uid)[0].get("offer_label", "")}
-                      if discount_offer_for(uid) else None),
+    offer = discount_offer_for(uid)
+    plans = plan_prices_for_user(uid)
+    for p in plans:
+        # Дата окончания ПОСЛЕ покупки — показываем в окне подтверждения до оплаты
+        p["new_until"] = billing.new_expiry(a, p["days"], now)
+    return {"ok": ok, "status": status, "code": snap["code"], "label": snap["label"], "hint": snap["hint"],
+            "days_left": snap["days_left"], "hours_left": snap["hours_left"],
+            "until": a.get("until", 0), "free": bool(a.get("free")), "lifetime": snap["lifetime"], "vip": is_vip,
+            "can_buy": snap["can_buy"], "paid_ever": bool(a.get("paid_ever")),
+            "plans": plans,
+            "offer": ({"pct": int(offer.get("pct", 0)), "until": int(offer.get("until", 0)),
+                       "label": plans[0].get("offer_label", "")} if offer else None),
+            "risk": billing.RISK_TEXT, "risk_title": billing.RISK_TITLE,
             "ad": ad["text"] if show_ad else "",
             "ad_url": ad["url"] if show_ad else ""}
 
@@ -5958,7 +6477,7 @@ def access_payload(uid):
 def access_closed_text(uid):
     a = access_payload(uid)
     if a["status"] == "закрыт" or not a["ok"]:
-        return "🔒 Доступ закрыт. Оплатите подписку в боте: /buy"
+        return "🔒 Доступ закрыт. Откройте раздел «Подписка» и выберите тариф (или команда /buy в боте)."
     return "Доступ закрыт"
 
 
@@ -5970,79 +6489,139 @@ def ad_block():
     return f"\n\n📢 <i>{html.escape(a['text'])}</i>{link}\nРеклама: {html.escape(a['contact'])}"
 
 
+def _fmt_msk(ts, with_time=False):
+    """Дата по МСК — единый формат дат подписки в боте."""
+    try:
+        d = datetime.fromtimestamp(float(ts), timezone(timedelta(hours=3)))
+        return d.strftime("%d.%m.%Y %H:%M МСК" if with_time else "%d.%m.%Y")
+    except Exception:
+        return "—"
+
+
+def risk_html():
+    """Компактное предупреждение о рисках (единый текст из ixcly_billing)."""
+    return f"⚠️ <b>{billing.RISK_TITLE}</b>\n<i>{html.escape(billing.RISK_TEXT)}</i>"
+
+
+def _plan_line(p):
+    price = f"<b>{p['stars']}⭐</b>" + (f" <s>{p['original_stars']}⭐</s>" if p.get("discount_pct") else "")
+    return f"• {html.escape(p['title'])} · {p['days']} дн. — {price}"
+
+
+def subscription_text(uid):
+    """Экран «Подписка»: статус, срок и тарифы. Доступен и при активной подписке (продление)."""
+    a = access_payload(uid)
+    lines = ["💎 <b>Подписка IXCLY PRO</b>", "", f"Статус: <b>{html.escape(a['label'])}</b>"]
+    if not a["lifetime"]:
+        if a["ok"]:
+            lines.append(f"Действует до: <b>{_fmt_msk(a['until'], True)}</b> · осталось {a['days_left']} дн.")
+        elif a["until"]:
+            lines.append(f"Закончилась: {_fmt_msk(a['until'])}")
+    if a.get("offer"):
+        lines.append(f"🎁 <b>{html.escape(a['offer']['label'])}</b> — действует ограниченное время.")
+    lines.append(html.escape(a["hint"]))
+    if a["can_buy"]:
+        lines += ["", "<b>Тарифы</b> (оплата Telegram Stars ⭐):"] + [_plan_line(p) for p in a["plans"]]
+    lines += ["", risk_html()]
+    return "\n".join(lines)
+
+
+def subscription_kb(uid):
+    a = access_payload(uid)
+    rows = []
+    if a["can_buy"]:
+        for p in a["plans"]:
+            rows.append([InlineKeyboardButton(text=f"💳 {p['title']} · {p['stars']}⭐", callback_data=f"buy:{p['days']}")])
+        rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:help")])
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton(text="🚀 Подписка в приложении", web_app=WebAppInfo(url=webapp_link(tab="sub")))])
+    rows.append([InlineKeyboardButton(text="📘 Инструкция и риски", callback_data="guide:open")])
+    rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
+    return kb_nav(rows, back=False)
+
+
+async def show_subscription(chat_id, uid, edit_msg=None):
+    return await present(chat_id, subscription_text(uid), subscription_kb(uid), edit_msg=edit_msg)
+
+
 def paywall_kb(uid=None):
+    """Тарифы для закрытого доступа (напоминания, /start без доступа)."""
     rows = [[InlineKeyboardButton(text=f"💳 {PLAN_TITLE[d]} · {price_for_user(uid, d) if uid is not None else s}⭐", callback_data=f"buy:{d}")] for d, s in PLANS.items()]
     rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:help")])
+    rows.append([InlineKeyboardButton(text="📘 Инструкция и риски", callback_data="guide:open")])
     rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _payment_store():
-    """Совместимое с прежними STATE/backup хранилище заказов и обработанных Stars-платежей."""
-    with STATE_LOCK:
-        store = STATE.setdefault("payments", {})
-        store.setdefault("orders", {})
-        store.setdefault("charges", {})
-        return store
+def buy_confirm_text(uid, days):
+    """Подтверждение ДО оплаты: тариф, срок, стоимость и дата окончания."""
+    a = access_payload(uid)
+    p = next((x for x in a["plans"] if x["days"] == days), None)
+    if not p:
+        return None
+    price = f"<b>{p['stars']}⭐</b>" + (f" <s>{p['original_stars']}⭐</s>" if p.get("discount_pct") else "")
+    how = "продлит текущий срок" if a["ok"] else "откроет доступ сразу после оплаты"
+    return ("🧾 <b>Подтверждение оплаты</b>\n\n"
+            f"Тариф: <b>{html.escape(p['title'])}</b>\nСрок: <b>{p['days']} дн.</b>\nСтоимость: {price}\n"
+            f"Доступ до: <b>{_fmt_msk(p.get('new_until'))}</b> ({how})\n\n"
+            "Оплата выполняется Telegram Stars (⭐). Списание произойдёт только после подтверждения в окне Telegram.\n\n"
+            + risk_html())
 
 
-def _parse_plan_payload(payload):
-    """Поддерживает новый payload plan:days:stars:uid:nonce и старые plan:days[:stars]."""
-    parts = str(payload or "").split(":")
-    if len(parts) not in (3, 5) or parts[0] != "plan":
-        raise ValueError("invalid invoice payload")
-    days, amount = int(parts[1]), int(parts[2])
-    if days not in PLANS or amount < 1:
-        raise ValueError("unknown plan or amount")
-    uid = int(parts[3]) if len(parts) == 5 else None
-    nonce = parts[4] if len(parts) == 5 else None
-    if len(parts) == 5 and (uid <= 0 or not re.fullmatch(r"[a-f0-9]{16}", nonce or "")):
-        raise ValueError("invalid order identity")
-    return days, amount, uid, nonce
+async def show_buy_confirm(chat_id, uid, days, edit_msg=None):
+    a = access_payload(uid)
+    if not a["can_buy"]:
+        return await present(chat_id, "ℹ️ " + billing.ERROR_TEXT["lifetime"], subscription_kb(uid), edit_msg=edit_msg)
+    text = buy_confirm_text(uid, days)
+    if not text:
+        return await show_subscription(chat_id, uid, edit_msg=edit_msg)
+    price = price_for_user(uid, days)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Оплатить {price}⭐", callback_data=f"pay:{days}")],
+        [InlineKeyboardButton(text="⬅ К тарифам", callback_data="sub:open"), InlineKeyboardButton(text="🏠 Меню", callback_data="menu")]])
+    return await present(chat_id, text, kb, edit_msg=edit_msg)
+
+
+GUIDE_TEXT = ("📘 <b>Инструкция IXCLY PRO</b>\n\n"
+              "1. Откройте приложение кнопкой «🚀 Открыть IXCLY App».\n"
+              "2. «Сигналы» — идеи, прошедшие фильтры сканера. Нажмите на монету: вход, цели TP, Stop Loss и причины.\n"
+              "3. «Портфель» — укажите депозит и риск на сделку. Paper Trading — виртуальный счёт без реальных ордеров.\n"
+              "4. «Аналитика» — ваши результаты и статистика системы.\n"
+              "5. «Подписка» — статус доступа, тарифы и оплата Telegram Stars.\n"
+              "6. Уведомления включаются в боте (🔔) и в разделе «Ещё».\n\n"
+              "<b>Безопасный порядок:</b> изучить рынок → прочитать причины сигнала → проверить вход, TP, SL и риск → "
+              "при сомнениях пропустить идею.\n\n")
+
+
+async def show_guide(chat_id, uid, edit_msg=None):
+    rows = []
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton(text="🚀 Открыть IXCLY App", web_app=WebAppInfo(url=webapp_link()))])
+    rows.append([InlineKeyboardButton(text="🎓 Обучение новичка", callback_data="tutorial:start")])
+    rows.append([InlineKeyboardButton(text="💎 Подписка", callback_data="sub:open")])
+    return await present(chat_id, GUIDE_TEXT + risk_html(), kb_nav(rows, back=False), edit_msg=edit_msg)
 
 
 async def send_plan_invoice(uid, days):
+    """Создаёт сохранённый заказ и отправляет счёт. Сумма и тариф берутся из заказа, а не от клиента."""
     if days not in PLANS:
-        return
-    stars = int(price_for_user(uid, days))
-    nonce = os.urandom(8).hex()
-    payload = f"plan:{days}:{stars}:{int(uid)}:{nonce}"
-    store = _payment_store()
-    now = time.time()
-    with STATE_LOCK:
-        orders = store["orders"]
-        # Удаляем только просроченные незавершённые заказы; charge IDs не удаляем,
-        # иначе после очистки реестр перестанет защищать от повторного начисления.
-        for key, order in list(orders.items()):
-            if not isinstance(order, dict) or float(order.get("expires_at", 0)) < now:
-                orders.pop(key, None)
-        orders[nonce] = {"uid": int(uid), "days": int(days), "amount": stars,
-                         "payload": payload, "created_at": now, "expires_at": now + 86400,
-                         "status": "pending"}
-        # Ограничиваем незавершённые счета для защиты от разрастания STATE.
-        if len(orders) > 500:
-            oldest = sorted(orders, key=lambda k: float(orders[k].get("created_at", 0)))
-            for key in oldest[:len(orders) - 500]:
-                orders.pop(key, None)
-        state_touch()
-    # Заказ должен попасть на диск до отправки счёта: иначе быстрый checkout
-    # после перезапуска может не найти pending-order и будет отклонён.
-    persisted = await asyncio.to_thread(flush_state)
-    if not persisted:
-        with STATE_LOCK:
-            store["orders"].pop(nonce, None)
-        state_touch()
-        raise RuntimeError("Не удалось сохранить заказ Telegram Stars")
+        return await _send_new(uid, "❌ Такого тарифа нет. Откройте раздел «Подписка» и выберите тариф заново.",
+                               kb_nav(back=False), None)
+    if not access_payload(uid)["can_buy"]:
+        return await _send_new(uid, "ℹ️ " + billing.ERROR_TEXT["lifetime"], kb_nav(back=False), None)
+    stars = price_for_user(uid, days)
     try:
+        with STATE_LOCK:
+            order = billing.create_order(STATE, uid, days, stars, PLANS, source="bot")
+        state_touch()
         await bot.send_invoice(chat_id=uid, title=f"IXCLY PRO · {PLAN_TITLE[days]}",
                                description=f"Доступ к сигналам, сопровождению сделок и аналитике на {days} дн.",
-                               payload=payload, currency="XTR",
+                               payload=billing.payload_for(order), currency="XTR",
                                prices=[LabeledPrice(label=f"{PLAN_TITLE[days]}", amount=stars)], provider_token="")
-    except Exception:
-        with STATE_LOCK:
-            store["orders"].pop(nonce, None)
-        state_touch()
-        raise
+    except Exception as e:
+        log.warning("send_invoice %s: %s", uid, e)
+        await _send_new(uid, "⚠️ Не удалось создать счёт. Деньги не списаны. Попробуйте ещё раз через минуту "
+                             "или напишите в поддержку.", paywall_kb(uid), None)
 
 
 def hourly_rows_cached_key(coin):
@@ -6102,45 +6681,61 @@ async def access_reminder_loop():
                 log.info(f"reminder {uid_str}: {e}")
 
 
+def _purge_api_cache(uid):
+    """После оплаты сбрасываем кэш API пользователя, чтобы Mini App сразу увидел новый статус."""
+    try:
+        for k in [k for k in list(API_CACHE.keys()) if k and k[0] == uid]:
+            API_CACHE.pop(k, None)
+    except Exception:
+        pass
+
+
+async def _refund_stars(uid, charge_id):
+    """Возврат Stars (нужен aiogram с refund_star_payment). Возвращает True при успехе."""
+    fn = getattr(bot, "refund_star_payment", None)
+    if fn is None:
+        return False
+    try:
+        ok = bool(await fn(user_id=int(uid), telegram_payment_charge_id=str(charge_id)))
+        if ok:
+            with STATE_LOCK:
+                rec = STATE.get("payments", {}).get(str(charge_id))
+                if rec:
+                    rec["refunded"] = True
+            state_touch()
+        return ok
+    except Exception as e:
+        log.warning("refund_star_payment %s: %s", charge_id, e)
+        return False
+
+
 async def pre_checkout_handler(q: types.PreCheckoutQuery):
-    """Проверяет заказ до списания Stars; Telegram ждёт ответ не более 10 секунд."""
-    ok, reason = False, "Счёт устарел или недействителен. Откройте /buy и создайте новый."
+    """Проверка ДО списания: пользователь, заказ, сумма, валюта, повторная оплата, бессрочный доступ."""
     try:
-        if q.currency != "XTR":
-            reason = "Для этой подписки принимаются только Telegram Stars."
+        kind = billing.parse_payload(q.invoice_payload)
+        if kind[0] == "ord":
+            with STATE_LOCK:
+                ok, code, _ = billing.validate_payment(STATE, kind[1], q.from_user.id, q.currency, q.total_amount, PLANS)
+        elif kind[0] == "legacy":
+            days, stars = kind[1], kind[2]
+            ok = (q.currency == billing.CURRENCY and days in PLANS and 1 <= int(q.total_amount) <= int(PLANS[days])
+                  and (stars is None or stars == int(q.total_amount)))
+            code = "ok" if ok else "amount_mismatch"
         else:
-            days, amount, payload_uid, nonce = _parse_plan_payload(q.invoice_payload)
-            if int(q.total_amount) != amount:
-                reason = "Сумма счёта не совпадает с тарифом. Создайте новый счёт через /buy."
-            elif payload_uid is None:
-                # Совместимость с уже отправленными старыми счетами plan:days:amount.
-                # Новые счета всегда имеют UID + одноразовый nonce.
-                ok = True
-                reason = ""
-            elif payload_uid != int(q.from_user.id):
-                reason = "Этот счёт создан для другого пользователя."
-            else:
-                store = _payment_store()
-                with STATE_LOCK:
-                    order = store["orders"].get(nonce)
-                    if (isinstance(order, dict) and order.get("status") == "pending"
-                            and int(order.get("uid", 0)) == int(q.from_user.id)
-                            and int(order.get("days", 0)) == days
-                            and int(order.get("amount", 0)) == amount
-                            and order.get("payload") == q.invoice_payload
-                            and float(order.get("expires_at", 0)) >= time.time()):
-                        order["checkout_seen_at"] = time.time()
-                        state_touch()
-                        ok, reason = True, ""
-                    else:
-                        reason = "Счёт уже использован или истёк. Откройте /buy и создайте новый."
+            ok, code = False, "unknown_order"
+        if ok and not access_payload(q.from_user.id)["can_buy"]:
+            ok, code = False, "lifetime"
+        if ok:
+            await q.answer(ok=True)
+        else:
+            log.info("pre_checkout отклонён uid=%s code=%s", q.from_user.id, code)
+            await q.answer(ok=False, error_message=billing.ERROR_TEXT.get(code, "Платёж не прошёл проверку. Попробуйте ещё раз."))
     except Exception as e:
-        log.warning("Rejected Stars pre-checkout %s: %s", q.id, e)
-        reason = "Не удалось проверить заказ. Создайте новый счёт через /buy."
-    try:
-        await q.answer(ok=ok, error_message=None if ok else reason)
-    except Exception as e:
-        log.warning("pre_checkout answer failed: %s", e)
+        log.warning(f"pre_checkout: {e}")
+        try:
+            await q.answer(ok=False, error_message="Не удалось проверить платёж. Деньги не списаны, попробуйте ещё раз.")
+        except Exception:
+            pass
 
 
 @dp.pre_checkout_query()
@@ -6150,146 +6745,88 @@ async def on_pre_checkout(q: types.PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def on_paid(m: types.Message):
-    payment = m.successful_payment
-    uid = int(m.from_user.id)
-    charge_id = str(payment.telegram_payment_charge_id or "").strip()
-    try:
-        if payment.currency != "XTR":
-            raise ValueError("payment currency is not XTR")
-        days, amount, payload_uid, nonce = _parse_plan_payload(payment.invoice_payload)
-        if int(payment.total_amount) != amount:
-            raise ValueError("invoice amount mismatch")
-        if payload_uid is not None and payload_uid != uid:
-            raise ValueError("invoice user mismatch")
-        if not charge_id:
-            raise ValueError("missing telegram_payment_charge_id")
-    except Exception as e:
-        log.error("Rejected invalid Stars payment: %s", e)
-        try:
-            await _tell(uid, "⚠️ Не удалось автоматически проверить платёж. Напишите в /paysupport и приложите чек Telegram — мы проверим его вручную.")
-        except Exception:
-            pass
-        return
-
-    store = _payment_store()
+    """Успешная оплата: идемпотентно (charge_id), с проверкой пользователя/тарифа/суммы и немедленным сохранением."""
+    sp = m.successful_payment
+    uid = m.from_user.id
+    charge_id = sp.telegram_payment_charge_id
+    first_payment, ref, lifetime_skip = False, None, False
     with STATE_LOCK:
-        charges = store["charges"]
-        if charge_id in charges:
-            log.info("Duplicate Stars payment ignored: %s", charge_id)
-            duplicate = True
-            first_payment = False
-            ref = None
-        else:
-            duplicate = False
-            buyer = STATE["users"].get(str(uid), {})
-            order = store["orders"].get(nonce) if nonce else None
-            # Для новых счетов подтверждаем тот же pending-заказ, который прошёл pre-checkout.
-            # Старый формат payload оставлен для уже отправленных счетов до обновления.
-            if nonce and not (isinstance(order, dict)
-                              and order.get("status") == "pending"
-                              and int(order.get("uid", 0)) == uid
-                              and int(order.get("days", 0)) == days
-                              and int(order.get("amount", 0)) == amount
-                              and order.get("payload") == payment.invoice_payload
-                              and float(order.get("expires_at", 0)) >= time.time()):
-                log.error("Paid Stars invoice has no matching pending order: uid=%s nonce=%s charge=%s",
-                          uid, nonce, charge_id)
-                invalid_order = True
+        res = billing.settle_payment(STATE, sp.invoice_payload, uid, charge_id, sp.currency, sp.total_amount, PLANS)
+        if res["status"] == "ok":
+            buyer = _users().get(str(uid), {})
+            if billing.is_lifetime(buyer.get("access")):
+                lifetime_skip = True        # доступ уже бессрочный — начислять нечего, вернём Stars
             else:
-                invalid_order = False
-            if not invalid_order:
                 first_payment = not (buyer.get("access") or {}).get("paid_ever")
                 ref = buyer.get("referrer")
-                # Сначала атомарно начисляем дни и фиксируем charge ID под одним RLock.
-                grant_days(uid, days, "paid")
-                charges[charge_id] = {"uid": uid, "days": days, "amount": amount,
-                                      "currency": "XTR", "payload": payment.invoice_payload,
-                                      "paid_at": time.time(), "message_id": m.message_id}
-                if nonce:
-                    order["status"] = "paid"
-                    order["charge_id"] = charge_id
-                    order["paid_at"] = time.time()
-            if not invalid_order:
-                current_offer = STATE["users"].get(str(uid), {}).get("welcome_offer")
-                if current_offer:
-                    current_offer["used"] = True
-                # Реферальный бонус фиксируем в той же транзакции, что и первый платёж,
-                # чтобы перезапуск после начисления не потерял +7 дней.
-                if ref and first_payment and str(ref) != str(uid):
-                    grant_days(ref, 7, "referral")
-            state_touch()
-
-    if duplicate:
-        await _tell(uid, "ℹ️ Этот платёж уже был обработан. Повторно подписка не начислялась.")
+                grant_days(uid, res["order"]["days"], "paid")
+                if buyer.get("welcome_offer"):
+                    buyer["welcome_offer"]["used"] = True
+                DISCOUNT_OFFERS.pop(uid, None)
+    status = res["status"]
+    if status == "duplicate":
+        log.info("Повторная доставка платежа %s пропущена", charge_id)
         return
-    if invalid_order:
-        # Оплата уже прошла у Telegram: не теряем событие и отправляем его на ручную проверку.
-        with STATE_LOCK:
-            store.setdefault("unmatched", {})[charge_id] = {
-                "uid": uid, "payload": str(payment.invoice_payload)[:128],
-                "amount": int(payment.total_amount), "currency": payment.currency,
-                "paid_at": time.time(), "message_id": m.message_id}
-            charges[charge_id] = {"uid": uid, "status": "unmatched", "amount": int(payment.total_amount),
-                                  "currency": payment.currency, "paid_at": time.time()}
-            state_touch()
-        try:
-            await asyncio.to_thread(flush_state)
-            await _tell(uid, "⚠️ Платёж получен, но заказ не найден в журнале. Доступ не потерян: напишите в /paysupport и приложите чек для ручной проверки.")
-            for aid in ADMIN_IDS:
-                await bot.send_message(aid, f"⚠️ Требуется ручная проверка Stars: uid={uid}, charge={html.escape(charge_id[:20])}, сумма={amount}⭐")
-        except Exception as e:
-            log.error("Could not notify about unmatched Stars payment %s: %s", charge_id, e)
+    state_touch()
+    # Деньги → сразу на диск: рестарт между оплатой и записью не приведёт к потере или двойному начислению
+    await asyncio.to_thread(flush_state)
+    _purge_api_cache(uid)
+
+    if status == "ok" and not lifetime_skip:
+        order = res["order"]
+        if ref and first_payment:
+            grant_days(ref, 7, "referral")
+            await _tell(ref, "🎁 Ваш друг оплатил подписку. <b>+7 дней</b> начислено вам.")
+        a = access_payload(uid)
+        until_line = "Подписка: <b>бессрочно</b>" if a["lifetime"] else f"Подписка активна до: <b>{_fmt_msk(a['until'], True)}</b>"
+        rows = [[InlineKeyboardButton(text="🚀 Открыть IXCLY App", web_app=WebAppInfo(url=webapp_link()))]] if WEBAPP_URL else []
+        rows.append([InlineKeyboardButton(text="💎 Моя подписка", callback_data="sub:open")])
+        await present(m.chat.id, "✅ <b>Оплата получена</b>\n\n"
+                                 f"Тариф: <b>{html.escape(PLAN_TITLE.get(order['days'], str(order['days']) + ' дн.'))}</b> · {order['days']} дн.\n"
+                                 f"Списано: <b>{order['stars']}⭐</b>\n{until_line}\n"
+                                 f"Заказ: <code>{order['id']}</code>\n\nСпасибо! Сигналы и сопровождение сделок доступны.",
+                      kb_nav(rows, back=False))
+        for aid in ADMIN_IDS:
+            try:
+                await bot.send_message(aid, f"💰 Оплата: {uid} · {order['days']} дн. · {sp.total_amount}⭐ · заказ {order['id']} · {str(charge_id)[:14]}…")
+            except Exception:
+                pass
         return
 
-    # Сохраняем журнал платежа сразу, а не ждём фонового flush каждые 15 секунд.
-    try:
-        saved = await asyncio.to_thread(flush_state)
-        if not saved:
-            log.error("Stars payment %s granted but immediate STATE flush returned empty", charge_id)
-    except Exception as e:
-        log.error("Immediate Stars payment persistence failed for %s: %s", charge_id, e)
-
-    DISCOUNT_OFFERS.pop(uid, None)
-    if ref and first_payment and str(ref) != str(uid):
-        await _tell(ref, "🎁 Ваш друг оплатил подписку. <b>+7 дней</b> начислено вам.")
-    await _send_new(m.chat.id, f"✅ <b>Оплата получена.</b> Доступ продлён на {days} дн.\n"
-                               f"Откройте приложение, сигналы уже доступны.", kb_nav(back=False), None)
+    # Платёж не засчитан (повторная оплата заказа, чужой заказ, неверная сумма, бессрочный доступ)
+    code = "lifetime" if lifetime_skip else res.get("code", "unknown_order")
+    log.error("Платёж не начислен uid=%s code=%s charge=%s payload=%s", uid, code, charge_id, sp.invoice_payload)
+    refunded = await _refund_stars(uid, charge_id)
+    tail = ("Stars возвращены автоматически." if refunded else
+            "Платёж передан на проверку. Если Stars не вернутся автоматически, напишите в поддержку и укажите номер платежа:\n"
+            f"<code>{html.escape(str(charge_id))}</code>")
+    await _tell(uid, "⚠️ <b>Платёж получен, но подписка не начислена</b>\n"
+                     f"{html.escape(billing.ERROR_TEXT.get(code, 'Платёж не удалось сопоставить с заказом.'))}\n\n{tail}",
+                paywall_kb(uid))
     for aid in ADMIN_IDS:
         try:
-            await bot.send_message(aid, f"💰 Оплата Stars: {uid} · {days} дн. · {amount}⭐ · ID {html.escape(charge_id[:12])}")
+            await bot.send_message(aid, f"⚠️ Платёж не начислен: uid {uid} · {code} · {sp.total_amount}⭐ · "
+                                        f"возврат: {'да' if refunded else 'НЕТ, нужен вручную'} · charge {charge_id}")
         except Exception:
             pass
 
 
-@dp.message(Command("paysupport"))
-async def cmd_paysupport(m: types.Message):
-    """Обязательная точка входа для вопросов и споров по Stars-платежам."""
-    await show_support_menu(m)
-
-
-@dp.message(Command("terms"))
-async def cmd_terms(m: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пользовательское соглашение", url=DOCS_OFFER)],
-        [InlineKeyboardButton(text="Политика конфиденциальности", url=DOCS_PRIVACY)],
-        [InlineKeyboardButton(text="🆘 Поддержка платежей", callback_data="support_menu")],
-    ])
-    await m.answer("📄 <b>Условия использования IXCLY PRO</b>\nПеред оплатой ознакомьтесь с пользовательским соглашением и политикой конфиденциальности.",
-                   parse_mode="HTML", reply_markup=kb)
-
-
-@dp.message(Command("buy"))
+@dp.message(Command("buy", "subscribe"))
 async def cmd_buy(m: types.Message):
     try:
         await m.delete()
     except Exception:
         pass
-    a = access_payload(m.from_user.id)
-    offer_line = (f"\n🎁 <b>{a['offer']['label']} — действует ограниченное время.</b>" if a.get("offer") else "")
-    await _send_new(m.chat.id, f"💳 <b>Подписка IXCLY PRO</b>\nСтатус: <b>{a['status']}</b>"
-                               f"{' · осталось ' + str(a['days_left']) + ' дн.' if a['ok'] and not a['free'] else ''}"
-                               f"{offer_line}\n\nОплата звёздами Telegram (⭐). Выберите срок:",
-                    paywall_kb(m.from_user.id), None)
+    await show_subscription(m.chat.id, m.from_user.id)
+
+
+@dp.message(Command("guide", "instruction", "disclaimer"))
+async def cmd_guide(m: types.Message):
+    try:
+        await m.delete()
+    except Exception:
+        pass
+    await show_guide(m.chat.id, m.from_user.id)
 
 
 def account_age_hours(uid):
@@ -6496,23 +7033,37 @@ if admin_dp:
             uid = int(m.text.split()[1])
             a = access_payload(uid)
             u = _users().get(str(uid), {})
-            await m.answer(f"👤 {uid} · {html.escape(str(u.get('first_name') or '—'))}\nСтатус: {a['status']}, осталось {a['days_left']} дн., "
+            await m.answer(f"👤 {uid} · {html.escape(str(u.get('first_name') or '—'))}\nСтатус: {html.escape(a['label'])}, осталось {a['days_left']} дн., "
                            f"бесплатно: {'да' if a['free'] else 'нет'}")
         except (ValueError, IndexError):
             await m.answer("Формат: <code>/who UID</code>", parse_mode="HTML")
+
+    @admin_dp.message(Command("orders"))
+    async def adm_orders(m: types.Message):
+        """/orders [UID] — последние заказы и их статусы (незавершённые заказы сохраняются)."""
+        if not _is_admin(m):
+            return
+        parts = (m.text or "").split()
+        uid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+        with STATE_LOCK:
+            rows = [dict(o) for o in STATE.get("orders", {}).values() if uid is None or o.get("uid") == uid]
+        rows.sort(key=lambda o: o.get("created", 0), reverse=True)
+        lines = [f"<code>{o['id']}</code> · {o['uid']} · {o['days']} дн. · {o['stars']}⭐ · {o['status']}" for o in rows[:15]]
+        await m.answer("🧾 <b>Заказы</b>\n" + ("\n".join(lines) if lines else "Заказов нет"), parse_mode="HTML")
 
     @admin_dp.message(Command("admin_help"))
     async def adm_help(m: types.Message):
         if not _is_admin(m):
             return
         await m.answer("<b>Команды админа</b>\n/grant UID ДНИ — добавить дни\n/revoke UID — закрыть доступ\n"
-                       "/free UID on|off — бесплатный доступ\n/who UID — статус\n"
+                       "/free UID on|off — бесплатный доступ\n/who UID — статус\n/orders [UID] — заказы и оплаты\n"
                        "/promo_add КОД ДНИ ИСП [ДНЕЙ] · /promo_del КОД · /promos\n"
                        "/ad_set или /add_set текст | ссылка · /ad_off\n/contact ads @ник · поддержка — через бота", parse_mode="HTML")
 
 
 
-async def welcome_for(chat_id, uid):
+async def welcome_for(chat_id, uid, edit_msg=None):
+    """Главное меню (/start и кнопка «🏠 Меню»). Единый экран: заменяет предыдущее сообщение бота."""
     offer = discount_offer_for(uid)
     offer_notice = ""
     if offer:
@@ -6521,11 +7072,16 @@ async def welcome_for(chat_id, uid):
         label = "за приглашение" if offer.get("kind") == "referral" else "для новых пользователей"
         offer_notice = f"\n\n🎁 <b>Ваша скидка {pct}% {label}!</b> Действует ещё {hours} ч. Цены уже снижены в разделе «Подписка»."
     if has_access(uid):
-        await bot.send_message(chat_id, WELCOME_BOT + offer_notice, parse_mode="HTML", reply_markup=bot_main_keyboard())
-    else:
-        await bot.send_message(chat_id, "🔒 <b>Доступ закрыт.</b>\nПробный период закончился или не активирован. "
-                                        "Оплатите подписку, чтобы получать сигналы и сопровождение сделок." + offer_notice,
-                               parse_mode="HTML", reply_markup=paywall_kb(uid))
+        return await present(chat_id, WELCOME_BOT + offer_notice, bot_main_keyboard(), edit_msg=edit_msg)
+    return await present(chat_id, "🔒 <b>Доступ закрыт.</b>\nПробный период закончился или не активирован. "
+                                  "Оплатите подписку, чтобы получать сигналы и сопровождение сделок." + offer_notice,
+                         paywall_kb(uid), edit_msg=edit_msg)
+
+
+@dp.message(Command("tutorial", "learn"))
+async def tutorial_command(m: types.Message):
+    """Позволяет повторно открыть обучение в любой момент."""
+    await show_tutorial(m, 0, edit=False)
 
 
 def support_faq_answer(question):
@@ -6681,6 +7237,176 @@ async def create_support_ticket(m: types.Message, question: str, category: str =
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Меню поддержки", callback_data="support_menu")]]))
 
 
+@dp.message(Command("market"))
+async def cmd_market(m: types.Message):
+    x = await ai_center_snapshot(m.from_user.id, "BTC")
+    await m.answer(_format_ai_center(x), parse_mode="HTML", disable_web_page_preview=True)
+
+
+@dp.message(Command("forecast"))
+async def cmd_forecast(m: types.Message):
+    parts=(m.text or "").split(maxsplit=1); coin=normalize_ticker(parts[1]) if len(parts)>1 else "BTC"
+    x=await ai_center_snapshot(m.from_user.id, coin or "BTC")
+    f=x.get("forecast") or {}
+    if f.get("status")!="ok": return await m.answer("Недостаточно рыночных данных для сценарного прогноза.")
+    await m.answer(_format_ai_center(x),parse_mode="HTML")
+
+
+@dp.message(Command("whales"))
+async def cmd_whales(m: types.Message):
+    parts=(m.text or "").split(maxsplit=1); coin=normalize_ticker(parts[1]) if len(parts)>1 else "BTC"
+    rows=[]
+    for cand in SYMBOL_ALIASES.get(coin or "BTC",[coin or "BTC"]):
+        try:
+            rows=await http_json("https://data-api.binance.vision/api/v3/aggTrades",params={"symbol":f"{cand}USDT","limit":500},timeout=7)
+            if rows: break
+        except Exception: continue
+    trades=[]
+    for t in rows or []:
+        try:
+            value=float(t.get("p",0))*float(t.get("q",0))
+            if value>=100000:
+                trades.append((value,"SELL" if t.get("m") else "BUY",float(t.get("p",0))))
+        except Exception: pass
+    trades=sorted(trades,reverse=True)[:8]
+    if not trades: return await m.answer(f"🐋 {coin}: в последних 500 агрегированных сделках Binance не найдено сделок от $100k. Это не означает отсутствие крупных сделок на других площадках.")
+    body="\n".join(f"{'🔴' if side=='SELL' else '🟢'} {side} · ${value:,.0f} · цена {fmt(price)}" for value,side,price in trades)
+    await m.answer(f"🐋 <b>Крупные сделки {coin}</b> · Binance Spot\n{body}\n\nПорог $100k; это поток крупных сделок, не идентификация конкретного кита.",parse_mode="HTML")
+
+
+@dp.message(Command("liquidations"))
+async def cmd_liquidations(m: types.Message):
+    now=time.time(); rows=[x for x in LIQUIDATIONS if now-float(x.get("ts",0))<=3600]
+    rows=sorted(rows,key=lambda x:float(x.get("notional",0) or 0),reverse=True)[:12]
+    if not rows: return await m.answer("💥 За последний час в подключённом потоке Binance Futures нет записанных событий ликвидаций.")
+    body="\n".join(f"{x.get('coin','?')} · {'лонги' if x.get('side')=='LONG' else 'шорты'} · ${float(x.get('notional',0) or 0):,.0f}" for x in rows)
+    await m.answer("💥 <b>Ликвидации за 1 час</b>\n"+body,parse_mode="HTML")
+
+
+@dp.message(Command("radar"))
+async def cmd_radar(m: types.Message):
+    ranked=list(scanner_ranking or [])[:10]
+    anomalies=[]
+    for c,v in list(LIVE.items()):
+        if not isinstance(v,dict) or time.time()-float(v.get("ts",0))>300: continue
+        ch=abs(_safe_float(v.get("change_pct")))
+        if ch>=2: anomalies.append((c,ch,v.get("price")))
+    anomalies.sort(key=lambda z:-z[1])
+    lines=["📡 <b>IXCLY Radar</b>"]
+    lines += [f"#{x.get('rank',i+1)} {x.get('coin')} · {x.get('direction')} · {float(x.get('score',0)):.1f}/100" for i,x in enumerate(ranked[:8])]
+    if anomalies: lines += ["\n<b>Быстрые движения (LIVE ≤5 мин)</b>"]+[f"{c}: {ch:+.2f}%" for c,ch,_ in anomalies[:6]]
+    if not ranked and not anomalies: lines.append("Пока нет свежих подтверждённых кандидатов. Радар не запускает отдельный тяжёлый скан.")
+    await m.answer("\n".join(lines),parse_mode="HTML")
+
+
+@dp.message(Command("risk"))
+async def cmd_risk(m: types.Message):
+    uid=m.from_user.id; cfg=get_user_risk_settings(uid); used=calculate_portfolio_risk(uid)
+    await m.answer(f"🛡 <b>Контроль риска</b>\nДепозит: {cfg['deposit']:.2f} USDT\nРиск на сделку: {cfg['risk_pct']:.2f}%\nЛимит открытого риска: {cfg['max_open_risk']:.2f}%\nИспользовано: {used:.2f}%\nОстаток: {max(0,cfg['max_open_risk']-used):.2f}%\nОткрытых позиций: {len(get_user_open_positions(uid))}\n\nРасчёт не создаёт ордера.",parse_mode="HTML")
+
+
+@dp.message(Command("ai_report"))
+async def cmd_ai_report(m: types.Message):
+    parts=(m.text or "").split(maxsplit=1); coin=normalize_ticker(parts[1]) if len(parts)>1 else "BTC"
+    x=await ai_center_snapshot(m.from_user.id,coin or "BTC")
+    await m.answer(_format_ai_center(x),parse_mode="HTML")
+    audit=x.get("system_memory") or {}
+    if audit.get("findings"): await m.answer("🧪 <b>Self-Audit</b>\n"+"\n".join("• "+html.escape(z) for z in audit["findings"]),parse_mode="HTML")
+
+
+@dp.message(Command("strategy_stats"))
+async def cmd_strategy_stats(m: types.Message):
+    rows=strategy_performance(load_signal_history(),"type",3)
+    if not rows: return await m.answer("Недостаточно закрытых сигналов для сравнения стратегий.")
+    body="\n".join(f"{html.escape(str(x['name']))}: {x['trades']} сделок · WR {x['win_rate']}% · {x['avg_r']:+.2f}R/сделку"+("" if x['sample_ok'] else " · малая выборка") for x in rows)
+    await m.answer("🧩 <b>Результативность типов стратегий</b>\n"+body,parse_mode="HTML")
+
+
+@dp.message(Command("accuracy"))
+async def cmd_accuracy(m: types.Message):
+    hist=load_signal_history(); audit=self_audit_summary(hist,30)
+    regimes=strategy_performance(hist,"market_regime",3)
+    body="\n".join(audit.get("findings",[]))
+    if regimes: body+="\n\n<b>По режимам рынка</b>\n"+"\n".join(f"{html.escape(str(x['name']))}: {x['win_rate']}% · {x['trades']}" for x in regimes)
+    await m.answer("🎯 <b>Точность и калибровка</b>\n"+body+"\n\nОценка строится по закрытым сигналам, а не по незавершённым прогнозам.",parse_mode="HTML")
+
+
+@dp.message(Command("brain"))
+async def cmd_brain(m: types.Message):
+    parts = (m.text or "").split(maxsplit=1)
+    coin = normalize_ticker(parts[1]) if len(parts) > 1 else "BTC"
+    x = await ai_center_snapshot(m.from_user.id, coin or "BTC")
+    d = x.get("decision_brain") or {}
+    dna = x.get("market_dna") or {}
+    cf = x.get("counterfactual_lab") or {}
+    await m.answer(
+        f"🧠 <b>IXCLY Decision Brain · {html.escape(coin or 'BTC')}</b>\n"
+        f"Решение: <b>{html.escape(str(d.get('action','WAIT')))}</b> · DNA {d.get('score','—')}\n"
+        f"Причина: {html.escape(str(d.get('reason','нет данных')))}\n"
+        f"Отпечаток рынка: {html.escape(str(dna.get('trend','нет данных')))} · похожих состояний {dna.get('historical_matches',0)}\n"
+        f"Counterfactual: {cf.get('trades',0)} закрытых результатов · средний R {cf.get('avg_r','—')}\n"
+        "Это аналитика, не исполнение сделок.", parse_mode="HTML")
+
+
+@dp.message(Command("dna"))
+async def cmd_dna(m: types.Message):
+    rows = strategy_dna(load_signal_history(), 5)
+    if not rows:
+        return await m.answer("Недостаточно закрытых сигналов для профиля стратегий.")
+    body = "\n".join(
+        f"{html.escape(x['dimension'])} · {html.escape(x['name'])}: {x['trades']} сделок, WR {x['win_rate']}%, {x['avg_r']:+.2f}R · {html.escape(x['profile'])}"
+        for x in rows[:12])
+    await m.answer("🧬 <b>IXCLY Strategy DNA</b>\n" + body, parse_mode="HTML")
+
+
+@dp.message(Command("replay"))
+async def cmd_replay(m: types.Message):
+    parts = (m.text or "").split(maxsplit=1)
+    coin = normalize_ticker(parts[1]) if len(parts) > 1 else "BTC"
+    candidates = [x for x in load_signal_history() if x.get("coin") == (coin or "BTC")]
+    if not candidates:
+        return await m.answer("Для этой монеты нет сохранённого сигнала для воспроизведения.")
+    signal_item = max(candidates, key=lambda x: x.get("ts", 0))
+    rows = await fetch_history(coin or "BTC", "15m", 300, 60)
+    if not rows:
+        return await m.answer("Не удалось получить свечи для Market Replay.")
+    replay = replay_signal(signal_item, rows)
+    await m.answer(
+        f"⏪ <b>Market Replay · {html.escape(coin or 'BTC')}</b>\n"
+        f"Сигнал: {html.escape(str(signal_item.get('side')))} · вход {fmt(signal_item.get('entry'))}\n"
+        f"Воспроизведение свечей после сигнала: <b>{html.escape(str(replay.get('result')))}</b>\n"
+        f"Вход активирован: {'да' if replay.get('entered') else 'нет'} · TP: {', '.join(map(str,replay.get('targets_hit',[]))) or 'нет'}\n"
+        f"Покрытие истории: {'полное' if replay.get('coverage_complete') else 'частичное — часть свечей до сигнала отсутствует'}\n"
+        "OHLC не раскрывает порядок движений внутри свечи; при касании стопа и цели в одной свече применяется консервативное правило стоп первым.",
+        parse_mode="HTML")
+
+
+@dp.message(Command("cognitive"))
+async def cmd_cognitive(m: types.Message):
+    parts = (m.text or "").split(maxsplit=1)
+    coin = normalize_ticker(parts[1]) if len(parts) > 1 else "BTC"
+    x = await ai_center_snapshot(m.from_user.id, coin or "BTC")
+    phase = x.get("regime_transition") or {}; fragile = x.get("signal_fragility") or {}
+    evidence = x.get("evidence_conflict_map") or {}; calibration = x.get("score_calibration") or {}
+    bands = calibration.get("bands") or []
+    band_text = " · ".join(f"{b['band']}: WR {b['win_rate']}% / {b['trades']}" for b in bands[:5]) or "нет выборки"
+    await m.answer(
+        f"🧠 <b>IXCLY Cognitive Diagnostics · {html.escape(coin or 'BTC')}</b>\n"
+        f"Фаза рынка: <b>{html.escape(str(phase.get('label', 'нет данных')))}</b> · {phase.get('recent_range_vs_previous', '—')}x диапазон\n"
+        f"Хрупкость сигнала: <b>{fragile.get('level', 'нет данных')}</b> · зависимость: {html.escape(str(fragile.get('dominant_dependency', '—')))}\n"
+        f"Конфликт источников: <b>{html.escape(str(evidence.get('state', 'нет данных')))}</b> · {evidence.get('conflict_pct', '—')}%\n"
+        f"Score audit ({calibration.get('scored_closed_trades', 0)} закрытых): {html.escape(band_text)}\n"
+        "Score не является вероятностью. Диагностика не исполняет сделки.", parse_mode="HTML")
+
+
+@dp.message(Command("paper_report"))
+async def cmd_paper_report(m: types.Message):
+    try:
+        with STATE_LOCK: a=paper_analytics(STATE.setdefault("paper",{}),m.from_user.id)
+    except Exception as e: return await m.answer("Paper Trading: "+html.escape(str(e)))
+    await m.answer(f"📒 <b>Paper Trading · {html.escape(str(a.get('account_name') or 'счёт'))}</b>\nСделок: {a.get('trades',0)} · WR: {a.get('win_rate',0)}%\nNet PnL: {a.get('net_pnl',0):+.2f} USDT\nСредний результат: {a.get('avg_pnl',0):+.2f} USDT\nProfit Factor: {a.get('profit_factor','—')}\nMax drawdown: {a.get('max_drawdown_pct',0):.2f}%\n\nТолько виртуальные сделки.",parse_mode="HTML")
+
+
 @dp.message(Command("scan_report"))
 async def main_admin_scan_report(m: types.Message):
     if m.from_user.id not in ADMIN_IDS:
@@ -6793,6 +7519,32 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
+        if data == "tutorial:start" and msg:
+            await safe_answer(cb)
+            set_user_field(uid, onboarding_status="in_progress", onboarding_step=0)
+            return await show_tutorial(msg, 0, edit=True)
+        if data.startswith("tutorial:step:") and msg:
+            await safe_answer(cb)
+            try:
+                step = int(data.rsplit(":", 1)[1])
+            except (TypeError, ValueError):
+                step = 0
+            step = max(0, min(step, len(TUTORIAL_STEPS) - 1))
+            set_user_field(uid, onboarding_status="in_progress", onboarding_step=step)
+            return await show_tutorial(msg, step, edit=True)
+        if data in ("tutorial:skip", "tutorial:done") and msg:
+            await safe_answer(cb, "Обучение пропущено" if data.endswith("skip") else "Обучение завершено")
+            skipped = data.endswith("skip")
+            set_user_field(uid, onboarding_done=not skipped, onboarding_skipped=skipped,
+                           onboarding_status="skipped" if skipped else "completed",
+                           onboarding_completed_at=time.time())
+            try:
+                await msg.edit_text("🎓 <b>Обучение " + ("пропущено." if skipped else "завершено!") +
+                                    "</b>\n\nВ любой момент его можно открыть командой /tutorial или кнопкой «Обучение новичка».",
+                                    parse_mode="HTML")
+            except Exception:
+                pass
+            return await welcome_for(msg.chat.id, uid)
         if data in ("support_menu", "support_auto", "support_agent") and msg:
             await safe_answer(cb)
             SUPPORT_WAITING_AGENT.pop(uid, None)
@@ -6814,9 +7566,30 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
                 [InlineKeyboardButton(text="Пользовательское соглашение (оферта)", url=DOCS_OFFER)],
                 [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")]])
             return await msg.answer("📄 <b>Документы IXCLY PRO</b>\nВыберите нужный пункт:", reply_markup=kb, parse_mode="HTML")
-        if data.startswith("buy:"):
+        if data in ("menu", "nav:back"):
+            # Кнопка «🏠 Меню» (под новостями, сигналами, уведомлениями) — то же главное меню, что и /start
             await safe_answer(cb)
-            return await send_plan_invoice(uid, int(data.split(":")[1]))
+            await state.clear()
+            SUPPORT_WAITING_AGENT.pop(uid, None)
+            return await welcome_for(msg.chat.id if msg else uid, uid, edit_msg=msg)
+        if data == "sub:open":
+            await safe_answer(cb)
+            return await show_subscription(msg.chat.id if msg else uid, uid, edit_msg=msg)
+        if data == "guide:open":
+            await safe_answer(cb)
+            return await show_guide(msg.chat.id if msg else uid, uid, edit_msg=msg)
+        if data.startswith(("buy:", "pay:")):
+            await safe_answer(cb)
+            try:
+                days = int(data.split(":")[1])
+            except (TypeError, ValueError, IndexError):
+                days = 0
+            if days not in PLANS:
+                return await show_subscription(msg.chat.id if msg else uid, uid, edit_msg=msg)
+            if data.startswith("buy:"):
+                # Сначала подтверждение: тариф, срок, стоимость и дата окончания
+                return await show_buy_confirm(msg.chat.id if msg else uid, uid, days, edit_msg=msg)
+            return await send_plan_invoice(uid, days)
         if data == "promo:help":
             await safe_answer(cb)
             return await _send_new(msg.chat.id if msg else uid, "🎟 Отправьте: <code>/promo КОД</code>", kb_nav(back=False), None)
@@ -6831,7 +7604,7 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
                                        reply_markup=notif_keyboard(uid))
         if data == "notif:back" and msg:
             await safe_answer(cb)
-            return await msg.edit_text(WELCOME_BOT, parse_mode="HTML", reply_markup=bot_main_keyboard())
+            return await welcome_for(msg.chat.id, uid, edit_msg=msg)
         if data.startswith("notif:") and data.split(":")[1] in NOTIFY_NAMES:
             k = data.split(":")[1]
             cur = _users().get(str(uid), {}).get(f"notify_{k}", True)
@@ -6876,24 +7649,26 @@ async def notify_admin(text):
 
 async def telegram_backup(reason="auto"):
     global backup_dirty, last_backup_ts
-    if not admin_bot or not ADMIN_IDS:
+    backup_bot = admin_bot or bot
+    if not backup_bot or not ADMIN_IDS:
+        log.warning("Telegram backup не настроен: нужны ADMIN_IDS и доступный BOT_TOKEN.")
         return False
     data = (await asyncio.to_thread(flush_state)).encode("utf-8")
+    if not data:
+        return False
     ok = False
     caption = (f"💾 БЭКАП · юзеров {len(STATE['users'])} · сигналов {len(STATE['signal_history'])} · "
                f"{reason} · {datetime.now().strftime('%d.%m %H:%M')}")
     for aid in ADMIN_IDS:
         try:
-            msg = await admin_bot.send_document(aid, BufferedInputFile(data, "bot_state.json"), caption=caption, disable_notification=True)
-            try:
-                await admin_bot.unpin_all_chat_messages(aid)
-                await admin_bot.pin_chat_message(aid, msg.message_id, disable_notification=True)
-            except Exception:
-                pass
+            msg = await backup_bot.send_document(aid, BufferedInputFile(data, "bot_state.json"), caption=caption, disable_notification=True)
+            # Сначала закрепляем новый файл; старый не трогаем, пока новый не закреплён.
+            await backup_bot.pin_chat_message(aid, msg.message_id, disable_notification=True)
             old = last_backup_msg.get(aid)
-            if old:
+            if old and old != msg.message_id:
                 try:
-                    await admin_bot.delete_message(aid, old)
+                    await backup_bot.unpin_chat_message(aid, old)
+                    await backup_bot.delete_message(aid, old)
                 except Exception:
                     pass
             last_backup_msg[aid] = msg.message_id
@@ -6906,16 +7681,17 @@ async def telegram_backup(reason="auto"):
 
 
 async def telegram_restore():
-    if not admin_bot or not ADMIN_IDS:
+    backup_bot = admin_bot or bot
+    if not backup_bot or not ADMIN_IDS:
         return 0
     for aid in ADMIN_IDS:
         try:
-            pm = getattr(await admin_bot.get_chat(aid), "pinned_message", None)
+            pm = getattr(await backup_bot.get_chat(aid), "pinned_message", None)
             doc = getattr(pm, "document", None) if pm else None
             if not doc or not (doc.file_name or "").endswith(".json"):
                 continue
-            f = await admin_bot.get_file(doc.file_id)
-            data = json.loads((await admin_bot.download_file(f.file_path)).read().decode("utf-8"))
+            f = await backup_bot.get_file(doc.file_id)
+            data = json.loads((await backup_bot.download_file(f.file_path)).read().decode("utf-8"))
             n = restore_state(data)
             last_backup_msg[aid] = pm.message_id
             if n:
@@ -6926,15 +7702,65 @@ async def telegram_restore():
 
 
 async def backup_loop():
-    await asyncio.sleep(60)
+    await asyncio.sleep(30)
     while True:
         try:
-            if backup_dirty and time.time() - last_backup_ts > 120:
-                await telegram_backup("авто")
+            now = time.time()
+            # Бэкап не только после изменений, но и периодически — даже если бот простаивает.
+            due = (last_backup_ts <= 0 or now - last_backup_ts >= BACKUP_INTERVAL)
+            if (backup_dirty and now - last_backup_ts >= 120) or due:
+                sent = await telegram_backup("автоматический" if backup_dirty else "плановый")
+                if not sent and admin_bot and ADMIN_IDS:
+                    log.error("Автоматический Telegram-бэкап не подтверждён; данные оставлены в очереди на повтор.")
         except Exception as e:
             log.warning(f"backup_loop: {e}")
         next_timers["backup"] = time.time() + 30
         await asyncio.sleep(30)
+
+
+@dp.message(Command("backup_status"))
+async def backup_status_command(m: types.Message):
+    """Показывает состояние локального файла и Telegram-бэкапа."""
+    if m.from_user.id not in ADMIN_IDS:
+        return await m.answer("⛔ Команда доступна только администратору.")
+    try:
+        state_exists = os.path.isfile(STATE_FILE)
+        state_size = os.path.getsize(STATE_FILE) if state_exists else 0
+        state_mtime = os.path.getmtime(STATE_FILE) if state_exists else 0
+        local_baks = [p for p in LOCAL_BACKUP_FILES if os.path.isfile(p)]
+        local_bak_size = sum(os.path.getsize(p) for p in local_baks)
+        age = max(0, int(time.time() - last_backup_ts)) if last_backup_ts else None
+        if not ADMIN_IDS:
+            tg_status = "не настроен: добавьте ADMIN_IDS"
+        elif age is None:
+            tg_status = "после запуска ещё не подтверждён в этой сессии"
+        else:
+            tg_status = f"последний подтверждённый бэкап примерно {age // 3600} ч {(age % 3600) // 60} мин назад"
+        disk_env = os.getenv("IXCLY_DATA_DIR") or os.getenv("RENDER_DISK_PATH")
+        if _DATA_DIR_FALLBACK:
+            storage = (f"временный fallback: {html.escape(_DATA_DIR)} "
+                       f"(нет прав на {html.escape(_REQUESTED_DATA_DIR)}; данные не постоянные)")
+        elif disk_env:
+            storage = f"настроенный путь: {html.escape(_DATA_DIR)}"
+        else:
+            storage = f"локальная файловая система: {html.escape(_DATA_DIR)} (не постоянное хранилище)"
+        saved = datetime.fromtimestamp(state_mtime).strftime("%d.%m.%Y %H:%M:%S") if state_mtime else "нет файла"
+        text = (
+            "💾 <b>IXCLY — статус резервного копирования</b>\n\n"
+            f"📁 <b>Хранилище:</b> {storage}\n"
+            f"📄 <b>Файл состояния:</b> {'есть' if state_exists else 'отсутствует'}\n"
+            f"📦 <b>Размер состояния:</b> {state_size / 1024:.1f} KB\n"
+            f"🕒 <b>Изменён:</b> {saved}\n"
+            f"🗂 <b>Локальных копий:</b> {len(local_baks)} ({local_bak_size / 1024:.1f} KB)\n"
+            f"☁️ <b>Telegram:</b> {tg_status}\n"
+            f"⏱ <b>Интервал:</b> {BACKUP_INTERVAL // 3600} ч\n"
+            f"🔄 <b>Есть несохранённые изменения:</b> {'да' if backup_dirty else 'нет/не отмечено'}\n\n"
+            "Важно: статус последнего бэкапа отслеживается в текущем процессе. После перезапуска он может отображаться как неизвестный, пока новая копия не будет подтверждена."
+        )
+        await m.answer(text, parse_mode="HTML")
+    except Exception as e:
+        log.exception("backup_status_command failed")
+        await m.answer(f"Не удалось прочитать статус бэкапа: {html.escape(str(e)[:250])}")
 
 
 if admin_dp:
@@ -7076,7 +7902,7 @@ if admin_dp:
             return
         try:
             f = await admin_bot.get_file(m.document.file_id)
-            data = json.loads((await admin_bot.download_file(f.file_path)).read().decode("utf-8"))
+            data = json.loads((await backup_bot.download_file(f.file_path)).read().decode("utf-8"))
             n = restore_state(data, force=True)
             load_active_chats()
             await asyncio.to_thread(flush_state)
@@ -7117,6 +7943,7 @@ def _runtime_memory_snapshot():
             "analysis": len(analysis_cache), "backtest": len(bt_cache), "ai": len(_ai_cache),
             "funding": len(_funding_cache), "orderbook": len(_ob_cache), "hourly": len(_hourly_cache),
             "intelligence": cleanup_intelligence.__globals__.get("CACHE_MAX", 0) and len(cleanup_intelligence.__globals__.get("_cache", {})),
+            "ai_center": len(_ai_center_cache) if "_ai_center_cache" in globals() else 0,
             "api": len(API_CACHE) if "API_CACHE" in globals() else 0,
         },
         "last_trim": dict(MEMORY_TRIM_INFO or last_scan_info.get("memory_trim") or {}),
@@ -7156,6 +7983,9 @@ def _memory_pressure_cleanup(force=False):
         cleanup_intelligence(now)
     except Exception:
         pass
+    for key, value in list(_ai_center_cache.items()):
+        if now - float(value[0]) > 300:
+            _ai_center_cache.pop(key, None)
     if len(fetch_errors) > 40:
         fetch_errors.clear()  # transient API error diagnostics only; not signal or trade history
     if len(API_CACHE) > 120:
@@ -7166,7 +7996,7 @@ def _memory_pressure_cleanup(force=False):
     after = _current_rss_mb()
     MEMORY_TRIM_INFO = {"before_mb": before, "after_mb": after, "trimmed": True,
                         "cache_sizes": {"analysis": len(analysis_cache), "backtest": len(bt_cache),
-                                        "ai": len(_ai_cache), "funding": len(_funding_cache),
+                                        "ai": len(_ai_cache), "ai_center": len(_ai_center_cache), "funding": len(_funding_cache),
                                         "orderbook": len(_ob_cache), "hourly": len(_hourly_cache),
                                         "api": len(API_CACHE)}}
     last_scan_info["memory_trim"] = dict(MEMORY_TRIM_INFO)
@@ -7198,6 +8028,9 @@ async def memory_janitor_loop():
             for c in [c for c, v in analysis_cache.items() if now - v[0] > 600]:
                 analysis_cache.pop(c, None)
             cleanup_intelligence(now)
+            for key, value in list(_ai_center_cache.items()):
+                if now - float(value[0]) > 300:
+                    _ai_center_cache.pop(key, None)
             for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600), (_ob_cache, 600), (_hourly_cache, 600)):
                 for k in [k for k, v in store.items() if isinstance(v, (tuple, list)) and v and now - v[0] > ttl]:
                     store.pop(k, None)
@@ -7247,55 +8080,11 @@ async def churn_offer_loop():
                 log.info(f"churn {uid_str}: {e}")
 
 
-async def _supervise_background(factory, name, stop_event):
-    """Перезапускает упавший или неожиданно завершившийся фоновый цикл."""
-    delay = 3
-    while not stop_event.is_set():
-        started = time.time()
-        runtime.setdefault("background", {})[name] = {"state": "running", "since": started, "last_error": ""}
-        try:
-            await factory()
-            if stop_event.is_set():
-                break
-            log.warning("Фоновая задача %s неожиданно завершилась; перезапуск через 5 сек", name)
-            runtime["background"][name].update({"state": "restarting", "last_error": "returned"})
-            delay = 5
-        except asyncio.CancelledError:
-            runtime["background"][name].update({"state": "stopped"})
-            raise
-        except Exception as e:
-            log.error("Фоновая задача %s упала: %s", name, e, exc_info=True)
-            runtime["background"][name].update({"state": "restarting", "last_error": str(e)[:300]})
-            delay = min(max(delay * 2, 5), 120)
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=delay)
-        except asyncio.TimeoutError:
-            pass
-
-
-async def _market_bias_supervisor(stop_event):
-    """Обновляет рыночный фон при старте и далее каждые 15 минут с retry."""
-    while not stop_event.is_set():
-        try:
-            await update_market_bias()
-            delay = 900
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.error("Обновление market bias: %s", e, exc_info=True)
-            delay = 60
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=delay)
-        except asyncio.TimeoutError:
-            pass
-
-
 async def heartbeat_loop():
     while True:
-        runtime["heartbeat_ts"] = time.time()
+        await asyncio.sleep(600)
         log.info("♥ аптайм %d мин, RAM %s МБ, получателей %d, сигналов %d, live %d",
                  (time.time() - stats["started"]) // 60, _rss_mb(), len(active_chats), len(STATE["signal_history"]), len(LIVE))
-        await asyncio.sleep(60)
 
 
 async def run_polling(dispatcher, tg_bot, name, stop_event):
@@ -7388,7 +8177,20 @@ async def main():
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot:
                 await admin_bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_my_commands([types.BotCommand(command="start", description="🚀 Открыть IXCLY")])
+            await bot.set_my_commands([
+                types.BotCommand(command="start", description="🚀 Открыть IXCLY"),
+                types.BotCommand(command="tutorial", description="🎓 Обучение новичка"),
+                types.BotCommand(command="market", description="🧠 AI-анализ рынка"),
+                types.BotCommand(command="forecast", description="🔮 Сценарии монеты"),
+                types.BotCommand(command="radar", description="📡 Радар движений"),
+                types.BotCommand(command="whales", description="🐋 Крупные сделки"),
+                types.BotCommand(command="liquidations", description="💥 Ликвидации за час"),
+                types.BotCommand(command="risk", description="🛡 Мой риск"),
+                types.BotCommand(command="ai_report", description="📊 Полный AI-отчёт"),
+                types.BotCommand(command="strategy_stats", description="🧩 Статистика стратегий"),
+                types.BotCommand(command="accuracy", description="🎯 Точность сигналов"),
+                types.BotCommand(command="paper_report", description="📒 Paper Trading отчёт"),
+            ])
             if WEBAPP_URL:
                 await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=webapp_link())))
                 log.info(f"Mini App: {WEBAPP_URL}")
@@ -7414,24 +8216,16 @@ async def main():
         for _uid in list(_users()):
             if str(_uid).isdigit():
                 _init_trial(int(_uid))
+        # После каждого запуска создаём свежую контрольную точку после восстановления.
+        state_touch(True)
         gc.freeze()
         asyncio.create_task(discover_models())
 
-        runtime["heartbeat_ts"] = time.time()
-        background_factories = (
-            (scanner_loop, "scanner"), (live_monitor_loop, "live_monitor"),
-            (price_feed_loop, "price_feed"), (global_signal_monitor_loop, "global_signals"),
-            (position_monitor_loop, "positions"), (news_watcher_loop, "news_watcher"),
-            (price_alerts_loop, "price_alerts"), (morning_briefing_loop, "morning_briefing"),
-            (daily_digest_loop, "daily_digest"), (daily_call_loop, "daily_call"),
-            (anomaly_scanner_loop, "anomaly_scanner"), (liquidation_stream_loop, "liquidations"),
-            (state_flush_loop, "state_flush"), (access_reminder_loop, "access_reminders"),
-            (churn_offer_loop, "churn_offers"), (backup_loop, "backup"),
-            (heartbeat_loop, "heartbeat"), (memory_janitor_loop, "memory_janitor"),
-        )
-        background = [asyncio.create_task(_supervise_background(factory, name, stop), name=f"ixcly:{name}")
-                      for factory, name in background_factories]
-        background.append(asyncio.create_task(_market_bias_supervisor(stop), name="ixcly:market_bias"))
+        background = [asyncio.create_task(c()) for c in (
+            scanner_loop, live_monitor_loop, price_feed_loop, global_signal_monitor_loop, position_monitor_loop,
+            news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
+            anomaly_scanner_loop, liquidation_stream_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
+        background.append(asyncio.create_task(update_market_bias()))
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
         if admin_bot and admin_dp:
