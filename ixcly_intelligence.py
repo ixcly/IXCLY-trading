@@ -351,6 +351,24 @@ def adaptive_scanner_profile(history, default_threshold=66, regime=None):
 
 
 
+def breakeven_trigger_reached(pnl_pct, trigger_pct=2.5):
+    """Move a protective stop to entry only after the configured directional profit."""
+    return _num(pnl_pct, 0.0) >= _num(trigger_pct, 2.5)
+
+
+def close_warning_confirmed(long_probabilities, side, min_short_tf=70.0, min_slow_tf=65.0):
+    """Require all four timeframes to confirm adverse direction before a risk warning."""
+    if not isinstance(long_probabilities, dict) or str(side).upper() not in ("LONG", "SHORT"):
+        return False
+    against = (lambda value: 100.0 - _num(value, 50.0)) if str(side).upper() == "LONG" else (lambda value: _num(value, 50.0))
+    required = ("15m", "1h", "4h", "1d")
+    if any(tf not in long_probabilities for tf in required):
+        return False
+    scores = {tf: against(long_probabilities[tf]) for tf in required}
+    return (scores["15m"] >= min_short_tf and scores["1h"] >= min_short_tf and
+            scores["4h"] >= min_slow_tf and scores["1d"] >= min_slow_tf)
+
+
 def atr_stop_multiplier(adx=None, atr_pct=None):
     """Minimum ATR distance for structural stop, widened for volatile markets."""
     trend = _num(adx)
@@ -403,3 +421,10 @@ def scan_diagnostic_summary(bt_rejected=0, analysis_errors=0, wait_count=0,
     if not parts:
         return "Новых сигналов нет: сетапы не прошли итоговую проверку."
     return "Новых сигналов нет. Причины: " + "; ".join(parts) + "."
+
+
+def is_memory_guard_reason(reason):
+    """True for internal RAM-guard events that must never be broadcast to subscribers."""
+    value = str(reason or "").strip().lower()
+    return ("защитой памяти" in value or "ram guard" in value or
+            "достигла защитного порога" in value or "memory guard" in value)
