@@ -370,7 +370,9 @@ _alert_sent = {}
 # =====================================================================
 # Render: задайте IXCLY_DATA_DIR=/var/data (или RENDER_DISK_PATH=/var/data),
 # предварительно подключив Persistent Disk. Без диска остаётся Telegram backup.
-_DATA_DIR = (os.getenv("IXCLY_DATA_DIR") or os.getenv("RENDER_DISK_PATH") or ".").strip() or "."
+import os
+
+_DATA_DIR = os.environ.get("DATA_DIR", "/tmp/ixcly_data")
 os.makedirs(_DATA_DIR, exist_ok=True)
 STATE_FILE = os.path.join(_DATA_DIR, "bot_state.json")
 LEGACY_STATE_FILE = os.path.join(os.getcwd(), "bot_state.json")
