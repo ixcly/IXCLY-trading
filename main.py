@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v3.1 PRO
+IXCLY Trading Bot v4.2 MAX BRAIN
 
 - 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
 - Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
@@ -41,6 +41,8 @@ from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, ris
                                scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence,
                                forecast_scenarios, early_movement_assessment, liquidation_risk_assessment,
                                signal_quality_breakdown, strategy_performance, self_audit_summary)
+from ixcly_brain import (market_fingerprint, signal_fingerprint, decision_brain, liquidity_path,
+                        news_reaction_assessment, strategy_dna, counterfactual_lab, replay_signal)
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -238,7 +240,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.1-MAX-INTEL"
+VERSION = "4.2-MAX-BRAIN"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -3080,6 +3082,31 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "atr_stop_multiplier": atr_stop_multiplier(info.get("adx"), (info.get("atr", 0) / info.get("price", 1) * 100)),
         "sr": info.get("sr", {}),
     }
+    # IXCLY Decision Brain: explainable research layer; does not execute orders.
+    try:
+        _brain_df = info.get("df")
+        _brain_news = setup.get("extras", {}).get("news_risk", {})
+        _brain_early = early_movement_assessment(
+            _brain_df, setup.get("extras", {}).get("oi_pct"),
+            setup.get("extras", {}).get("imbalance"),
+            setup.get("extras", {}).get("funding"),
+            volume_anomaly(_brain_df) if _brain_df is not None else None)
+        _brain_crowd = liquidation_risk_assessment(
+            setup.get("extras", {}).get("funding"),
+            setup.get("extras", {}).get("oi_pct"),
+            setup.get("extras", {}).get("price_pct"))
+        _brain_ctx = {"news_risk": _brain_news}
+        _brain_ctx["orderbook_bid_share"] = setup.get("extras", {}).get("imbalance")
+        res["market_fingerprint"] = market_fingerprint(coin, _brain_df, load_signal_history())
+        res["signal_dna"] = signal_fingerprint(res, setup, _brain_ctx)
+        res["decision_brain"] = decision_brain(res["signal_dna"], _brain_early, _brain_crowd,
+                                                 _brain_news, res.get("bt"))
+        # Only severe, low-score contradictions can downgrade an ENTER; legacy filters remain intact.
+        if res.get("verdict") == "ENTER" and res["decision_brain"].get("action") == "BLOCK":
+            res["verdict"] = "WAIT"
+            res["comment"] = "Decision Brain: " + res["decision_brain"].get("reason", "повышенный риск")
+    except Exception as _brain_err:
+        log.debug("Decision Brain analysis skipped for %s: %s", coin, _brain_err)
     res["text"] = render_caption(res)
     return res
 
@@ -3589,6 +3616,8 @@ async def scan_once(send=True):
                         "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "quality_score": r.get("quality_score"),
                         "quality_label": r.get("quality_label"), "market_regime": r.get("market_regime"),
                         "volume_anomaly": r.get("volume_anomaly"),
+                        "market_fingerprint": (r.get("market_fingerprint") or {}).get("features", {}),
+                        "signal_dna": r.get("signal_dna"), "decision_brain": r.get("decision_brain"),
                         "memory_features": {"regime": (r.get("market_regime") or {}).get("name", "unknown"),
                                              "quality": r.get("quality_score"), "atr_pct": (r.get("indicators") or {}).get("atr_pct"),
                                              "rsi": r.get("rsi"), "adx": r.get("adx"), "btc_context": r.get("btc_txt"),
@@ -4782,12 +4811,26 @@ async def ai_center_snapshot(uid, coin="BTC"):
     mem = signal_memory_summary(hist, 120)
     recent_liqs = [x for x in LIQUIDATIONS if time.time()-x.get("ts",0)<=3600]
     coin_liqs = [x for x in recent_liqs if x.get("coin")==coin]
+    brain_hist = [x for x in hist if x.get("coin") == coin]
+    dna = market_fingerprint(coin, df, hist) if df is not None else {"status": "insufficient_data"}
+    liquidity = liquidity_path(df, book) if df is not None else {"status": "insufficient_data", "levels": []}
+    reaction = news_reaction_assessment({**(market_bias or {}), **(news_risk or {})}, df) if df is not None else {"status": "insufficient_data"}
+    strategy_profile = strategy_dna(hist, 5)
+    counterfactual = counterfactual_lab(brain_hist, 5)
+    active_payload = _sig_item(active) if active else None
+    brain_signal = (active.get("signal_dna") or signal_fingerprint(
+        active or {}, context={"volume_anomaly": vol, "orderbook_bid_share": book, "news_risk": news_risk})
+        if active else {"score": None, "factors": [], "conflicts": []})
+    brain_decision = decision_brain(brain_signal, early, crowd, news_risk, forecast) if active else {"action": "WAIT", "reason": "Нет активного сигнала для оценки", "trade_execution": False}
     result = {"coin":coin,"source":source,"price":price,"regime":regime,"volume_anomaly":vol,
             "early_movement":early,"forecast":forecast,"funding":funding,"oi_state":oi_state,
             "oi_change_pct":oi_pct,"oi_price_change_pct":oi_price_pct,"orderbook_bid_share":book,
             "crowding_risk":crowd,"news_risk":news_risk,"news":{"title":market_bias.get("title_ru"),
             "bias":market_bias.get("bias"),"severity":market_bias.get("severity"),"ts":market_bias.get("ts")},
-            "active_signal":_sig_item(active) if active else None,"quality":quality,"memory":mem,
+            "active_signal":active_payload,"quality":quality,"memory":mem,
+            "market_dna":dna,"liquidity_path":liquidity,"news_reaction":reaction,
+            "signal_dna":brain_signal,"decision_brain":brain_decision,
+            "strategy_dna":strategy_profile,"counterfactual_lab":counterfactual,
             "liquidations_1h":{"count":len(coin_liqs),"notional":round(sum(float(x.get("notional",0) or 0) for x in coin_liqs),2)},
             "system_memory":self_audit_summary(hist,30),"generated_at":time.time()}
     _ai_center_cache[coin] = (time.time(), result)
@@ -6651,6 +6694,56 @@ async def cmd_accuracy(m: types.Message):
     body="\n".join(audit.get("findings",[]))
     if regimes: body+="\n\n<b>По режимам рынка</b>\n"+"\n".join(f"{html.escape(str(x['name']))}: {x['win_rate']}% · {x['trades']}" for x in regimes)
     await m.answer("🎯 <b>Точность и калибровка</b>\n"+body+"\n\nОценка строится по закрытым сигналам, а не по незавершённым прогнозам.",parse_mode="HTML")
+
+
+@dp.message(Command("brain"))
+async def cmd_brain(m: types.Message):
+    parts = (m.text or "").split(maxsplit=1)
+    coin = normalize_ticker(parts[1]) if len(parts) > 1 else "BTC"
+    x = await ai_center_snapshot(m.from_user.id, coin or "BTC")
+    d = x.get("decision_brain") or {}
+    dna = x.get("market_dna") or {}
+    cf = x.get("counterfactual_lab") or {}
+    await m.answer(
+        f"🧠 <b>IXCLY Decision Brain · {html.escape(coin or 'BTC')}</b>\n"
+        f"Решение: <b>{html.escape(str(d.get('action','WAIT')))}</b> · DNA {d.get('score','—')}\n"
+        f"Причина: {html.escape(str(d.get('reason','нет данных')))}\n"
+        f"Отпечаток рынка: {html.escape(str(dna.get('trend','нет данных')))} · похожих состояний {dna.get('historical_matches',0)}\n"
+        f"Counterfactual: {cf.get('trades',0)} закрытых результатов · средний R {cf.get('avg_r','—')}\n"
+        "Это аналитика, не исполнение сделок.", parse_mode="HTML")
+
+
+@dp.message(Command("dna"))
+async def cmd_dna(m: types.Message):
+    rows = strategy_dna(load_signal_history(), 5)
+    if not rows:
+        return await m.answer("Недостаточно закрытых сигналов для профиля стратегий.")
+    body = "\n".join(
+        f"{html.escape(x['dimension'])} · {html.escape(x['name'])}: {x['trades']} сделок, WR {x['win_rate']}%, {x['avg_r']:+.2f}R · {html.escape(x['profile'])}"
+        for x in rows[:12])
+    await m.answer("🧬 <b>IXCLY Strategy DNA</b>\n" + body, parse_mode="HTML")
+
+
+@dp.message(Command("replay"))
+async def cmd_replay(m: types.Message):
+    parts = (m.text or "").split(maxsplit=1)
+    coin = normalize_ticker(parts[1]) if len(parts) > 1 else "BTC"
+    candidates = [x for x in load_signal_history() if x.get("coin") == (coin or "BTC")]
+    if not candidates:
+        return await m.answer("Для этой монеты нет сохранённого сигнала для воспроизведения.")
+    signal_item = max(candidates, key=lambda x: x.get("ts", 0))
+    rows = await fetch_history(coin or "BTC", "15m", 300, 60)
+    if not rows:
+        return await m.answer("Не удалось получить свечи для Market Replay.")
+    replay = replay_signal(signal_item, rows)
+    await m.answer(
+        f"⏪ <b>Market Replay · {html.escape(coin or 'BTC')}</b>\n"
+        f"Сигнал: {html.escape(str(signal_item.get('side')))} · вход {fmt(signal_item.get('entry'))}\n"
+        f"Воспроизведение свечей после сигнала: <b>{html.escape(str(replay.get('result')))}</b>\n"
+        f"Вход активирован: {'да' if replay.get('entered') else 'нет'} · TP: {', '.join(map(str,replay.get('targets_hit',[]))) or 'нет'}\n"
+        f"Покрытие истории: {'полное' if replay.get('coverage_complete') else 'частичное — часть свечей до сигнала отсутствует'}\n"
+        "OHLC не раскрывает порядок движений внутри свечи; при касании стопа и цели в одной свече применяется консервативное правило стоп первым.",
+        parse_mode="HTML")
 
 
 @dp.message(Command("paper_report"))
