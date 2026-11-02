@@ -393,6 +393,148 @@ def atr_target_multipliers(adx=None, atr_pct=None):
         return (1.25, 2.0, 3.0)
     return (1.5, 2.5, 4.0)
 
+
+def forecast_scenarios(tf_data, side=None, news_risk=None):
+    """Build ATR-based conditional scenarios; levels are not claimed probabilities."""
+    if not isinstance(tf_data, dict):
+        return {"status": "insufficient_data", "message": "Недостаточно таймфреймов"}
+    info = tf_data.get("4h") or tf_data.get("1h") or {}
+    df = info.get("df")
+    try:
+        price = _num(info.get("price"), _num(df["close"].iloc[-1]) if df is not None and len(df) else 0)
+        atr = _num(info.get("atr"), _num(df["atr"].iloc[-1]) if df is not None and "atr" in df and len(df) else 0)
+    except Exception:
+        price, atr = _num(info.get("price")), _num(info.get("atr"))
+    probs = {k: _num(v.get("long_prob"), 50) for k, v in (tf_data or {}).items() if k in ("15m", "1h", "4h", "1d") and isinstance(v, dict)}
+    if price <= 0 or atr <= 0:
+        return {"status": "insufficient_data", "message": "Нет корректной цены или ATR"}
+    weights = {"15m": .1, "1h": .2, "4h": .3, "1d": .4}
+    available = [(k, weights[k]) for k in weights if k in probs]
+    weighted = (sum(probs[k] * w for k, w in available) / sum(w for _, w in available)) if available else 50
+    direction = str(side or ("LONG" if weighted >= 55 else "SHORT" if weighted <= 45 else "NEUTRAL")).upper()
+    aligned = sum(1 for v in probs.values() if (v >= 50) == (direction == "LONG")) if direction != "NEUTRAL" else 0
+    total = len(probs)
+    strength = max(weighted, 100-weighted)
+    risk = (news_risk or {}).get("severity", "low")
+    mult = 0.8 if risk in ("high", "critical") else 1.0
+    return {"status": "ok", "price": round(price, 10), "atr": round(atr, 10), "atr_pct": round(atr/price*100, 3),
+            "direction": direction, "tf_alignment": f"{aligned}/{total}" if total else "нет данных",
+            "strength_index": round(strength, 1), "bull_trigger": round(price + atr*.35, 10),
+            "bear_trigger": round(price - atr*.35, 10), "bull_target": round(price + atr*1.8*mult, 10),
+            "bear_target": round(price - atr*1.8*mult, 10), "range_low": round(price-atr*.65, 10),
+            "range_high": round(price+atr*.65, 10), "news_risk": risk,
+            "note": "Условные сценарии по ATR и таймфреймам; триггер требует закрытия свечи, это не гарантия движения."}
+
+
+def early_movement_assessment(df, oi_change_pct=None, book_imbalance=None, funding_rate=None, vol_anomaly=None):
+    """Conservative watch-only detector. It never creates an entry signal."""
+    score, reasons = 0, []
+    anomaly = vol_anomaly or volume_anomaly(df)
+    if anomaly:
+        ratio = _num(anomaly.get("ratio"))
+        if ratio >= 2.0:
+            score += 30; reasons.append(f"объём x{ratio:.1f}")
+    oi = _num(oi_change_pct, float("nan"))
+    if math.isfinite(oi) and abs(oi) >= .5:
+        score += 20; reasons.append(f"OI {oi:+.2f}%")
+    book = _num(book_imbalance, float("nan"))
+    if math.isfinite(book) and abs(book-.5) >= .12:
+        score += 20; reasons.append(f"перевес стакана {book:.0%} bids")
+    funding = _num(funding_rate, float("nan"))
+    if math.isfinite(funding) and abs(funding) >= .0005:
+        score += 10; reasons.append(f"funding {funding*100:.3f}%")
+    regime = market_regime(df)
+    if regime.get("volatility") == "high":
+        score += 10; reasons.append("повышенная волатильность")
+    try:
+        if df is not None and len(df) >= 3:
+            prev = _num(df["close"].iloc[-2]); last = _num(df["close"].iloc[-1])
+            atr = _num(df["atr"].iloc[-1]) if "atr" in df else 0
+            if prev > 0 and atr > 0 and abs(last-prev)/atr >= .7:
+                score += 15; reasons.append("ускорение цены относительно ATR")
+    except Exception:
+        pass
+    score = min(100, score)
+    state = "watch" if score >= 45 and len(reasons) >= 2 else "quiet"
+    return {"score": score, "state": state, "reasons": reasons[:5], "volume": anomaly,
+            "message": "Возможное движение — наблюдать, не входить автоматически" if state == "watch" else "Подтверждений раннего движения недостаточно"}
+
+
+def liquidation_risk_assessment(funding=None, oi_change_pct=None, price_change_pct=None):
+    """Crowding/flush risk proxy. Not a liquidation-price map."""
+    f, oi, px = _num(funding, float("nan")), _num(oi_change_pct, float("nan")), _num(price_change_pct, float("nan"))
+    long_risk = short_risk = 0
+    reasons = []
+    if math.isfinite(f):
+        if f >= .0005: long_risk += 30; reasons.append("положительный высокий funding: перегрузка лонгов")
+        elif f <= -.0005: short_risk += 30; reasons.append("отрицательный высокий funding: перегрузка шортов")
+    if math.isfinite(oi) and math.isfinite(px):
+        if oi > .7 and px < -.4: long_risk += 35; reasons.append("OI растёт на падении цены")
+        if oi > .7 and px > .4: short_risk += 25; reasons.append("OI растёт на росте цены: риск поздних шортов")
+        if oi < -.7 and px < -.4: long_risk += 15; reasons.append("OI снижается вместе с ценой: возможное закрытие лонгов")
+        if oi < -.7 and px > .4: short_risk += 15; reasons.append("OI снижается на росте цены: возможное закрытие шортов")
+    risk = max(long_risk, short_risk)
+    return {"long_crowding_risk": min(100,long_risk), "short_crowding_risk": min(100,short_risk),
+            "level": "high" if risk >= 55 else "medium" if risk >= 25 else "low",
+            "reasons": reasons, "note": "Оценка перегруженности по funding/OI/цене, не реальные уровни ликвидаций."}
+
+
+def signal_quality_breakdown(res):
+    """Human-readable components behind the existing 0..100 signal score."""
+    score = score_signal(res)
+    probs = res.get("tf_probs") or res.get("long_prob") or {}
+    vals = [_num(v, -1) for v in probs.values() if 0 <= _num(v, -1) <= 100] if isinstance(probs, dict) else []
+    aligned = sum(1 for v in vals if (v >= 50) == (vals[0] >= 50))/len(vals)*100 if vals else None
+    bt = res.get("bt") or {}
+    return {"score": score, "timeframe_alignment_pct": round(aligned,1) if aligned is not None else None,
+            "backtest_trades": int(_num(bt.get("trades"))), "risk_level": res.get("risk_lvl"),
+            "regime": (res.get("regime") or (res.get("market_regime") or {}).get("name")),
+            "fake_breakout": bool(res.get("fake_breakout")),
+            "label": "A" if score>=82 else "B" if score>=72 else "C" if score>=62 else "D"}
+
+
+def strategy_performance(history, key="type", min_trades=3):
+    groups = {}
+    for item in history or []:
+        if item.get("status") not in ("win", "loss"):
+            continue
+        raw_label = item.get(key)
+        if isinstance(raw_label, dict):
+            raw_label = raw_label.get("name") or "unknown"
+        if not raw_label and key != "market_regime":
+            raw_label = (item.get("market_regime") or {}).get("name") if isinstance(item.get("market_regime"), dict) else item.get("market_regime")
+        label = str(raw_label or "unknown")[:32]
+        row = groups.setdefault(label, {"name": label, "trades": 0, "wins": 0, "losses": 0, "r": 0.0})
+        row["trades"] += 1
+        row["wins"] += item.get("status") == "win"
+        row["losses"] += item.get("status") == "loss"
+        row["r"] += _num(item.get("r"), 0)
+    out = []
+    for row in groups.values():
+        row["win_rate"] = round(row["wins"]/row["trades"]*100,1)
+        row["avg_r"] = round(row["r"]/row["trades"],2)
+        row["sample_ok"] = row["trades"] >= min_trades
+        row["r"] = round(row["r"],2)
+        out.append(row)
+    return sorted(out,key=lambda x:(x["sample_ok"],x["avg_r"],x["trades"]),reverse=True)[:12]
+
+
+def self_audit_summary(history, limit=30):
+    closed = [x for x in (history or []) if x.get("status") in ("win", "loss")][-max(1,int(limit)):]
+    if not closed:
+        return {"trades":0,"findings":["Недостаточно закрытых сигналов для аудита."],"recommendation":"Продолжать сбор данных без изменения параметров."}
+    wins = [x for x in closed if x.get("status")=="win"]
+    losses = [x for x in closed if x.get("status")=="loss"]
+    avg_win = sum(_num(x.get("r"),0) for x in wins)/len(wins) if wins else 0
+    avg_loss = sum(_num(x.get("r"),0) for x in losses)/len(losses) if losses else 0
+    findings = [f"Закрытых сигналов: {len(closed)}, win rate {len(wins)/len(closed)*100:.1f}%."]
+    if len(closed)<15: findings.append("Выборка мала: адаптацию стратегий пока не усиливать.")
+    if losses: findings.append(f"Средний R убыточных сигналов: {avg_loss:.2f}R.")
+    if wins: findings.append(f"Средний R прибыльных сигналов: {avg_win:.2f}R.")
+    return {"trades":len(closed),"wins":len(wins),"losses":len(losses),"win_rate":round(len(wins)/len(closed)*100,1),
+            "avg_win_r":round(avg_win,2),"avg_loss_r":round(avg_loss,2),"findings":findings,
+            "recommendation":"Проверять ошибки по режимам рынка; не менять пороги без достаточной выборки."}
+
 def cleanup(now=None):
     now = time.time() if now is None else now
     for key, (ts, _) in list(_cache.items()):
