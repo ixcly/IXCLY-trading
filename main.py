@@ -241,7 +241,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.3-MAX-COGNITIVE"
+VERSION = "4.4.2-AUTO-PERSIST"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -368,7 +368,14 @@ _alert_sent = {}
 # =====================================================================
 # ХРАНИЛИЩЕ СОСТОЯНИЯ (память + файл + бэкап в Telegram)
 # =====================================================================
-STATE_FILE = "bot_state.json"
+# Render: задайте IXCLY_DATA_DIR=/var/data (или RENDER_DISK_PATH=/var/data),
+# предварительно подключив Persistent Disk. Без диска остаётся Telegram backup.
+_DATA_DIR = (os.getenv("IXCLY_DATA_DIR") or os.getenv("RENDER_DISK_PATH") or ".").strip() or "."
+os.makedirs(_DATA_DIR, exist_ok=True)
+STATE_FILE = os.path.join(_DATA_DIR, "bot_state.json")
+LEGACY_STATE_FILE = os.path.join(os.getcwd(), "bot_state.json")
+LOCAL_BACKUP_FILES = (STATE_FILE + ".bak", STATE_FILE + ".bak2")
+BACKUP_INTERVAL = max(900, int(os.getenv("IXCLY_BACKUP_INTERVAL", "21600")))  # 6 часов по умолчанию
 STATE_LOCK = threading.RLock()
 STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}}
 state_dirty = False
@@ -441,14 +448,49 @@ def restore_state(data, force=False):
     return n
 
 
-def load_state_file():
-    if not os.path.exists(STATE_FILE):
-        return
+def _read_state_candidate(path):
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            restore_state(json.load(f), force=True)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("users", {}), dict):
+            raise ValueError("неверная структура состояния")
+        return data
     except Exception as e:
-        log.error(f"Не удалось прочитать {STATE_FILE}: {e}")
+        log.warning(f"Файл состояния {path} недоступен: {e}")
+        return None
+
+
+def load_state_file():
+    """Загружает основной файл, затем локальные резервные копии и legacy-путь."""
+    candidates = [STATE_FILE, *LOCAL_BACKUP_FILES]
+    if os.path.abspath(LEGACY_STATE_FILE) != os.path.abspath(STATE_FILE):
+        candidates.append(LEGACY_STATE_FILE)
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        data = _read_state_candidate(path)
+        if data is None:
+            continue
+        n = restore_state(data, force=True)
+        log.info(f"Состояние загружено из {path}; пользователей: {n}")
+        if path != STATE_FILE:
+            state_touch(False)
+        return n
+    log.warning("Локальное состояние не найдено; при старте будет выполнена попытка восстановления из Telegram.")
+    return 0
+
+
+def _rotate_local_backups():
+    """Сохраняет две предыдущие версии перед атомарной заменой основного JSON."""
+    try:
+        if os.path.exists(LOCAL_BACKUP_FILES[0]):
+            import shutil
+            shutil.copy2(LOCAL_BACKUP_FILES[0], LOCAL_BACKUP_FILES[1])
+        if os.path.exists(STATE_FILE):
+            import shutil
+            shutil.copy2(STATE_FILE, LOCAL_BACKUP_FILES[0])
+    except Exception as e:
+        log.warning(f"Не удалось обновить локальные резервные копии: {e}")
 
 
 def flush_state():
@@ -472,6 +514,9 @@ def flush_state():
         try:
             with open(STATE_FILE + ".tmp", "w", encoding="utf-8") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            _rotate_local_backups()
             os.replace(STATE_FILE + ".tmp", STATE_FILE)
             state_dirty = False
         except Exception as e:
@@ -5114,9 +5159,13 @@ async def mini_dispatch(uid, u, act, d):
             "monitor": {"uptime_seconds": round(now - stats.get("started", now)),
                         "news_engine": market_bias.get("engine", "none"),
                         "main_bot_configured": bool(runtime.get("main_bot")),
-                        "admin_backup_configured": bool(admin_bot and ADMIN_IDS),
+                        "admin_backup_configured": bool(ADMIN_IDS),
+                        "backup_bot": "admin" if admin_bot else "main",
+                        "storage_path": STATE_FILE,
+                        "local_backup_files": sum(1 for x in LOCAL_BACKUP_FILES if os.path.exists(x)),
+                        "backup_interval_seconds": BACKUP_INTERVAL,
                         "backup_age_seconds": backup_age, "backup_pending": bool(backup_dirty),
-                        "backup_status": "не настроен" if not admin_bot or not ADMIN_IDS else ("ожидает отправки" if backup_dirty else ("выполнен" if backup_age is not None else "ещё не выполнялся")),
+                        "backup_status": "нужен ADMIN_IDS" if not ADMIN_IDS else ("ожидает отправки" if backup_dirty else ("выполнен" if backup_age is not None else "ещё не выполнялся")),
                         "scan_age_seconds": round(now - scan_ts) if scan_ts else None},
         }
 
@@ -5417,6 +5466,7 @@ def bot_main_keyboard():
     rows.append([InlineKeyboardButton(text="🔥 Сигналы", web_app=WebAppInfo(url=webapp_link(tab="signals")))] if WEBAPP_URL else
                 [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
+    rows.append([InlineKeyboardButton(text="🎓 Обучение новичка", callback_data="tutorial:start")])
     rows.append([InlineKeyboardButton(text="📄 Документы", callback_data="show_docs")])
     rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5424,6 +5474,72 @@ def bot_main_keyboard():
 
 WELCOME_BOT = ("👋 <b>IXCLY PRO</b>\n\nВся работа теперь в мини-приложении: сигналы, графики, портфель, статистика.\n"
                "Сюда я присылаю уведомления: новые сигналы, сопровождение сделок, итоги и снятые идеи.")
+
+
+# Пошаговое обучение хранит только статус/номер урока в существующем STATE пользователя.
+# Никаких новых зависимостей или отдельного хранилища не требуется.
+TUTORIAL_STEPS = [
+    ("👋 Добро пожаловать в IXCLY", 
+     "IXCLY помогает следить за крипторынком, изучать сигналы и вести статистику.\n\n"
+     "Основная работа проходит в Mini App. Откройте его кнопкой «Открыть IXCLY App» в главном меню.\n\n"
+     "Обучение займёт несколько минут. Оно объяснит основные разделы и безопасный порядок работы."),
+    ("🔥 1. Сигналы", 
+     "Откройте вкладку «Сигналы». Здесь собраны торговые идеи, которые прошли фильтры сканера.\n\n"
+     "Используйте фильтры, чтобы смотреть нужные статусы. Нажмите на монету, чтобы открыть подробный разбор.\n\n"
+     "Сигнал — это аналитическая идея, а не приказ покупать или продавать и не гарантия результата."),
+    ("🔎 2. Как читать карточку монеты", 
+     "В карточке изучите направление LONG/SHORT, цену входа, цели TP и уровень Stop Loss. Ниже могут быть причины, индикаторы, таймфреймы, риск и результаты исторической проверки.\n\n"
+     "LONG означает сценарий роста, SHORT — сценарий снижения. TP — цели фиксации, SL — уровень ограничения убытка.\n\n"
+     "Оценка качества/score не является вероятностью прибыли. Если статус WAIT или данные противоречат друг другу — не торопитесь."),
+    ("💼 3. Портфель и риск", 
+     "Во вкладке «Портфель» можно указать свой депозит и риск на сделку, выбрать режим и просматривать сопровождаемые позиции.\n\n"
+     "Начните с небольшого риска и проверьте, что понимаете размер возможного убытка до любого решения. Не увеличивайте риск ради отыгрыша."),
+    ("🧪 4. Paper Trading — тренировка без денег", 
+     "В разделе «Портфель» находится PAPER TRADING. Это виртуальный счёт: можно открыть тестовую позицию, создать отдельный счёт/стратегию, посмотреть виртуальный баланс и историю.\n\n"
+     "Paper Trading не отправляет реальные ордера на биржу. Используйте его, чтобы потренироваться и проверить подход до принятия решений на реальном рынке."),
+    ("📊 5. Аналитика", 
+     "Во вкладке «Аналитика» смотрите личные результаты и общую статистику системы: успешные/убыточные сделки, историю, просадку и другие показатели.\n\n"
+     "Одна или несколько сделок не показывают надёжность стратегии. Смотрите на выборку целиком и учитывайте комиссии, проскальзывание и рыночные условия."),
+    ("🧠 6. Раздел «Ещё»", 
+     "Во вкладке «Ещё» доступны AI Command Center, новости рынка, настройки уведомлений, приглашение друзей, поддержка и документы.\n\n"
+     "AI Command Center показывает сценарии, раннее движение, funding/OI и риск перегруженности. Это дополнительная аналитика, а не автоматическое управление сделками."),
+    ("🛡 7. Безопасный порядок работы", 
+     "Рекомендуемый порядок:\n1) изучить рынок и новость;\n2) открыть сигнал и прочитать причины;\n3) проверить вход, TP, SL и риск;\n4) при необходимости сначала потренироваться в Paper Trading;\n5) вести статистику и не менять план под влиянием эмоций.\n\n"
+     "Криптовалюты волатильны. При сомнениях лучше пропустить идею. IXCLY не гарантирует прибыль и не заменяет ваше решение."),
+]
+
+
+def tutorial_keyboard(step):
+    step = max(0, min(int(step), len(TUTORIAL_STEPS) - 1))
+    rows = []
+    nav = []
+    if step > 0:
+        nav.append(InlineKeyboardButton(text="⬅ Назад", callback_data=f"tutorial:step:{step-1}"))
+    if step < len(TUTORIAL_STEPS) - 1:
+        nav.append(InlineKeyboardButton(text="Далее ➡", callback_data=f"tutorial:step:{step+1}"))
+    else:
+        nav.append(InlineKeyboardButton(text="✅ Завершить", callback_data="tutorial:done"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⏭ Пропустить обучение", callback_data="tutorial:skip")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def tutorial_message(step):
+    step = max(0, min(int(step), len(TUTORIAL_STEPS) - 1))
+    title, body = TUTORIAL_STEPS[step]
+    return (f"🎓 <b>Обучение IXCLY · {step + 1}/{len(TUTORIAL_STEPS)}</b>\n\n"
+            f"<b>{html.escape(title)}</b>\n\n{html.escape(body)}")
+
+
+async def show_tutorial(target, step=0, edit=False):
+    text = tutorial_message(step)
+    markup = tutorial_keyboard(step)
+    if edit:
+        try:
+            return await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
+    return await target.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 def notif_keyboard(uid):
@@ -5500,6 +5616,18 @@ async def cmd_start(m: types.Message, state: FSMContext):
         pass
     if len(parts) > 1 and parts[1].lower() in ("support", "help", "helpdesk"):
         return await show_support_menu(m)
+    user_state = _users().get(user_key, {})
+    if is_first_start and not user_state.get("onboarding_done") and not user_state.get("onboarding_skipped"):
+        set_user_field(uid, onboarding_status="offered", onboarding_started_at=time.time())
+        intro = ("👋 <b>Добро пожаловать в IXCLY PRO!</b>\n\n"
+                 "Вы впервые здесь? Я могу провести короткое обучение: покажу, где искать сигналы, "
+                 "как читать анализ, пользоваться портфелем, статистикой и виртуальным Paper Trading.\n\n"
+                 "Выберите, как продолжить:")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎓 Начать обучение", callback_data="tutorial:start")],
+            [InlineKeyboardButton(text="⏭ Пропустить обучение", callback_data="tutorial:skip")],
+        ])
+        return await m.answer(intro, parse_mode="HTML", reply_markup=kb)
     await welcome_for(m.chat.id, m.from_user.id)
 
 
@@ -6570,6 +6698,12 @@ async def welcome_for(chat_id, uid):
                                parse_mode="HTML", reply_markup=paywall_kb(uid))
 
 
+@dp.message(Command("tutorial", "learn"))
+async def tutorial_command(m: types.Message):
+    """Позволяет повторно открыть обучение в любой момент."""
+    await show_tutorial(m, 0, edit=False)
+
+
 def support_faq_answer(question):
     """Точный FAQ IXCLY: сначала определяем намерение, затем отвечаем только на него.
 
@@ -7005,6 +7139,32 @@ async def on_callback(cb: types.CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     msg = cb.message
     try:
+        if data == "tutorial:start" and msg:
+            await safe_answer(cb)
+            set_user_field(uid, onboarding_status="in_progress", onboarding_step=0)
+            return await show_tutorial(msg, 0, edit=True)
+        if data.startswith("tutorial:step:") and msg:
+            await safe_answer(cb)
+            try:
+                step = int(data.rsplit(":", 1)[1])
+            except (TypeError, ValueError):
+                step = 0
+            step = max(0, min(step, len(TUTORIAL_STEPS) - 1))
+            set_user_field(uid, onboarding_status="in_progress", onboarding_step=step)
+            return await show_tutorial(msg, step, edit=True)
+        if data in ("tutorial:skip", "tutorial:done") and msg:
+            await safe_answer(cb, "Обучение пропущено" if data.endswith("skip") else "Обучение завершено")
+            skipped = data.endswith("skip")
+            set_user_field(uid, onboarding_done=not skipped, onboarding_skipped=skipped,
+                           onboarding_status="skipped" if skipped else "completed",
+                           onboarding_completed_at=time.time())
+            try:
+                await msg.edit_text("🎓 <b>Обучение " + ("пропущено." if skipped else "завершено!") +
+                                    "</b>\n\nВ любой момент его можно открыть командой /tutorial или кнопкой «Обучение новичка».",
+                                    parse_mode="HTML")
+            except Exception:
+                pass
+            return await welcome_for(msg.chat.id, uid)
         if data in ("support_menu", "support_auto", "support_agent") and msg:
             await safe_answer(cb)
             SUPPORT_WAITING_AGENT.pop(uid, None)
@@ -7088,24 +7248,26 @@ async def notify_admin(text):
 
 async def telegram_backup(reason="auto"):
     global backup_dirty, last_backup_ts
-    if not admin_bot or not ADMIN_IDS:
+    backup_bot = admin_bot or bot
+    if not backup_bot or not ADMIN_IDS:
+        log.warning("Telegram backup не настроен: нужны ADMIN_IDS и доступный BOT_TOKEN.")
         return False
     data = (await asyncio.to_thread(flush_state)).encode("utf-8")
+    if not data:
+        return False
     ok = False
     caption = (f"💾 БЭКАП · юзеров {len(STATE['users'])} · сигналов {len(STATE['signal_history'])} · "
                f"{reason} · {datetime.now().strftime('%d.%m %H:%M')}")
     for aid in ADMIN_IDS:
         try:
-            msg = await admin_bot.send_document(aid, BufferedInputFile(data, "bot_state.json"), caption=caption, disable_notification=True)
-            try:
-                await admin_bot.unpin_all_chat_messages(aid)
-                await admin_bot.pin_chat_message(aid, msg.message_id, disable_notification=True)
-            except Exception:
-                pass
+            msg = await backup_bot.send_document(aid, BufferedInputFile(data, "bot_state.json"), caption=caption, disable_notification=True)
+            # Сначала закрепляем новый файл; старый не трогаем, пока новый не закреплён.
+            await backup_bot.pin_chat_message(aid, msg.message_id, disable_notification=True)
             old = last_backup_msg.get(aid)
-            if old:
+            if old and old != msg.message_id:
                 try:
-                    await admin_bot.delete_message(aid, old)
+                    await backup_bot.unpin_chat_message(aid, old)
+                    await backup_bot.delete_message(aid, old)
                 except Exception:
                     pass
             last_backup_msg[aid] = msg.message_id
@@ -7118,16 +7280,17 @@ async def telegram_backup(reason="auto"):
 
 
 async def telegram_restore():
-    if not admin_bot or not ADMIN_IDS:
+    backup_bot = admin_bot or bot
+    if not backup_bot or not ADMIN_IDS:
         return 0
     for aid in ADMIN_IDS:
         try:
-            pm = getattr(await admin_bot.get_chat(aid), "pinned_message", None)
+            pm = getattr(await backup_bot.get_chat(aid), "pinned_message", None)
             doc = getattr(pm, "document", None) if pm else None
             if not doc or not (doc.file_name or "").endswith(".json"):
                 continue
-            f = await admin_bot.get_file(doc.file_id)
-            data = json.loads((await admin_bot.download_file(f.file_path)).read().decode("utf-8"))
+            f = await backup_bot.get_file(doc.file_id)
+            data = json.loads((await backup_bot.download_file(f.file_path)).read().decode("utf-8"))
             n = restore_state(data)
             last_backup_msg[aid] = pm.message_id
             if n:
@@ -7138,15 +7301,59 @@ async def telegram_restore():
 
 
 async def backup_loop():
-    await asyncio.sleep(60)
+    await asyncio.sleep(30)
     while True:
         try:
-            if backup_dirty and time.time() - last_backup_ts > 120:
-                await telegram_backup("авто")
+            now = time.time()
+            # Бэкап не только после изменений, но и периодически — даже если бот простаивает.
+            due = (last_backup_ts <= 0 or now - last_backup_ts >= BACKUP_INTERVAL)
+            if (backup_dirty and now - last_backup_ts >= 120) or due:
+                sent = await telegram_backup("автоматический" if backup_dirty else "плановый")
+                if not sent and admin_bot and ADMIN_IDS:
+                    log.error("Автоматический Telegram-бэкап не подтверждён; данные оставлены в очереди на повтор.")
         except Exception as e:
             log.warning(f"backup_loop: {e}")
         next_timers["backup"] = time.time() + 30
         await asyncio.sleep(30)
+
+
+@dp.message(Command("backup_status"))
+async def backup_status_command(m: types.Message):
+    """Показывает состояние локального файла и Telegram-бэкапа."""
+    if m.from_user.id not in ADMIN_IDS:
+        return await m.answer("⛔ Команда доступна только администратору.")
+    try:
+        state_exists = os.path.isfile(STATE_FILE)
+        state_size = os.path.getsize(STATE_FILE) if state_exists else 0
+        state_mtime = os.path.getmtime(STATE_FILE) if state_exists else 0
+        local_baks = [p for p in LOCAL_BACKUP_FILES if os.path.isfile(p)]
+        local_bak_size = sum(os.path.getsize(p) for p in local_baks)
+        age = max(0, int(time.time() - last_backup_ts)) if last_backup_ts else None
+        if not ADMIN_IDS:
+            tg_status = "не настроен: добавьте ADMIN_IDS"
+        elif age is None:
+            tg_status = "после запуска ещё не подтверждён в этой сессии"
+        else:
+            tg_status = f"последний подтверждённый бэкап примерно {age // 3600} ч {(age % 3600) // 60} мин назад"
+        disk_env = os.getenv("IXCLY_DATA_DIR") or os.getenv("RENDER_DISK_PATH")
+        storage = f"внешний путь: {html.escape(disk_env)}" if disk_env else "локальная файловая система Render Free (не постоянное хранилище)"
+        saved = datetime.fromtimestamp(state_mtime).strftime("%d.%m.%Y %H:%M:%S") if state_mtime else "нет файла"
+        text = (
+            "💾 <b>IXCLY — статус резервного копирования</b>\n\n"
+            f"📁 <b>Хранилище:</b> {storage}\n"
+            f"📄 <b>Файл состояния:</b> {'есть' if state_exists else 'отсутствует'}\n"
+            f"📦 <b>Размер состояния:</b> {state_size / 1024:.1f} KB\n"
+            f"🕒 <b>Изменён:</b> {saved}\n"
+            f"🗂 <b>Локальных копий:</b> {len(local_baks)} ({local_bak_size / 1024:.1f} KB)\n"
+            f"☁️ <b>Telegram:</b> {tg_status}\n"
+            f"⏱ <b>Интервал:</b> {BACKUP_INTERVAL // 3600} ч\n"
+            f"🔄 <b>Есть несохранённые изменения:</b> {'да' if backup_dirty else 'нет/не отмечено'}\n\n"
+            "Важно: статус последнего бэкапа отслеживается в текущем процессе. После перезапуска он может отображаться как неизвестный, пока новая копия не будет подтверждена."
+        )
+        await m.answer(text, parse_mode="HTML")
+    except Exception as e:
+        log.exception("backup_status_command failed")
+        await m.answer(f"Не удалось прочитать статус бэкапа: {html.escape(str(e)[:250])}")
 
 
 if admin_dp:
@@ -7288,7 +7495,7 @@ if admin_dp:
             return
         try:
             f = await admin_bot.get_file(m.document.file_id)
-            data = json.loads((await admin_bot.download_file(f.file_path)).read().decode("utf-8"))
+            data = json.loads((await backup_bot.download_file(f.file_path)).read().decode("utf-8"))
             n = restore_state(data, force=True)
             load_active_chats()
             await asyncio.to_thread(flush_state)
@@ -7565,6 +7772,7 @@ async def main():
                 await admin_bot.delete_webhook(drop_pending_updates=True)
             await bot.set_my_commands([
                 types.BotCommand(command="start", description="🚀 Открыть IXCLY"),
+                types.BotCommand(command="tutorial", description="🎓 Обучение новичка"),
                 types.BotCommand(command="market", description="🧠 AI-анализ рынка"),
                 types.BotCommand(command="forecast", description="🔮 Сценарии монеты"),
                 types.BotCommand(command="radar", description="📡 Радар движений"),
@@ -7601,6 +7809,8 @@ async def main():
         for _uid in list(_users()):
             if str(_uid).isdigit():
                 _init_trial(int(_uid))
+        # После каждого запуска создаём свежую контрольную точку после восстановления.
+        state_touch(True)
         gc.freeze()
         asyncio.create_task(discover_models())
 
