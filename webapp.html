@@ -80,9 +80,32 @@ input:focus{border-color:var(--ac);box-shadow:0 0 0 3px rgba(139,124,255,.12)}
 .section-kicker{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#8495b9;font-weight:900;margin:16px 2px 7px}
 @media(min-width:600px){body{padding-left:20px;padding-right:20px}.ad-hero{padding:20px}.g{gap:10px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+/* ---------- Подписка и оплата ---------- */
+.sub-hero .sub-st{font-weight:850;font-size:18px;line-height:1.2;margin-top:3px}
+.sub-days{text-align:right}.sub-days b{display:block;font-size:26px;line-height:1}
+.offer{margin-top:8px;padding:8px 10px;border-radius:12px;background:rgba(255,208,120,.1);border:1px solid rgba(255,208,120,.3);color:var(--y);font-size:12px;font-weight:700}
+.plan{appearance:none;-webkit-appearance:none;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;color:var(--t);font:inherit;padding:14px 15px;margin:8px 0;border-radius:18px;background:linear-gradient(145deg,rgba(17,27,49,.97),rgba(10,17,32,.98));border:1px solid var(--ln);transition:transform .12s,border-color .12s}
+.plan:active{transform:scale(.985)}
+.plan.best{border-color:rgba(139,124,255,.65);box-shadow:0 0 0 1px rgba(139,124,255,.2),0 10px 28px rgba(139,124,255,.12)}
+.p-t{font-weight:850;font-size:15px}.p-p{font-size:19px;font-weight:800}.p-r{text-align:right;flex:none}
+.badge{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:99px;font-size:10px;font-weight:800;color:#091326;background:linear-gradient(100deg,#a99bff,#64d8d0);vertical-align:middle}
+.chip-sub{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 12px;padding:10px 14px;border-radius:14px;background:rgba(19,30,53,.85);border:1px solid var(--ln);font-size:12.5px;font-weight:700;cursor:pointer}
+.chip-sub:active{transform:scale(.985)}
+.chip-sub.warn{border-color:rgba(255,208,120,.45);background:rgba(255,208,120,.07);color:var(--y)}
+.risk{margin:12px 0;padding:12px 14px;border-radius:16px;background:rgba(255,102,141,.06);border:1px solid rgba(255,102,141,.25)}
+.risk b{font-size:13px}.risk p{margin-top:5px;font-size:12px;line-height:1.5;color:#c3cde4}
+#pay-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:.2s;z-index:24}#pay-bg.on{opacity:1;pointer-events:auto}
+#pay{position:fixed;left:0;right:0;bottom:0;max-width:760px;margin:0 auto;max-height:92vh;overflow:auto;transform:translateY(105%);transition:.25s;background:#0d172b;border-top:1px solid var(--ln);border-radius:22px 22px 0 0;padding:12px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -18px 50px #0008;z-index:25}
+#pay.on{transform:translateY(0)}#pay h3{font:800 17px "Trebuchet MS",sans-serif;margin-bottom:2px}
+.pay-box{border:1px solid var(--ln);border-radius:16px;padding:4px 12px;background:rgba(10,17,32,.7);margin-top:8px}
+.pay-wait{text-align:center;padding:6px 0 10px}
+.pay-note{margin-top:8px;padding:10px 12px;border-radius:12px;background:rgba(139,124,255,.1);border:1px solid rgba(139,124,255,.3);font-size:12.5px;line-height:1.45}
+.pay-note.err{background:rgba(255,102,141,.08);border-color:rgba(255,102,141,.35)}
 </style></head><body>
 <div id="toast"></div>
 <div id="sheet-bg" onclick="closeSheet()"></div>
+<div id="pay-bg" onclick="closePay()"></div>
+<div id="pay" role="dialog" aria-modal="true" aria-label="Подтверждение оплаты"></div>
 <div id="sheet"><div class="grab"></div><h3 id="sh-title"></h3><small id="sh-sub"></small>
 <input id="sh-val" type="text" inputmode="decimal" placeholder="Цена" style="margin-top:10px">
 <div class="g" style="margin-top:12px"><button class="btn s" onclick="closeSheet()">Отмена</button><button class="btn" onclick="submitSheet()">Создать алерт</button></div></div>
@@ -121,8 +144,8 @@ async function api(a,p,tries=2,silent=false){
   return{error:1};
 }
 function stopPoll(){clearInterval(PT);PT=null}
-function stopAll(){stopPoll();closeSheet()}
-function setTab(p){const map={coin:'signals',analytics:'analytics',sub:'sub',news:'more',ai_center:'more',paywall:'sub'};const t=map[p]||p;document.querySelectorAll('.tb b').forEach(b=>b.classList.toggle('on',b.dataset.t===t))}
+function stopAll(){stopPoll();closeSheet();closePay()}
+function setTab(p){const map={coin:'signals',analytics:'analytics',sub:'sub',news:'more',ai_center:'more',guide:'more',paywall:'sub'};const t=map[p]||p;document.querySelectorAll('.tb b').forEach(b=>b.classList.toggle('on',b.dataset.t===t))}
 async function go(p,a,back){
   if(!back&&CUR)STACK.push(CUR);CUR=[p,a];hap();setTab(p);
   if(STACK.length)tg.BackButton.show();else tg.BackButton.hide();
@@ -153,74 +176,160 @@ function renderAd(a){
 }
 function openAd(){if(!ACTIVE_AD_URL)return;try{tg.openLink(ACTIVE_AD_URL)}catch(e){location.href=ACTIVE_AD_URL}}
 
-/* ---------- Экран оплаты и подписка ---------- */
-function planCards(plans){
-    return `<div class="g">${plans.map(p=>`
-        <div class="card" style="text-align:center; cursor:pointer;" onclick="confirmBuy(${p.days}, ${p.stars})">
-            <b>${esc(p.title)}</b>
-            <h2 class="num" style="margin:6px 0 2px">${p.stars}⭐</h2>
-            <small>${p.days} дн.</small>
-        </div>
-    `).join('')}</div>`
+/* ---------- Подписка, оплата Telegram Stars и инструкция ---------- */
+const RISK_TITLE='Предупреждение о рисках';
+const RISK_FALLBACK='Торговля криптовалютами сопряжена с высоким уровнем риска. Сигналы и аналитика IXCLY предоставляются исключительно в информационных целях и не гарантируют доходность. Любая сделка может привести к существенным финансовым потерям. Все решения вы принимаете самостоятельно и на свой риск.';
+const riskText=()=>(S.access&&S.access.risk)||RISK_FALLBACK;
+const riskCard=()=>`<div class="risk"><b>⚠ ${RISK_TITLE}</b><p>${esc(riskText())}</p></div>`;
+const MONTHS=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+const fmtDate=ts=>{if(!ts)return '—';const d=new Date(ts*1000);return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`};
+const fmtDT=ts=>{if(!ts)return '—';const d=new Date(ts*1000);return fmtDate(ts)+', '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const dayWord=n=>{n=Math.abs(n)%100;const k=n%10;return n>10&&n<20?'дней':k===1?'день':k>1&&k<5?'дня':'дней'};
+
+/* Статус доступа: единая карточка для всех экранов */
+function subHero(a){
+  const T={trial:['⏳','var(--y)'],active:['💎','var(--up)'],lifetime:['♾','var(--up)'],admin:['🛡','var(--ac)'],expired:['🔒','var(--dn)']};
+  const [ic,col]=T[a.code]||['💎','var(--m)'];
+  const timed=!a.lifetime;
+  return `<div class="card sub-hero" style="border-color:${col}">
+    <div class="row"><div><small>Статус доступа</small><div class="sub-st">${ic} ${esc(a.label||a.status||'—')}</div></div>
+    ${timed&&a.ok?`<div class="sub-days"><b class="num">${a.days_left}</b><small>${dayWord(a.days_left)}</small></div>`:''}</div>
+    ${timed?`<div class="lv"><span>${a.ok?'Действует до':'Закончилась'}</span><b>${a.until?fmtDT(a.until):'—'}</b></div>`:''}
+    ${timed&&a.ok?`<div class="bar" style="margin-top:6px"><i style="width:${Math.min(100,a.days_left/30*100)}%"></i></div>`:''}
+    ${a.offer?`<div class="offer">🎁 ${esc(a.offer.label)} · до ${fmtDT(a.offer.until)}</div>`:''}
+    <small style="display:block;margin-top:8px">${esc(a.hint||'')}</small></div>`;
 }
-function confirmBuy(days, price) {
-    tg.showPopup({
-        title: 'Подтверждение оплаты',
-        message: `Вы уверены, что хотите оформить подписку на ${days} дней за ${price} ⭐?`,
-        buttons: [
-            {id: 'cancel', type: 'cancel', text: 'Отмена'},
-            {id: 'buy', type: 'default', text: 'Оплатить ⭐'}
-        ]
-    }, function(buttonId) {
-        if (buttonId === 'buy') {
-            processPayment(days);
-        }
-    });
+
+/* Компактная ссылка на подписку для основных разделов */
+function subChip(){
+  const a=S.access||{};if(!a.code)return '';
+  let ic='💎',txt='',cls='';
+  if(a.code==='trial'){ic='⏳';txt=`Пробный период · ${a.days_left} ${dayWord(a.days_left)} · выбрать тариф`;cls='warn'}
+  else if(a.code==='active'){if(a.days_left<=3){ic='⏰';txt=`Подписка заканчивается через ${a.days_left} ${dayWord(a.days_left)} · продлить`;cls='warn'}else txt=`Подписка активна до ${fmtDate(a.until)}`}
+  else if(a.code==='lifetime'||a.code==='admin'){ic='♾';txt=a.label}
+  else {ic='🔒';txt='Доступ закрыт · выбрать тариф';cls='warn'}
+  return `<div class="chip-sub ${cls}" onclick="go('sub')"><span>${ic} ${esc(txt)}</span><span class="m">›</span></div>`;
 }
-async function processPayment(days) {
-    tg.showProgress();
-    try {
-        const res = await fetch('/api/create_stars_invoice', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ days: days, initData: tg.initData })
-        });
-        const data = await res.json();
-        tg.hideProgress();
-        if (data.error) { toast('⚠ ' + data.error); return; }
-        tg.openInvoice(data.link, function(status) {
-            if (status === 'paid') {
-                toast('✅ Оплата прошла успешно!');
-                setTimeout(() => P.sub(), 1500);
-            } else if (status === 'cancelled') { toast('Оплата отменена'); } 
-            else { toast('Ошибка оплаты'); }
-        });
-    } catch (e) {
-        tg.hideProgress();
-        toast('Ошибка сети');
-    }
+
+/* Тарифы: название, срок, цена, скидка. Нажатие открывает окно подтверждения */
+function planCards(a){
+  const plans=a.plans||[];const can=a.can_buy!==false;
+  if(!can)return `<div class="card"><b>♾ ${esc(a.label)}</b><br><small>Оплата не требуется — у вас бессрочный доступ.</small></div>`;
+  const ref=plans.length&&plans[0].original_stars?plans[0].original_stars/plans[0].days:0;
+  return plans.map(p=>{
+    const per=(p.stars/p.days).toFixed(1);
+    const save=ref&&p.days>plans[0].days?Math.round((1-(p.original_stars/p.days)/ref)*100):0;
+    return `<button class="plan ${save>=20?'best':''}" onclick="openPay(${p.days})">
+      <div><div class="p-t">${esc(p.title)}${save>0?`<span class="badge">выгоднее −${save}%</span>`:''}</div>
+      <small>${p.days} ${dayWord(p.days)} · ${per}⭐ в день</small></div>
+      <div class="p-r"><div class="p-p num">${p.stars}⭐</div>${p.discount_pct?`<small class="num"><s>${p.original_stars}⭐</s> −${p.discount_pct}%</small>`:''}</div></button>`}).join('');
 }
+
+/* Окно подтверждения оплаты (до создания счёта) */
+let PAYING=false,PAY_PLAN=null;
+function openPay(days){
+  const a=S.access||{};const p=(a.plans||[]).find(x=>x.days===days);
+  if(!p)return toast('Тариф не найден. Обновите экран');
+  if(a.can_buy===false)return toast('У вас бессрочный доступ — оплата не нужна');
+  PAY_PLAN=p;hap();renderPay('confirm');$('#pay-bg').classList.add('on');$('#pay').classList.add('on');
+}
+function closePay(force){if(PAYING&&!force)return;$('#pay-bg').classList.remove('on');$('#pay').classList.remove('on')}
+function renderPay(st,o){
+  o=o||{};const p=PAY_PLAN||{};const a=S.access||{};const el=$('#pay');
+  const price=`<b class="num">${p.stars}⭐</b>${p.discount_pct?` <small class="num"><s>${p.original_stars}⭐</s></small>`:''}`;
+  const head=t=>`<div class="grab"></div><h3>${t}</h3>`;
+  if(st==='confirm'){
+    el.innerHTML=`${head('🧾 Подтверждение оплаты')}
+    ${o.notice?`<div class="pay-note">${esc(o.notice)}</div>`:''}
+    <div class="pay-box"><div class="lv"><span>Тариф</span><b>${esc(p.title)}</b></div>
+    <div class="lv"><span>Срок</span><b>${p.days} ${dayWord(p.days)}</b></div>
+    <div class="lv"><span>Стоимость</span><span>${price}</span></div>
+    <div class="lv"><span>Доступ до</span><b>${fmtDate(p.new_until)}</b></div></div>
+    <small style="display:block;margin:8px 2px">${a.ok?'Новый тариф продлевает текущий срок — оставшиеся дни не теряются. ':''}Оплата Telegram Stars. Списание произойдёт только после подтверждения в окне Telegram.</small>
+    ${riskCard()}
+    <div class="g" style="margin-top:12px"><button class="btn s" onclick="closePay()">Отмена</button><button class="btn" onclick="startPay()">Оплатить ${p.stars}⭐</button></div>`;
+  }else if(st==='creating'){
+    el.innerHTML=`${head('Создаём счёт…')}<div class="pay-wait"><div class="ld" style="height:70px"><i></i></div><small>Это займёт пару секунд</small></div>`;
+  }else if(st==='waiting'){
+    el.innerHTML=`${head('Проверяем платёж…')}<div class="pay-wait"><div class="ld" style="height:70px"><i></i></div><small>Подтверждаем оплату и обновляем подписку. Не закрывайте приложение.</small></div>`;
+  }else if(st==='done'){
+    const a2=S.access||{};
+    el.innerHTML=`${head('✅ Подписка активна')}
+    <div class="pay-box"><div class="lv"><span>Тариф</span><b>${esc(p.title)} · ${p.days} ${dayWord(p.days)}</b></div>
+    <div class="lv"><span>Списано</span><b class="num">${p.stars}⭐</b></div>
+    <div class="lv"><span>Действует до</span><b>${a2.lifetime?'бессрочно':fmtDT(a2.until)}</b></div></div>
+    <button class="btn" style="margin-top:12px" onclick="closePay(true);P.sub()">Готово</button>`;
+  }else if(st==='late'){
+    el.innerHTML=`${head('Платёж принят Telegram')}
+    <div class="pay-note">Подписка ещё активируется. Обычно это занимает до минуты — статус обновится автоматически, платить повторно не нужно.</div>
+    <div class="g" style="margin-top:12px"><button class="btn s" onclick="openSupport()">🆘 Поддержка</button><button class="btn" onclick="recheckPay()">Обновить статус</button></div>`;
+  }else{
+    el.innerHTML=`${head('⚠ Оплата не выполнена')}
+    <div class="pay-note err">${esc(o.msg||'Произошла ошибка. Деньги не списаны.')}</div>
+    <div class="g" style="margin-top:12px"><button class="btn s" onclick="closePay(true)">Закрыть</button><button class="btn" onclick="renderPay('confirm')">Повторить</button></div>`;
+  }
+}
+async function startPay(){
+  if(PAYING||!PAY_PLAN)return;PAYING=true;renderPay('creating');
+  const j=await api('create_stars_invoice',{days:PAY_PLAN.days,expected_stars:PAY_PLAN.stars},1,true);
+  if(!j||j.error){
+    PAYING=false;
+    if(j&&j.price_changed){await refreshMe();PAY_PLAN=((S.access||{}).plans||[]).find(x=>x.days===PAY_PLAN.days)||PAY_PLAN;return renderPay('confirm',{notice:j.error})}
+    return renderPay('error',{msg:(j&&j.net)?'Нет связи с сервером. Проверьте интернет и повторите.':(j&&j.error)||'Не удалось создать счёт. Деньги не списаны.'});
+  }
+  const oid=j.order_id;
+  try{tg.openInvoice(j.link,st=>onInvoiceClosed(st,oid))}
+  catch(e){PAYING=false;renderPay('error',{msg:'Не удалось открыть окно оплаты. Обновите Telegram и повторите.'})}
+}
+async function onInvoiceClosed(st,oid){
+  if(st==='paid'||st==='pending'){
+    renderPay('waiting');const r=await waitOrder(oid);PAYING=false;
+    if(r==='paid'){await refreshMe();hap();return renderPay('done')}
+    return renderPay('late');
+  }
+  PAYING=false;
+  if(st==='cancelled')return renderPay('confirm',{notice:'Оплата отменена. Списаний не было.'});
+  renderPay('error',{msg:'Оплата не прошла. Если Stars списались, подписка начислится автоматически — проверьте раздел «Подписка» через минуту или напишите в поддержку.'});
+}
+/* Ждём, пока бот подтвердит платёж (успешный платёж приходит боту отдельным событием) */
+async function waitOrder(oid){
+  for(let i=0;i<25;i++){
+    const j=await api('order_status',{order_id:oid},1,true);
+    if(j&&j.order&&j.order.status==='paid'){if(j.access)S.access=j.access;return 'paid'}
+    await sleep(1200);
+  }
+  return 'timeout';
+}
+async function recheckPay(){const m=await refreshMe();if(m&&m.access&&m.access.ok){renderPay('done')}else toast('Пока не активирована. Повторите через минуту')}
 function promoBox(){return `<div class="row" style="margin-top:6px"><input id="pc" placeholder="Промокод" autocapitalize="characters"><button class="btn" style="width:110px" onclick="promoApply()">Активировать</button></div>`}
-async function promoApply(){const code=($('#pc').value||'').trim();if(!code)return toast('Введите промокод');const j=await api('promo_apply',{code});if(j.msg){toast(j.msg);const m=await refreshMe();if(!m.closed&&!m.error)go('signals')}}
+async function promoApply(){const code=($('#pc').value||'').trim();if(!code)return toast('Введите промокод');const j=await api('promo_apply',{code});if(j.msg){toast(j.msg);const m=await refreshMe();if(!m.closed&&!m.error){if(CUR&&CUR[0]==='paywall')go('signals');else P.sub()}}}
 
-P.paywall=()=>{const a=S.access||{};
-V().innerHTML=`<h1>IXCLY <span>PRO</span></h1>
-<div class="card"><b style="font-size:16px">🔒 Доступ закрыт</b><br><small>Пробный период закончился или не активирован. Сигналы, сопровождение сделок и аналитика доступны по подписке.</small></div>
-${renderAd(a)}
-${planCards(a.plans||[])}
-<h2>🎟 Промокод</h2>${promoBox()}
-<button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
-
+/* Единый экран подписки: статус, тарифы, промокод, инструкция и риски */
 P.sub=async()=>{await refreshMe();const a=S.access||{};
-if(!a.ok&&!a.free){return P.paywall()}
-V().innerHTML=`<h1>Моя <span>подписка</span></h1>${a.status==='Навсегда'?'<div class="card" style="text-align:center;border-color:var(--up)"><b>♾ Доступ навсегда</b><br><small>Спасибо за поддержку проекта!</small></div>':''}
-<div class="card"><div class="row"><small>Статус</small><b>${esc(a.status)}</b></div>
-<div class="row"><small>Осталось</small><b class="num">${a.free?'∞':(a.days_left+' дн.')}</b></div>
-${a.free?'':`<div class="bar" style="margin-top:8px"><i style="width:${Math.min(100,a.days_left/30*100)}%"></i></div>`}</div>
+V().innerHTML=`<h1>Моя <span>подписка</span></h1>
+${subHero(a)}
 ${renderAd(a)}
-<h2>Тарифы</h2>${planCards(a.plans||[])}
+<h2>Тарифы</h2>${planCards(a)}
+${a.can_buy===false?'':`<small style="display:block;margin:6px 2px">Оплата — Telegram Stars (⭐). ${a.ok?'Продление добавляется к текущему сроку.':'Доступ откроется сразу после оплаты.'}</small>`}
 <h2>🎟 Промокод</h2>${promoBox()}
+<div class="card lst" onclick="go('guide')" style="margin-top:14px"><div class="row"><b>📘 Инструкция и риски</b><span class="m">›</span></div><div class="m" style="margin-top:4px">Как пользоваться IXCLY и что нужно знать о рисках</div></div>
+${riskCard()}
 <button class="btn s" style="margin-top:10px" onclick="openSupport()">🆘 Поддержка</button>`};
+P.paywall=P.sub;
+
+/* Инструкция и предупреждение о рисках */
+P.guide=()=>{
+V().innerHTML=`<h1>Инструкция и <span>риски</span></h1>
+<div class="card"><b>🚀 Быстрый старт</b>
+<div class="lv"><span>🔥 Сигналы</span><small>идеи после фильтров: вход, TP, SL и причины</small></div>
+<div class="lv"><span>💼 Портфель</span><small>депозит, риск на сделку, Paper Trading</small></div>
+<div class="lv"><span>📊 Аналитика</span><small>ваши результаты и статистика системы</small></div>
+<div class="lv"><span>💎 Подписка</span><small>статус, тарифы, оплата ⭐</small></div>
+<div class="lv"><span>⚙️ Ещё</span><small>AI-центр, новости, уведомления</small></div></div>
+<div class="card"><b>🛡 Безопасный порядок</b><div class="m" style="margin-top:6px">1) изучить рынок и новость · 2) открыть сигнал и прочитать причины · 3) проверить вход, TP, SL и размер риска · 4) при необходимости потренироваться в Paper Trading · 5) при сомнениях пропустить идею.</div></div>
+${riskCard()}
+<div class="g" style="margin-top:10px"><button class="btn s" onclick="go('tutorial')">🎓 Обучение</button><button class="btn" onclick="go('sub')">💎 Подписка</button></div>`};
 
 /* ---------- Сигналы ---------- */
 function sigRow(x){const p=x.live_price;const quality=x.quality_score!=null?`<span class="pill">Q ${Number(x.quality_score).toFixed(0)} · ${esc(x.quality_label||'—')}</span>`:'';const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
@@ -236,6 +345,7 @@ const M=[['mode:aggressive','🟢','Агрессивн.'],['mode:balanced','🟡
 const b=x=>`<div class="fb ${SF==x[0]?'on':''}" onclick="P.signals('${x[0]}')">${x[1]} ${x[2]}<b>${c[x[0]]||0}</b></div>`;
 const rf=j.refresh||{};const liq=await api('liquidations',{},1,true);const intel=await api('intel',{},1,true);const liqItems=(liq.items||[]).slice(-8).reverse();
 V().innerHTML=`<h1>Актуальные <span>сигналы</span></h1>
+${subChip()}
 ${renderAd(S.access)}
 ${intel&&!intel.error?`<div class="card"><div class="row"><b>🧠 Signal Intelligence 2.0</b><small>RAM ${intel.rss_mb==null?'—':intel.rss_mb+' MB'} · peak ${intel.peak_rss_mb==null?'—':intel.peak_rss_mb+' MB'}</small></div><div class="lv"><span>Режим рынка</span><b>${esc(intel.regime||'—')}</b></div><div class="lv"><span>Signal Memory</span><b>${intel.memory&&intel.memory.trades?`${intel.memory.win_rate}% · ${intel.memory.trades} сделок`:'накапливаем статистику'}</b></div><div class="lv"><span>Adaptive Scanner</span><b>${esc(intel.adaptive?.mode||'balanced')} · порог ${intel.adaptive?.threshold??'—'}</b></div><div class="lv"><span>Риск новостей</span><b>${esc(intel.news_risk?.severity||'low')} · ${intel.news_risk?.critical_score??0}</b></div><div class="lv"><span>Market Panic</span><b>${esc(intel.market_panic?.level||'normal')} · ${intel.market_panic?.score??0}/100</b></div>${(intel.ranking||[]).slice(0,5).map(x=>`<div class="lv"><span>#${x.rank} ${esc(x.coin)} · ${esc(x.direction)}</span><b class="num">${Number(x.score).toFixed(1)} балла</b></div>`).join('')}${(intel.ranking||[]).length?`<details style="margin-top:8px"><summary class="m">Показать полный рейтинг · ${intel.ranking.length} монет</summary>${intel.ranking.slice(5).map(x=>`<div class="lv"><span>#${x.rank} ${esc(x.coin)} · ${esc(x.direction)}</span><b class="num">${Number(x.score).toFixed(1)}</b></div>`).join('')}</details>`:''}${(intel.heatmap||[]).slice(0,3).map(x=>`<div class="lv"><span>${esc(x.coin)}</span><b class="num">${x.change_pct==null?'—':Number(x.change_pct).toFixed(2)+'%'}</b></div>`).join('')}</div>`:''}
 ${intel&&intel.runtime_memory?`<div class="card"><b>🧠 Контроль памяти сервера · администратор</b><div class="lv"><span>RAM сейчас / пик</span><b>${intel.runtime_memory.rss_mb??'—'} / ${intel.runtime_memory.peak_rss_mb??'—'} MB</b></div><div class="lv"><span>Порог очистки / остановки</span><b>${intel.runtime_memory.trim_at_mb} / ${intel.runtime_memory.stop_at_mb} MB</b></div><div class="lv"><span>Кэши анализа / бэктеста / ИИ</span><b>${intel.runtime_memory.cache_sizes.analysis} / ${intel.runtime_memory.cache_sizes.backtest} / ${intel.runtime_memory.cache_sizes.ai}</b></div><div class="lv"><span>Кэши funding / orderbook / hourly / API</span><b>${intel.runtime_memory.cache_sizes.funding} / ${intel.runtime_memory.cache_sizes.orderbook} / ${intel.runtime_memory.cache_sizes.hourly} / ${intel.runtime_memory.cache_sizes.api}</b></div>${intel.runtime_memory.last_trim&&intel.runtime_memory.last_trim.trimmed?`<div class="m">Последняя очистка: ${intel.runtime_memory.last_trim.before_mb} → ${intel.runtime_memory.last_trim.after_mb} MB</div>`:''}</div>`:''}
@@ -349,6 +459,7 @@ function paperPanel(p){
 /* ---------- Портфель ---------- */
 P.portfolio=async()=>{const [j,paper]=await Promise.all([api('portfolio'),api('paper_get')]);if(j.error)return;const s=j.risk;const pos=Object.entries(j.positions||{});
 V().innerHTML=`<h1>Мой <span>портфель</span></h1>
+${subChip()}
 ${paper&&!paper.error?paperPanel(paper):''}
 ${renderAd(S.access)}
 <div class="g"><div class="card"><small>💰 Депозит</small><h2 class="num" style="margin:4px 0 8px">$${s.deposit}</h2><input id="dep" type="number" inputmode="decimal" placeholder="Новый депозит"><button class="btn s" style="margin-top:6px" onclick="setv('set_deposit','dep')">Сохранить</button></div>
@@ -376,7 +487,7 @@ const mine=!m.n?'<div class="card m">Закрытых сделок пока не
 <div class="lv"><span>🏆 Лучшая</span><b class="up">${m.best.coin} ${m.best.pnl}%</b></div><div class="lv"><span>💀 Худшая</span><b class="dn">${m.worst.coin} ${m.worst.pnl}%</b></div></div>
 <h2>Последние сделки</h2>${m.last.map(t=>`<div class="card"><div class="row"><b>${t.coin} ${side(t.side)}</b><b class="num ${t.pnl>=0?'up':'dn'}">${t.pnl>=0?'+':''}${t.pnl}%</b></div><small class="num">Вход ${f(t.entry)} → Выход ${f(t.exit)} · ${t.r}R · ${esc(t.reason)}</small>
 <button class="pill" style="margin-top:6px" onclick="shareText('Я закрыл ${t.coin} (${t.side}) с результатом ${t.pnl>=0?'+':''}${t.pnl}% в IXCLY PRO! 🔥')">📤 Поделиться</button></div>`).join('')}`;
-V().innerHTML=`<h1>Моя <span>аналитика</span></h1>${mine}
+V().innerHTML=`<h1>Моя <span>аналитика</span></h1>${subChip()}${mine}
 ${renderAd(S.access)}
 <h2>📡 Система</h2><div class="grid3">${['win','loss','active'].map(k=>`<div class="fb" onclick="stl('${k}')">${STN[k]}<b>${g.counts[k]||0}</b></div>`).join('')}</div>
 <div class="grid3" style="margin-top:6px">${['missed','expired','cancelled'].map(k=>`<div class="fb" onclick="stl('${k}')">${STN[k]}<b>${g.counts[k]||0}</b></div>`).join('')}</div>
@@ -398,6 +509,8 @@ P.tutorial=async()=>{V().innerHTML=`<h1>🎓 Обучение <span>IXCLY</span>
 const NT=[['signals','🔥 Новые сигналы'],['pos_updates','📊 Сопровождение и итоги'],['news','📰 Новости'],['anomalies','🚨 Аномалии объёма'],['briefing','☀️ Утренний брифинг'],['liquidations','💥 Ликвидации']];
 P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=S.notif||{};const a=S.access||{};
 V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
+<div class="card lst" onclick="go('sub')"><div class="row"><b>💎 Подписка и тарифы</b><span class="m">›</span></div><div class="m" style="margin-top:4px">${esc((S.access||{}).label||'Статус доступа')}${(S.access||{}).ok&&!(S.access||{}).lifetime?' · осталось '+(S.access||{}).days_left+' '+dayWord((S.access||{}).days_left):''}</div></div>
+<div class="card lst" onclick="go('guide')"><div class="row"><b>📘 Инструкция и риски</b><span class="m">›</span></div><div class="m" style="margin-top:4px">Как пользоваться IXCLY и предупреждение о рисках</div></div>
 <div class="card lst" onclick="go('tutorial')"><div class="row"><b>🎓 Обучение новичка</b><span class="m">›</span></div><div class="m" style="margin-top:4px">Как пользоваться сигналами, портфелем, Paper Trading и аналитикой</div></div>
 <div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг оплатит подписку — вам +7 дней</div></div>
 <div class="card lst" onclick="go('ai_center','BTC')"><b>🧠 AI Command Center</b><div class="m" style="margin-top:4px">Сценарии, раннее движение, funding/OI, риск и память сигналов</div></div>
