@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v4.3 MAX COGNITIVE
+IXCLY Trading Bot v4.4 MAX COGNITIVE
 
 - 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
 - Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
@@ -1212,6 +1212,25 @@ def add_indicators(df):
     hh, ll = h.rolling(14).max(), l.rolling(14).min()
     df["wr"] = (-100 * (hh - c) / (hh - ll).replace(0, np.nan)).fillna(-50)
 
+    # Дополнительные контекстные индикаторы: поток денег, каналы и режим волатильности.
+    mf_mult = (((c - l) - (h - c)) / (h - l).replace(0, np.nan)).fillna(0.0)
+    mf_vol = mf_mult * v
+    df["cmf"] = (mf_vol.rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)).fillna(0.0)
+    kc_mid = c.ewm(span=20, adjust=False).mean()
+    kc_atr = df["atr"]
+    df["kc_upper"] = kc_mid + 1.5 * kc_atr
+    df["kc_lower"] = kc_mid - 1.5 * kc_atr
+    df["kc_pos"] = ((c - df["kc_lower"]) /
+                    (df["kc_upper"] - df["kc_lower"]).replace(0, np.nan)).clip(-1, 2).fillna(0.5)
+    dc_hi = h.shift(1).rolling(20).max()
+    dc_lo = l.shift(1).rolling(20).min()
+    df["donchian_pos"] = ((c - dc_lo) / (dc_hi - dc_lo).replace(0, np.nan)).clip(-1, 2).fillna(0.5)
+    atr_pct = (df["atr"] / c.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    df["atr_pct"] = atr_pct.fillna(0.0)
+    df["volatility_percentile"] = atr_pct.rolling(100, min_periods=30).rank(pct=True).fillna(0.5)
+    df["volume_pressure"] = (((c - o) / (h - l).replace(0, np.nan)) *
+                             (v / v.rolling(20).mean().replace(0, np.nan))).clip(-5, 5).fillna(0.0)
+
     df["obv"] = (np.sign(c.diff()) * v).fillna(0).cumsum()
     df["obv_ema"] = df["obv"].ewm(span=20, adjust=False).mean()
     df["rel_vol"] = (v / v.rolling(20).mean().replace(0, np.nan)).fillna(1.0)
@@ -1270,7 +1289,14 @@ def add_scores(df):
     div = np.where(df["div_bull"].values, 15, 0) - np.where(df["div_bear"].values, 15, 0)
     brk = np.where(df["brk_up"].values, 10, 0) - np.where(df["brk_dn"].values, 10, 0)
     vwap_s = np.where(c > df["vwap"].values, 5, -5)
-    pa = np.clip((pat + vol_conf + obv_s + div + brk + vwap_s) * 1.3, -100, 100)
+    # CMF подтверждает направление денежного потока; Donchian/Keltner оценивают положение цены.
+    cmf_s = np.clip(df["cmf"].values * 35, -8, 8)
+    donchian_s = np.clip((df["donchian_pos"].values - 0.5) * 10, -5, 5)
+    kc_s = np.clip((df["kc_pos"].values - 0.5) * 6, -3, 3)
+    vol_pressure_s = np.clip(df["volume_pressure"].values * 1.5, -6, 6)
+    legacy_pa = (pat + vol_conf + obv_s + div + brk + vwap_s) * 1.3
+    new_context = (cmf_s + donchian_s + kc_s + vol_pressure_s) * 0.45
+    pa = np.clip(legacy_pa + new_context, -100, 100)
 
     w_t = np.where(trending, 0.5, np.where(ranging, 0.25, 0.4))
     w_m = np.where(trending, 0.2, np.where(ranging, 0.45, 0.3))
@@ -1311,6 +1337,18 @@ def explain_last(df):
         add(18, 1, "Бычья дивергенция RSI")
     if r["div_bear"]:
         add(18, -1, "Медвежья дивергенция RSI")
+    if r.get("cmf", 0) >= 0.08:
+        add(8, 1, f"CMF: приток капитала ({r['cmf']:+.2f})")
+    elif r.get("cmf", 0) <= -0.08:
+        add(8, -1, f"CMF: отток капитала ({r['cmf']:+.2f})")
+    if r.get("volatility_percentile", 0.5) >= 0.90:
+        add(7, 0, "Волатильность в верхних 10% истории: риск резких колебаний")
+    elif r.get("volatility_percentile", 0.5) <= 0.15:
+        add(5, 0, "Низкая волатильность: возможна фаза сжатия")
+    if r.get("donchian_pos", 0.5) >= 0.95:
+        add(7, 1, "Цена у верхней границы канала Donchian")
+    elif r.get("donchian_pos", 0.5) <= 0.05:
+        add(7, -1, "Цена у нижней границы канала Donchian")
     if r["bb_pct"] < 0:
         add(12, 1, "Цена под нижней полосой Боллинджера")
     elif r["bb_pct"] > 1:
@@ -3322,6 +3360,68 @@ def signal_recipients(coin, side):
     return out
 
 
+def format_no_signal_message(reason, details=""):
+    """Читабельный Telegram-отчёт без потери диагностических чисел."""
+    raw = str(details or "")
+    reason_text = html.escape(str(reason or "Сетапы не прошли итоговую проверку."))
+    scan_match = re.search(
+        r"Скан:\s*(\d+)\s*монет\s*→\s*(\d+)\s*кандидатов\s*→\s*(\d+)\s*сетапов\s*→\s*(\d+)\s*готовых\s*→\s*(\d+)\s*опубликовано",
+        raw, re.I)
+    stats_match = re.search(
+        r"Бэктест отклонил:\s*(\d+);\s*ошибок получения истории:\s*(\d+);\s*ошибок анализа:\s*(\d+);\s*ЖДАТЬ:\s*(\d+);\s*качество ниже порога:\s*(\d+);\s*без истории:\s*(\d+)",
+        raw, re.I)
+    reject_match = re.search(r"Основной отсев:\s*(.*)$", raw, re.I | re.S)
+    lines = [
+        "ℹ️ <b>Новых сигналов пока нет</b>",
+        "",
+        "🧭 <b>Итог сканирования</b>",
+        ("<i>Ни один сетап не прошёл все проверки для публикации.</i>"
+         if stats_match else f"<i>{reason_text}</i>"),
+    ]
+    if scan_match:
+        a, b, c, d, e = scan_match.groups()
+        lines += [
+            f"🔎 Проверено монет: <b>{a}</b>",
+            f"├ Кандидаты: <b>{b}</b>",
+            f"├ Подтверждённые сетапы: <b>{c}</b>",
+            f"├ Готовы к публикации: <b>{d}</b>",
+            f"└ Опубликовано: <b>{e}</b>",
+        ]
+    if stats_match:
+        bt, hist_err, analysis_err, wait, quality, no_history = map(int, stats_match.groups())
+        lines += [
+            "",
+            "📊 <b>Почему сетапы не прошли</b>",
+            f"• Слабый результат бэктеста: <b>{bt}</b>",
+            f"• Рекомендация «ЖДАТЬ»: <b>{wait}</b>",
+            f"• Недостаточно истории: <b>{no_history}</b>",
+            f"• Качество ниже порога: <b>{quality}</b>",
+            f"• Ошибки истории / анализа: <b>{hist_err} / {analysis_err}</b>",
+        ]
+    if reject_match:
+        entries = []
+        for part in reject_match.group(1).strip().rstrip(".").split(";"):
+            part = part.strip()
+            m = re.match(r"(.+?):\s*(\d+)$", part)
+            if m:
+                entries.append((m.group(1).strip(), int(m.group(2))))
+        entries.sort(key=lambda x: x[1], reverse=True)
+        if entries:
+            lines += ["", "🧱 <b>Главные фильтры отбора</b>"]
+            for name, count in entries[:5]:
+                lines.append(f"• {html.escape(name)} — <b>{count}</b>")
+            if len(entries) > 5:
+                lines.append(f"<i>Ещё фильтров: {len(entries) - 5}</i>")
+    lines += [
+        "",
+        "🛡️ <b>Почему это нормально</b>",
+        "Бот не создаёт сигнал ради количества. Если бэктест слабый, таймфреймы спорят или вход запоздал — сетап остаётся за пределами публикации.",
+        "",
+        "💡 <i>Ожидание — тоже решение. Следующий сигнал появится только после прохождения проверок.</i>",
+    ]
+    return "\n".join(lines)
+
+
 async def notify_no_signal_users(reason, details=""):
     """Редкое персональное уведомление; внутренние события RAM доступны только администраторам."""
     global last_no_signal_notice
@@ -3333,12 +3433,9 @@ async def notify_no_signal_users(reason, details=""):
         return
     last_no_signal_notice = now
     technical_issue = "ошибка" in str(reason).lower()
-    disclaimer = ("\n⚠️ Обнаружен технический сбой. Он отдельно зафиксирован для проверки; слабые сигналы не будут публиковаться."
-                  if technical_issue else
-                  "\nЭто не ошибка и не прогноз: бот не будет создавать слабый сигнал ради количества.")
-    body = ("ℹ️ <b>Новых сигналов пока нет</b>\n"
-            f"Причина: {html.escape(str(reason))}\n"
-            + (html.escape(str(details)) + "\n" if details else "") + disclaimer)
+    disclaimer = ("\n\n⚠️ <b>Техническое замечание:</b> обнаруженная ошибка записана в журнал и проверяется отдельно."
+                  if technical_issue else "")
+    body = format_no_signal_message(reason, details) + disclaimer
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Открыть Mini App", web_app=WebAppInfo(url=webapp_link(tab="signals")))]] ) if WEBAPP_URL else None
     for cid in signal_recipients("", ""):
         try:
