@@ -7,7 +7,7 @@ import math
 import time
 from collections import defaultdict
 
-VERSION = "1.0"
+VERSION = "1.1-COGNITIVE"
 
 
 def _n(v, default=0.0):
@@ -280,3 +280,149 @@ def replay_signal(signal, candles):
             "candles_checked": checked, "coverage_complete": coverage_complete,
             "conservative_same_candle_rule": "stop_first",
             "note": "OHLC replay has intrabar ambiguity; stop-first is used when stop and target share a candle. Coverage is partial if requested candles begin after signal time."}
+
+
+
+def regime_transition_assessment(df):
+    """Detect a possible phase change using only completed recent OHLCV windows."""
+    close, high, low, vol = (_col(df, k) for k in ("close", "high", "low", "volume"))
+    n = min(len(close), len(high), len(low), len(vol))
+    if n < 32:
+        return {"status": "insufficient_data", "bars": n,
+                "note": "Для оценки перехода режима нужны минимум 32 свечи."}
+    close, high, low, vol = close[-32:], high[-32:], low[-32:], vol[-32:]
+    def window_stats(start, end):
+        cs, hs, ls, vs = close[start:end], high[start:end], low[start:end], vol[start:end]
+        returns = [_pct(cs[i], cs[i-1]) for i in range(1, len(cs)) if cs[i-1]]
+        ranges = [max(0.0, h-l)/c*100 for h, l, c in zip(hs, ls, cs) if c]
+        return {"drift_pct": _pct(cs[-1], cs[0]) if cs and cs[0] else 0.0,
+                "range_pct": _mean(ranges), "abs_return_pct": _mean([abs(x) for x in returns]),
+                "volume": _mean(vs)}
+    old, recent = window_stats(0, 24), window_stats(24, 32)
+    vol_ratio = recent["range_pct"] / max(old["range_pct"], 1e-9)
+    move_ratio = recent["abs_return_pct"] / max(old["abs_return_pct"], 1e-9)
+    sign_old = 1 if old["drift_pct"] > .15 else -1 if old["drift_pct"] < -.15 else 0
+    sign_new = 1 if recent["drift_pct"] > .15 else -1 if recent["drift_pct"] < -.15 else 0
+    if vol_ratio >= 1.65 and move_ratio >= 1.45:
+        state, label = "volatility_expansion", "Резкое расширение диапазона"
+    elif sign_old and sign_new and sign_old != sign_new and abs(recent["drift_pct"]) >= .25:
+        state, label = "direction_reversal_watch", "Возможная смена направления"
+    elif vol_ratio <= .62:
+        state, label = "compression", "Сжатие волатильности"
+    elif move_ratio >= 1.5:
+        state, label = "momentum_acceleration", "Ускорение движения"
+    else:
+        state, label = "stable_or_unclear", "Устойчивый режим или недостаточно признаков перехода"
+    return {"status": "ok", "state": state, "label": label,
+            "recent_range_vs_previous": round(vol_ratio, 2),
+            "recent_move_intensity_vs_previous": round(move_ratio, 2),
+            "previous_drift_pct": round(old["drift_pct"], 2),
+            "recent_drift_pct": round(recent["drift_pct"], 2),
+            "volume_ratio_recent_vs_previous": round(recent["volume"]/max(old["volume"], 1e-9), 2),
+            "note": "Сравнение двух завершённых окон свечей; это раннее предупреждение, не подтверждение нового тренда."}
+
+
+def signal_fragility(signal_dna):
+    """Leave-one-factor-out sensitivity; reveals signals dominated by one input."""
+    factors = [x for x in (signal_dna or {}).get("factors", [])
+               if isinstance(x, dict) and x.get("available", True)]
+    if len(factors) < 2:
+        return {"status": "insufficient_data", "fragility": None,
+                "note": "Недостаточно независимых факторов для теста устойчивости."}
+    base_weights = [_n(x.get("weight")) for x in factors]
+    base_total = sum(base_weights)
+    if base_total <= 0:
+        return {"status": "insufficient_data", "fragility": None}
+    base = sum(_n(x.get("value"))*w for x, w in zip(factors, base_weights))/base_total
+    deltas = []
+    for i, factor in enumerate(factors):
+        remain = [(x, w) for j, (x, w) in enumerate(zip(factors, base_weights)) if j != i and w > 0]
+        denom = sum(w for _, w in remain)
+        alt = sum(_n(x.get("value"))*w for x, w in remain)/denom if denom else base
+        deltas.append({"factor": str(factor.get("name") or "unknown"), "score_without": round(alt, 1),
+                       "score_delta": round(alt-base, 1), "weight_share_pct": round(base_weights[i]/base_total*100, 1)})
+    dominant = max(deltas, key=lambda x: abs(x["score_delta"]))
+    fragility = max(abs(x["score_delta"]) for x in deltas)
+    level = "high" if fragility >= 12 else "medium" if fragility >= 6 else "low"
+    return {"status": "ok", "base_score": round(base, 1), "fragility": round(fragility, 1),
+            "level": level, "dominant_dependency": dominant["factor"],
+            "leave_one_out": sorted(deltas, key=lambda x: abs(x["score_delta"]), reverse=True),
+            "note": "Проверяет чувствительность оценки к удалению одного фактора; не измеряет вероятность успеха."}
+
+
+def evidence_conflict_map(side, context=None, df=None):
+    """Independent directional evidence map with explicit coverage and disagreement."""
+    c = context or {}
+    side = str(side or "").upper()
+    if side not in ("LONG", "SHORT"):
+        close = _col(df, "close") if df is not None else []
+        side = "LONG" if len(close) >= 6 and close[-1] >= close[-6] else "SHORT" if len(close) >= 6 else ""
+    if not side:
+        return {"status": "insufficient_data", "evidence": [], "coverage": 0}
+    rows = []
+    def add(name, direction, weight, detail):
+        if direction in ("LONG", "SHORT"):
+            rows.append({"name": name, "direction": direction, "weight": weight, "detail": detail})
+    close = _col(df, "close") if df is not None else []
+    if len(close) >= 6 and close[-6]:
+        move = _pct(close[-1], close[-6])
+        if abs(move) >= .15:
+            add("Краткосрочная цена", "LONG" if move > 0 else "SHORT", 1.0, f"{move:+.2f}% за 5 интервалов")
+    bid = c.get("orderbook_bid_share")
+    if bid is not None:
+        b = _n(bid, .5)
+        if b >= .54: add("Стакан", "LONG", .8, f"bid {b*100:.1f}%")
+        elif b <= .46: add("Стакан", "SHORT", .8, f"bid {b*100:.1f}%")
+        else: rows.append({"name":"Стакан", "direction":"NEUTRAL", "weight":.3, "detail":f"bid {b*100:.1f}%"})
+    funding = c.get("funding")
+    if funding is not None:
+        f = _n(funding)
+        # Crowded longs/shorts are a contrarian risk, not a standalone directional forecast.
+        if f >= .0005: add("Funding перегружает лонги", "SHORT", .45, f"{f*100:.4f}%")
+        elif f <= -.0005: add("Funding перегружает шорты", "LONG", .45, f"{f*100:.4f}%")
+    bias = c.get("news_bias")
+    if bias is not None:
+        b = _n(bias)
+        if abs(b) >= .2: add("Новостной уклон", "LONG" if b > 0 else "SHORT", .6, f"bias {b:+.2f}")
+    btc = c.get("btc_change_pct")
+    if btc is not None and abs(_n(btc)) >= .25:
+        add("Контекст BTC", "LONG" if _n(btc) > 0 else "SHORT", .5, f"{_n(btc):+.2f}%")
+    total = sum(x["weight"] for x in rows)
+    support = sum(x["weight"] for x in rows if x["direction"] == side)
+    oppose = sum(x["weight"] for x in rows if x["direction"] not in (side, "NEUTRAL"))
+    denom = support + oppose
+    ratio = oppose/denom if denom else 0.0
+    return {"status": "ok" if rows else "insufficient_data", "side": side,
+            "support_weight": round(support, 2), "opposition_weight": round(oppose, 2),
+            "conflict_pct": round(ratio*100, 1) if denom else None,
+            "agreement_pct": round(support/denom*100, 1) if denom else None,
+            "coverage": len(rows), "evidence": rows,
+            "state": "conflict" if ratio >= .45 else "mixed" if ratio >= .25 else "aligned" if rows else "unknown",
+            "note": "Источники имеют разную силу и не независимы полностью; карта показывает расхождения, а не торговый приказ."}
+
+
+def score_calibration(history, min_sample=8):
+    """Audit historical score bands against realized closed outcomes; score is not probability."""
+    buckets = [(0, 49, "0–49"), (50, 59, "50–59"), (60, 69, "60–69"),
+               (70, 79, "70–79"), (80, 100, "80–100")]
+    rows = []
+    for item in _closed(history):
+        dna = item.get("signal_dna") or {}
+        score = dna.get("score", item.get("quality_score"))
+        if score is None:
+            continue
+        score = _n(score, -1)
+        if not 0 <= score <= 100:
+            continue
+        rows.append((score, _n(item.get("r"))))
+    out = []
+    for lo, hi, label in buckets:
+        sample = [r for score, r in rows if lo <= score <= hi]
+        if not sample:
+            continue
+        wins = sum(r > 0 for r in sample)
+        out.append({"band": label, "trades": len(sample), "win_rate": round(wins/len(sample)*100, 1),
+                    "avg_r": round(_mean(sample), 3), "sample_ok": len(sample) >= min_sample})
+    return {"status": "ok" if rows else "no_data", "scored_closed_trades": len(rows),
+            "bands": out, "min_sample": min_sample,
+            "note": "Score 0–100 не является вероятностью. Таблица показывает только фактические результаты закрытых сигналов с сохранённым score."}
