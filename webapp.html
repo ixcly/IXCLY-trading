@@ -122,7 +122,7 @@ async function api(a,p,tries=2,silent=false){
 }
 function stopPoll(){clearInterval(PT);PT=null}
 function stopAll(){stopPoll();closeSheet()}
-function setTab(p){const map={coin:'signals',analytics:'analytics',sub:'sub',news:'more',paywall:'sub'};const t=map[p]||p;document.querySelectorAll('.tb b').forEach(b=>b.classList.toggle('on',b.dataset.t===t))}
+function setTab(p){const map={coin:'signals',analytics:'analytics',sub:'sub',news:'more',ai_center:'more',paywall:'sub'};const t=map[p]||p;document.querySelectorAll('.tb b').forEach(b=>b.classList.toggle('on',b.dataset.t===t))}
 async function go(p,a,back){
   if(!back&&CUR)STACK.push(CUR);CUR=[p,a];hap();setTab(p);
   if(STACK.length)tg.BackButton.show();else tg.BackButton.hide();
@@ -388,6 +388,7 @@ const NT=[['signals','🔥 Новые сигналы'],['pos_updates','📊 Со
 P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=S.notif||{};const a=S.access||{};
 V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
 <div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг оплатит подписку — вам +7 дней</div></div>
+<div class="card lst" onclick="go('ai_center','BTC')"><b>🧠 AI Command Center</b><div class="m" style="margin-top:4px">Сценарии, раннее движение, funding/OI, риск и память сигналов</div></div>
 <div class="card lst" onclick="go('news')"><b>📰 Новости рынка</b><div class="m" style="margin-top:4px">${esc((S.news||{}).title_ru||'Разбор последней новости')}</div></div>
 ${renderAd(a)}
 <h2>🔔 Уведомления в Telegram</h2>${NT.map(x=>`<div class="card row"><span>${x[1]}</span><div class="sw ${n[x[0]]?'on':''}" onclick="tgl('${x[0]}')"></div></div>`).join('')}
@@ -405,6 +406,13 @@ async function refShare(){const r=await api('ref_link');if(r.error)return;const 
 async function tgl(k){const j=await api('toggle',{key:k});if(!j.error){toast(j.msg);P.more()}}
 async function wh(){const j=await api('webhook',{url:$('#wh').value});if(!j.error)toast(j.msg)}
 async function csv(){const j=await api('csv');if(!j.error)toast(j.msg)}
+P.ai_center=async(coin='BTC')=>{const j=await api('ai_center',{coin});if(j.error)return;const f=j.forecast||{},e=j.early_movement||{},c=j.crowding_risk||{},n=j.news_risk||{},q=j.quality||{},m=j.memory||{};const money=v=>v==null?'—':Number(v).toLocaleString('en',{maximumFractionDigits:6});
+V().innerHTML=`<h1>AI <span>Command Center</span></h1><div class="search-wrap"><input id="aicoin" value="${esc(j.coin||coin)}" placeholder="BTC, ETH, SOL" autocapitalize="characters"><button class="btn" onclick="go('ai_center',($('#aicoin').value||'BTC').toUpperCase().replace(/[^A-Z0-9]/g,''))">Анализ</button></div>
+<div class="card"><div class="row"><b>${esc(j.coin)} · ${money(j.price)}</b><span class="tag">${esc(j.regime?.name||'нет данных')}</span></div><div class="lv"><span>Раннее движение</span><b>${e.score??0}/100 · ${e.state==='watch'?'наблюдать':'нет импульса'}</b></div><div class="m">${esc((e.reasons||[]).join(' · ')||e.message||'Нет факторов')}</div></div>
+<div class="card"><b>🔮 Сценарии (условные)</b><div class="lv"><span>Рост: триггер → цель</span><b class="up">${money(f.bull_trigger)} → ${money(f.bull_target)}</b></div><div class="lv"><span>Падение: триггер → цель</span><b class="dn">${money(f.bear_trigger)} → ${money(f.bear_target)}</b></div><div class="lv"><span>Диапазон ATR</span><b>${money(f.range_low)} – ${money(f.range_high)}</b></div><small>${esc(f.note||'Недостаточно данных')}</small></div>
+<div class="card"><b>📊 Потоки рынка</b><div class="lv"><span>Funding</span><b>${j.funding==null?'—':(Number(j.funding)*100).toFixed(4)+'%'}</b></div><div class="lv"><span>OI / изменение цены</span><b>${j.oi_change_pct??'—'}% / ${j.oi_price_change_pct??'—'}%</b></div><div class="lv"><span>Доля bid в стакане</span><b>${j.orderbook_bid_share==null?'—':(Number(j.orderbook_bid_share)*100).toFixed(1)+'%'}</b></div><div class="lv"><span>Риск перегруженности</span><b>${esc(c.level||'low')} · L ${c.long_crowding_risk??0}/100 · S ${c.short_crowding_risk??0}/100</b></div><div class="lv"><span>Ликвидации за час</span><b>${j.liquidations_1h?.count??0} · $${money(j.liquidations_1h?.notional)}</b></div></div>
+<div class="card"><b>🧠 Качество и память</b><div class="lv"><span>Активный сигнал</span><b>${q.score==null?'нет':q.score+'/100 · '+q.label}</b></div><div class="lv"><span>Signal Memory</span><b>${m.trades?m.win_rate+'% · '+m.trades+' сделок':'накапливаем'}</b></div><div class="lv"><span>Новостной риск</span><b>${esc(n.severity||'low')}</b></div>${(j.system_memory?.findings||[]).map(x=>`<div class="m">• ${esc(x)}</div>`).join('')}</div><div class="m" style="padding:8px">Сценарии вероятностные и не гарантируют движение. Ранний детектор — только наблюдение, не автоматический вход.</div>`};
+
 P.news=async()=>{const j=await api('news');if(j.error)return;const b=j.bias||{};
 V().innerHTML=`<h1>Новости <span>рынка</span></h1><div class="card"><div class="row"><small>${esc(b.published||'')}</small><b class="${b.bias>0?'up':b.bias<0?'dn':''}">${b.bias>0?'🟢 Бычий':b.bias<0?'🔴 Медвежий':'⚪ Нейтральный'}</b></div>
 <h2>${esc(b.title_ru)}</h2><div class="m">${esc(b.summary)}</div><p style="margin-top:8px">${esc(b.impact)}</p><small>🪙 ${esc(b.coins)}</small></div>
