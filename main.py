@@ -38,7 +38,9 @@ import feedparser
 import numpy as np
 import pandas as pd
 from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, breakeven_trigger_reached, close_warning_confirmed,
-                               scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence)
+                               scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence,
+                               forecast_scenarios, early_movement_assessment, liquidation_risk_assessment,
+                               signal_quality_breakdown, strategy_performance, self_audit_summary)
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -4747,6 +4749,73 @@ def _safe_float(value, default=0.0):
         return default
 
 
+_ai_center_cache = {}
+
+
+async def ai_center_snapshot(uid, coin="BTC"):
+    """One bounded snapshot assembled from existing feeds; no parallel scanner."""
+    coin = normalize_ticker(str(coin or "BTC")) or "BTC"
+    cached = _ai_center_cache.get(coin)
+    if cached and time.time() - cached[0] < 60:
+        return cached[1]
+    try:
+        tf_data, source = await get_market_data_light(coin, ("15m", "1h", "4h", "1d"))
+    except Exception:
+        tf_data, source = {}, None
+    funding = await get_funding(coin)
+    oi_state, oi_pct, oi_price_pct = await oi_price_state(coin)
+    price = None
+    info = tf_data.get("4h") or tf_data.get("1h") or {}
+    try: price = float(info.get("price") or info["df"]["close"].iloc[-1])
+    except Exception: price = await get_simple_price(coin)
+    book = await order_book_imbalance(coin, price) if price else None
+    df = info.get("df")
+    regime = market_regime(df) if df is not None else {"name":"unknown","volatility":"unknown"}
+    vol = volume_anomaly(df) if df is not None else None
+    early = early_movement_assessment(df, oi_pct, book, funding, vol)
+    news_risk = news_risk_assessment(market_bias, coin)
+    forecast = forecast_scenarios(tf_data, news_risk=news_risk)
+    crowd = liquidation_risk_assessment(funding, oi_pct, oi_price_pct)
+    active = next((x for x in get_active_signals() if x.get("coin")==coin), None)
+    quality = signal_quality_breakdown(active) if active else None
+    hist = load_signal_history()
+    mem = signal_memory_summary(hist, 120)
+    recent_liqs = [x for x in LIQUIDATIONS if time.time()-x.get("ts",0)<=3600]
+    coin_liqs = [x for x in recent_liqs if x.get("coin")==coin]
+    result = {"coin":coin,"source":source,"price":price,"regime":regime,"volume_anomaly":vol,
+            "early_movement":early,"forecast":forecast,"funding":funding,"oi_state":oi_state,
+            "oi_change_pct":oi_pct,"oi_price_change_pct":oi_price_pct,"orderbook_bid_share":book,
+            "crowding_risk":crowd,"news_risk":news_risk,"news":{"title":market_bias.get("title_ru"),
+            "bias":market_bias.get("bias"),"severity":market_bias.get("severity"),"ts":market_bias.get("ts")},
+            "active_signal":_sig_item(active) if active else None,"quality":quality,"memory":mem,
+            "liquidations_1h":{"count":len(coin_liqs),"notional":round(sum(float(x.get("notional",0) or 0) for x in coin_liqs),2)},
+            "system_memory":self_audit_summary(hist,30),"generated_at":time.time()}
+    _ai_center_cache[coin] = (time.time(), result)
+    if len(_ai_center_cache) > 24:
+        oldest = sorted(_ai_center_cache.items(), key=lambda kv: kv[1][0])[:8]
+        for key, _ in oldest: _ai_center_cache.pop(key, None)
+    return result
+
+
+def _format_ai_center(x):
+    f=x.get("forecast") or {}; e=x.get("early_movement") or {}; cr=x.get("crowding_risk") or {}
+    q=x.get("quality") or {}; nr=x.get("news_risk") or {}
+    def px(v): return fmt(v) if isinstance(v,(int,float)) and v>0 else "—"
+    lines=[f"🧠 <b>IXCLY AI Command Center · {html.escape(x.get('coin','BTC'))}</b>",
+           f"Цена: <code>{px(x.get('price'))}</code> · режим: <b>{html.escape(str((x.get('regime') or {}).get('name','unknown')))}</b>",
+           f"Раннее движение: <b>{e.get('score',0)}/100 · {'наблюдать' if e.get('state')=='watch' else 'тихо'}</b>",
+           "Факторы: "+html.escape(', '.join(e.get('reasons') or ['нет подтверждений'])),
+           f"Сценарии: вверх триггер <code>{px(f.get('bull_trigger'))}</code> → цель <code>{px(f.get('bull_target'))}</code>; вниз <code>{px(f.get('bear_trigger'))}</code> → <code>{px(f.get('bear_target'))}</code>",
+           f"Funding: {x.get('funding') if x.get('funding') is not None else '—'} · OI: {x.get('oi_change_pct')}% · bids стакана: {x.get('orderbook_bid_share')}",
+           f"Риск перегруженности: <b>{html.escape(str(cr.get('level','low')))}</b> (лонги {cr.get('long_crowding_risk',0)}/100 · шорты {cr.get('short_crowding_risk',0)}/100)",
+           f"Новостной риск: {html.escape(str(nr.get('severity','low')))} · ликвидации {x.get('liquidations_1h',{}).get('count',0)} за час"]
+    if q: lines.append(f"Активный сигнал: качество {q.get('score')}/100 · класс {q.get('label')}")
+    else: lines.append("Активного сигнала по монете нет")
+    lines.append(f"Signal Memory: {x.get('memory',{}).get('win_rate','—')}% · {x.get('memory',{}).get('trades',0)} сделок")
+    lines.append("⚠️ Сценарии и риск — аналитические оценки, не гарантия результата и не команда на вход.")
+    return "\n".join(lines)
+
+
 async def mini_dispatch(uid, u, act, d):
     _users().setdefault(str(uid), {"active": True})["last_seen"] = time.time()
     if act not in FREE_ACTS and not has_access(uid):
@@ -4767,6 +4836,9 @@ async def mini_dispatch(uid, u, act, d):
                 "news": market_bias, "ctx": await get_context(), "coins": POPULAR_COINS[:150], "access": access_payload(uid), "bot": runtime["main_bot"],
                 "counts": {"signals": len(signals_for(uid)), "saved": len(get_user_saved_signals(uid)),
                            "positions": len(get_user_open_positions(uid))}}
+
+    if act == "ai_center":
+        return await ai_center_snapshot(uid, coin or "BTC")
 
     if act == "intel":
         # Лёгкий снимок без дополнительного фонового сканера и без хранения свечных массивов.
@@ -6487,6 +6559,108 @@ async def create_support_ticket(m: types.Message, question: str, category: str =
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Меню поддержки", callback_data="support_menu")]]))
 
 
+@dp.message(Command("market"))
+async def cmd_market(m: types.Message):
+    x = await ai_center_snapshot(m.from_user.id, "BTC")
+    await m.answer(_format_ai_center(x), parse_mode="HTML", disable_web_page_preview=True)
+
+
+@dp.message(Command("forecast"))
+async def cmd_forecast(m: types.Message):
+    parts=(m.text or "").split(maxsplit=1); coin=normalize_ticker(parts[1]) if len(parts)>1 else "BTC"
+    x=await ai_center_snapshot(m.from_user.id, coin or "BTC")
+    f=x.get("forecast") or {}
+    if f.get("status")!="ok": return await m.answer("Недостаточно рыночных данных для сценарного прогноза.")
+    await m.answer(_format_ai_center(x),parse_mode="HTML")
+
+
+@dp.message(Command("whales"))
+async def cmd_whales(m: types.Message):
+    parts=(m.text or "").split(maxsplit=1); coin=normalize_ticker(parts[1]) if len(parts)>1 else "BTC"
+    rows=[]
+    for cand in SYMBOL_ALIASES.get(coin or "BTC",[coin or "BTC"]):
+        try:
+            rows=await http_json("https://data-api.binance.vision/api/v3/aggTrades",params={"symbol":f"{cand}USDT","limit":500},timeout=7)
+            if rows: break
+        except Exception: continue
+    trades=[]
+    for t in rows or []:
+        try:
+            value=float(t.get("p",0))*float(t.get("q",0))
+            if value>=100000:
+                trades.append((value,"SELL" if t.get("m") else "BUY",float(t.get("p",0))))
+        except Exception: pass
+    trades=sorted(trades,reverse=True)[:8]
+    if not trades: return await m.answer(f"🐋 {coin}: в последних 500 агрегированных сделках Binance не найдено сделок от $100k. Это не означает отсутствие крупных сделок на других площадках.")
+    body="\n".join(f"{'🔴' if side=='SELL' else '🟢'} {side} · ${value:,.0f} · цена {fmt(price)}" for value,side,price in trades)
+    await m.answer(f"🐋 <b>Крупные сделки {coin}</b> · Binance Spot\n{body}\n\nПорог $100k; это поток крупных сделок, не идентификация конкретного кита.",parse_mode="HTML")
+
+
+@dp.message(Command("liquidations"))
+async def cmd_liquidations(m: types.Message):
+    now=time.time(); rows=[x for x in LIQUIDATIONS if now-float(x.get("ts",0))<=3600]
+    rows=sorted(rows,key=lambda x:float(x.get("notional",0) or 0),reverse=True)[:12]
+    if not rows: return await m.answer("💥 За последний час в подключённом потоке Binance Futures нет записанных событий ликвидаций.")
+    body="\n".join(f"{x.get('coin','?')} · {'лонги' if x.get('side')=='LONG' else 'шорты'} · ${float(x.get('notional',0) or 0):,.0f}" for x in rows)
+    await m.answer("💥 <b>Ликвидации за 1 час</b>\n"+body,parse_mode="HTML")
+
+
+@dp.message(Command("radar"))
+async def cmd_radar(m: types.Message):
+    ranked=list(scanner_ranking or [])[:10]
+    anomalies=[]
+    for c,v in list(LIVE.items()):
+        if not isinstance(v,dict) or time.time()-float(v.get("ts",0))>300: continue
+        ch=abs(_safe_float(v.get("change_pct")))
+        if ch>=2: anomalies.append((c,ch,v.get("price")))
+    anomalies.sort(key=lambda z:-z[1])
+    lines=["📡 <b>IXCLY Radar</b>"]
+    lines += [f"#{x.get('rank',i+1)} {x.get('coin')} · {x.get('direction')} · {float(x.get('score',0)):.1f}/100" for i,x in enumerate(ranked[:8])]
+    if anomalies: lines += ["\n<b>Быстрые движения (LIVE ≤5 мин)</b>"]+[f"{c}: {ch:+.2f}%" for c,ch,_ in anomalies[:6]]
+    if not ranked and not anomalies: lines.append("Пока нет свежих подтверждённых кандидатов. Радар не запускает отдельный тяжёлый скан.")
+    await m.answer("\n".join(lines),parse_mode="HTML")
+
+
+@dp.message(Command("risk"))
+async def cmd_risk(m: types.Message):
+    uid=m.from_user.id; cfg=get_user_risk_settings(uid); used=calculate_portfolio_risk(uid)
+    await m.answer(f"🛡 <b>Контроль риска</b>\nДепозит: {cfg['deposit']:.2f} USDT\nРиск на сделку: {cfg['risk_pct']:.2f}%\nЛимит открытого риска: {cfg['max_open_risk']:.2f}%\nИспользовано: {used:.2f}%\nОстаток: {max(0,cfg['max_open_risk']-used):.2f}%\nОткрытых позиций: {len(get_user_open_positions(uid))}\n\nРасчёт не создаёт ордера.",parse_mode="HTML")
+
+
+@dp.message(Command("ai_report"))
+async def cmd_ai_report(m: types.Message):
+    parts=(m.text or "").split(maxsplit=1); coin=normalize_ticker(parts[1]) if len(parts)>1 else "BTC"
+    x=await ai_center_snapshot(m.from_user.id,coin or "BTC")
+    await m.answer(_format_ai_center(x),parse_mode="HTML")
+    audit=x.get("system_memory") or {}
+    if audit.get("findings"): await m.answer("🧪 <b>Self-Audit</b>\n"+"\n".join("• "+html.escape(z) for z in audit["findings"]),parse_mode="HTML")
+
+
+@dp.message(Command("strategy_stats"))
+async def cmd_strategy_stats(m: types.Message):
+    rows=strategy_performance(load_signal_history(),"type",3)
+    if not rows: return await m.answer("Недостаточно закрытых сигналов для сравнения стратегий.")
+    body="\n".join(f"{html.escape(str(x['name']))}: {x['trades']} сделок · WR {x['win_rate']}% · {x['avg_r']:+.2f}R/сделку"+("" if x['sample_ok'] else " · малая выборка") for x in rows)
+    await m.answer("🧩 <b>Результативность типов стратегий</b>\n"+body,parse_mode="HTML")
+
+
+@dp.message(Command("accuracy"))
+async def cmd_accuracy(m: types.Message):
+    hist=load_signal_history(); audit=self_audit_summary(hist,30)
+    regimes=strategy_performance(hist,"market_regime",3)
+    body="\n".join(audit.get("findings",[]))
+    if regimes: body+="\n\n<b>По режимам рынка</b>\n"+"\n".join(f"{html.escape(str(x['name']))}: {x['win_rate']}% · {x['trades']}" for x in regimes)
+    await m.answer("🎯 <b>Точность и калибровка</b>\n"+body+"\n\nОценка строится по закрытым сигналам, а не по незавершённым прогнозам.",parse_mode="HTML")
+
+
+@dp.message(Command("paper_report"))
+async def cmd_paper_report(m: types.Message):
+    try:
+        with STATE_LOCK: a=paper_analytics(STATE.setdefault("paper",{}),m.from_user.id)
+    except Exception as e: return await m.answer("Paper Trading: "+html.escape(str(e)))
+    await m.answer(f"📒 <b>Paper Trading · {html.escape(str(a.get('account_name') or 'счёт'))}</b>\nСделок: {a.get('trades',0)} · WR: {a.get('win_rate',0)}%\nNet PnL: {a.get('net_pnl',0):+.2f} USDT\nСредний результат: {a.get('avg_pnl',0):+.2f} USDT\nProfit Factor: {a.get('profit_factor','—')}\nMax drawdown: {a.get('max_drawdown_pct',0):.2f}%\n\nТолько виртуальные сделки.",parse_mode="HTML")
+
+
 @dp.message(Command("scan_report"))
 async def main_admin_scan_report(m: types.Message):
     if m.from_user.id not in ADMIN_IDS:
@@ -6923,6 +7097,7 @@ def _runtime_memory_snapshot():
             "analysis": len(analysis_cache), "backtest": len(bt_cache), "ai": len(_ai_cache),
             "funding": len(_funding_cache), "orderbook": len(_ob_cache), "hourly": len(_hourly_cache),
             "intelligence": cleanup_intelligence.__globals__.get("CACHE_MAX", 0) and len(cleanup_intelligence.__globals__.get("_cache", {})),
+            "ai_center": len(_ai_center_cache) if "_ai_center_cache" in globals() else 0,
             "api": len(API_CACHE) if "API_CACHE" in globals() else 0,
         },
         "last_trim": dict(MEMORY_TRIM_INFO or last_scan_info.get("memory_trim") or {}),
@@ -6962,6 +7137,9 @@ def _memory_pressure_cleanup(force=False):
         cleanup_intelligence(now)
     except Exception:
         pass
+    for key, value in list(_ai_center_cache.items()):
+        if now - float(value[0]) > 300:
+            _ai_center_cache.pop(key, None)
     if len(fetch_errors) > 40:
         fetch_errors.clear()  # transient API error diagnostics only; not signal or trade history
     if len(API_CACHE) > 120:
@@ -6972,7 +7150,7 @@ def _memory_pressure_cleanup(force=False):
     after = _current_rss_mb()
     MEMORY_TRIM_INFO = {"before_mb": before, "after_mb": after, "trimmed": True,
                         "cache_sizes": {"analysis": len(analysis_cache), "backtest": len(bt_cache),
-                                        "ai": len(_ai_cache), "funding": len(_funding_cache),
+                                        "ai": len(_ai_cache), "ai_center": len(_ai_center_cache), "funding": len(_funding_cache),
                                         "orderbook": len(_ob_cache), "hourly": len(_hourly_cache),
                                         "api": len(API_CACHE)}}
     last_scan_info["memory_trim"] = dict(MEMORY_TRIM_INFO)
@@ -7004,6 +7182,9 @@ async def memory_janitor_loop():
             for c in [c for c, v in analysis_cache.items() if now - v[0] > 600]:
                 analysis_cache.pop(c, None)
             cleanup_intelligence(now)
+            for key, value in list(_ai_center_cache.items()):
+                if now - float(value[0]) > 300:
+                    _ai_center_cache.pop(key, None)
             for store, ttl in ((_ai_cache, 3600), (_funding_cache, 3600), (_ob_cache, 600), (_hourly_cache, 600)):
                 for k in [k for k, v in store.items() if isinstance(v, (tuple, list)) and v and now - v[0] > ttl]:
                     store.pop(k, None)
@@ -7150,7 +7331,19 @@ async def main():
             await bot.delete_webhook(drop_pending_updates=True)
             if admin_bot:
                 await admin_bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_my_commands([types.BotCommand(command="start", description="🚀 Открыть IXCLY")])
+            await bot.set_my_commands([
+                types.BotCommand(command="start", description="🚀 Открыть IXCLY"),
+                types.BotCommand(command="market", description="🧠 AI-анализ рынка"),
+                types.BotCommand(command="forecast", description="🔮 Сценарии монеты"),
+                types.BotCommand(command="radar", description="📡 Радар движений"),
+                types.BotCommand(command="whales", description="🐋 Крупные сделки"),
+                types.BotCommand(command="liquidations", description="💥 Ликвидации за час"),
+                types.BotCommand(command="risk", description="🛡 Мой риск"),
+                types.BotCommand(command="ai_report", description="📊 Полный AI-отчёт"),
+                types.BotCommand(command="strategy_stats", description="🧩 Статистика стратегий"),
+                types.BotCommand(command="accuracy", description="🎯 Точность сигналов"),
+                types.BotCommand(command="paper_report", description="📒 Paper Trading отчёт"),
+            ])
             if WEBAPP_URL:
                 await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="IXCLY App", web_app=WebAppInfo(url=webapp_link())))
                 log.info(f"Mini App: {WEBAPP_URL}")
