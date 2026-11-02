@@ -384,9 +384,21 @@ ${renderAd(S.access)}
 function stl(k){const L=(window.ST.lists||{})[k]||[];$('#sl').innerHTML=`<h2>${STN[k]}</h2>`+(L.length?L.map(x=>`<div class="sig lst" onclick="go('coin','${x.coin}')"><span><b>${x.coin}</b> ${side(x.side)}</span><small class="num">${x.cancel_reason?esc(x.cancel_reason).slice(0,60):'Вход '+f(x.entry)}</small></div>`).join(''):'<div class="card m">Пусто</div>')}
 
 /* ---------- Ещё: новости, уведомления, настройки ---------- */
+/* ---------- Обучение для новичков ---------- */
+P.tutorial=async()=>{V().innerHTML=`<h1>🎓 Обучение <span>IXCLY</span></h1>
+<div class="card"><b>1. Сигналы</b><p class="m">Откройте вкладку «Сигналы», выберите фильтр и нажмите на монету. Сигнал — это аналитическая идея, а не приказ и не гарантия прибыли.</p><button class="btn s" onclick="tab('signals')">🔥 Перейти к сигналам</button></div>
+<div class="card"><b>2. Разбор монеты</b><p class="m">Проверьте LONG/SHORT, цену входа, TP (цели), SL (уровень ограничения убытка), причины сигнала, таймфреймы и риск. LONG — сценарий роста, SHORT — сценарий снижения. WAIT означает, что лучше не торопиться.</p></div>
+<div class="card"><b>3. Портфель</b><p class="m">Укажите депозит и допустимый риск на сделку. Следите за открытыми позициями и историей. Не повышайте риск ради отыгрыша.</p><button class="btn s" onclick="tab('portfolio')">💼 Перейти в портфель</button></div>
+<div class="card"><b>4. Paper Trading</b><p class="m">Внутри портфеля найдёте PAPER TRADING: виртуальные счета, тестовые позиции, комиссии и историю. Это симуляция — реальные ордера на биржу не отправляются. Используйте её для тренировки.</p><button class="btn s" onclick="tab('portfolio')">🧪 Открыть Paper Trading</button></div>
+<div class="card"><b>5. Аналитика</b><p class="m">Смотрите личные и системные результаты, историю, прибыль/убыток и просадку. Не делайте вывод о стратегии по одной-двум сделкам; учитывайте размер выборки.</p><button class="btn s" onclick="tab('analytics')">📊 Открыть аналитику</button></div>
+<div class="card"><b>6. Раздел «Ещё» и AI Command Center</b><p class="m">Здесь находятся новости, AI Command Center, настройки уведомлений, поддержка и документы. AI показывает дополнительные сценарии и факторы риска, но не управляет сделками автоматически.</p><button class="btn s" onclick="tab('more')">🧠 Перейти в «Ещё»</button></div>
+<div class="card"><b>🛡 Главное правило</b><p class="m">Сначала изучите идею и риск, затем принимайте собственное решение. Криптовалюты волатильны; IXCLY не гарантирует прибыль. При сомнениях пропустите сигнал.</p></div>
+<button class="btn" onclick="tab('signals')">Начать работу с IXCLY</button>`};
+
 const NT=[['signals','🔥 Новые сигналы'],['pos_updates','📊 Сопровождение и итоги'],['news','📰 Новости'],['anomalies','🚨 Аномалии объёма'],['briefing','☀️ Утренний брифинг'],['liquidations','💥 Ликвидации']];
 P.more=async()=>{const j=await refreshMe();if(j.error&&!j.closed)return;const n=S.notif||{};const a=S.access||{};
 V().innerHTML=`<h1>Ещё <span>IXCLY</span></h1>
+<div class="card lst" onclick="go('tutorial')"><div class="row"><b>🎓 Обучение новичка</b><span class="m">›</span></div><div class="m" style="margin-top:4px">Как пользоваться сигналами, портфелем, Paper Trading и аналитикой</div></div>
 <div class="card lst" onclick="refShare()"><b>🤝 Пригласить друга</b><div class="m">Друг оплатит подписку — вам +7 дней</div></div>
 <div class="card lst" onclick="go('ai_center','BTC')"><b>🧠 AI Command Center</b><div class="m" style="margin-top:4px">Сценарии, раннее движение, funding/OI, риск и память сигналов</div></div>
 <div class="card lst" onclick="go('news')"><b>📰 Новости рынка</b><div class="m" style="margin-top:4px">${esc((S.news||{}).title_ru||'Разбор последней новости')}</div></div>
