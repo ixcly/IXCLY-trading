@@ -37,7 +37,8 @@ import aiohttp
 import feedparser
 import numpy as np
 import pandas as pd
-from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, scan_diagnostic_summary, cleanup as cleanup_intelligence)
+from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, breakeven_trigger_reached, close_warning_confirmed,
+                               scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence)
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -82,11 +83,6 @@ from aiogram.types import (BufferedInputFile, ErrorEvent, InlineKeyboardButton, 
                            LabeledPrice, MenuButtonWebApp, WebAppInfo)
 from flask import Flask, Response, jsonify, request, send_file
 from PIL import Image, ImageDraw, ImageFont
-
-try:
-    import ccxt.async_support as ccxt
-except ImportError:
-    ccxt = None
 
 try:
     from cryptography.fernet import Fernet
@@ -170,7 +166,8 @@ def status_page():
     return jsonify({
         "version": VERSION, "uptime_s": int(time.time() - stats["started"]), "recipients": len(active_chats),
         "main_bot": runtime["main_bot"], "admin_bot": runtime["admin_bot"], "news_engine": market_bias.get("engine"),
-        "last_scan": last_scan_info, "peak_rss_mb": _rss_mb(), "rss_mb": _current_rss_mb(),
+        "last_scan": (None if is_memory_guard_reason(last_scan_info.get("diagnostic", "")) else dict(last_scan_info)),
+        "peak_rss_mb": _rss_mb(), "rss_mb": _current_rss_mb(),
     })
 
 
@@ -344,7 +341,8 @@ bot_flags = {"news_enabled": True, "alerts_enabled": True}
 last_scan_info = {"ts": 0, "stage1": 0, "stage2": 0, "backtest_ok": 0, "final": 0, "sent": 0, "secs": 0,
                   "bt_rejected": 0, "bt_unavailable": 0, "bt_errors": 0, "bt_error_examples": [],
                   "analysis_errors": 0, "analysis_wait": 0, "quality_rejected": 0, "analysis_error_examples": [],
-                  "diagnostic": "Сканирование ещё не выполнялось", "reasons": []}
+                  "diagnostic": "Сканирование ещё не выполнялось", "reasons": [],
+                  "rss_mb": None, "peak_rss_mb": None, "memory_trim": {}}
 last_no_signal_notice = 0.0
 scanner_ranking = []  # top-50 кандидатов последнего прохода, без свечных массивов
 market_bias = {"bias": 0, "title_ru": "Нет данных", "summary": "", "impact": "Нейтральный фон", "coins": "BTC, ETH",
@@ -1585,6 +1583,7 @@ async def get_funding(coin):
         except Exception:
             continue
     _funding_cache[coin] = (time.time(), val)
+    _trim_timed_cache(_funding_cache, 120)
     return val
 
 
@@ -2329,8 +2328,8 @@ def run_backtest_rows(rows):
 
 
 async def get_backtest(coin):
-    if len(bt_cache) > 200:
-        bt_cache.clear()
+    if len(bt_cache) > 120:
+        _trim_timed_cache(bt_cache, 90)
     c = bt_cache.get(coin)
     if c and time.time() - c[0] < 6 * 3600:
         return c[1]
@@ -2581,6 +2580,7 @@ async def order_book_imbalance(coin, price):
         else:
             j = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol": f"{coin}USDT", "limit": 100}, timeout=5)
             _ob_cache[coin] = (time.time(), j)
+            _trim_timed_cache(_ob_cache, 80)
     except Exception as e:
         log.info(f"Стакан {coin}: {e}")
         return None
@@ -3028,6 +3028,7 @@ async def ai_analyst(coin, setup, bt, ctx, entry, tps, sls, tf_data):
         if res["divergence"] != "none":
             res["comment"] = shorten(f"Дивергенция {'бычья' if res['divergence'] == 'bull' else 'медвежья'} по RSI. {res['comment']}", 320)
     _ai_cache[key] = (time.time(), res)
+    _trim_timed_cache(_ai_cache, 128)
     return res
 
 
@@ -3110,9 +3111,7 @@ async def analyze_coin(coin, uid=None, force=False):
         res["conf_used"] = user_conf
         analysis_cache[coin] = (time.time(), 60, res)
         save_analysis_db(coin, res)
-        if len(analysis_cache) > 80:
-            for k in sorted(analysis_cache, key=lambda x: analysis_cache[x][0])[:30]:
-                analysis_cache.pop(k, None)
+        _trim_timed_cache(analysis_cache, 50)
         return res, None
     except LookupError:
         pass
@@ -3288,8 +3287,11 @@ def signal_recipients(coin, side):
 
 
 async def notify_no_signal_users(reason, details=""):
-    """Редкое персональное уведомление: сканер не нашёл/не опубликовал новые сигналы."""
+    """Редкое персональное уведомление; внутренние события RAM доступны только администраторам."""
     global last_no_signal_notice
+    if is_memory_guard_reason(reason):
+        log.info("RAM guard: уведомление подписчикам подавлено (только админ-панель)")
+        return
     now = time.time()
     if now - last_no_signal_notice < 1800:
         return
@@ -3320,17 +3322,26 @@ async def scan_once(send=True):
         def _scan_paused(reason):
             last_scan_info.update(ts=int(time.time()), secs=int(time.time() - t0), diagnostic=reason,
                                   universe=0, stage1=0, stage2=0, backtest_ok=0, final=0, sent=0, reasons=[],
+                                  rss_mb=_current_rss_mb(), peak_rss_mb=_rss_mb(),
                                   bt_rejected=0, bt_unavailable=0, bt_errors=0, bt_error_examples=[],
                                   analysis_errors=0, analysis_wait=0, quality_rejected=0, analysis_error_examples=[])
             state_touch(False)
+        rss_before_trim = _current_rss_mb()
+        trim_info = {}
+        trim_at = float(os.getenv("RAM_TRIM_MB", "390"))
+        if rss_before_trim is not None and rss_before_trim >= trim_at:
+            trim_info = _memory_pressure_cleanup(force=True)
         rss_now = _current_rss_mb()
+        if trim_info:
+            last_scan_info["memory_trim"] = trim_info
         if rss_now is not None and rss_now >= float(os.getenv("RAM_SCAN_STOP_MB", "440")):
             _scan_paused(f"Сканирование остановлено защитой памяти: RAM {rss_now:.1f} MB достигла порога")
-            if send:
-                await notify_no_signal_users(last_scan_info["diagnostic"])
-            log.error("Сканер пропущен: RAM %.1f MB достигла защитного порога", rss_now)
-            if alert_once("ram_guard", 1800):
-                await notify_admin(f"⚠️ IXCLY RAM guard: {rss_now:.1f} MB. Сканирование приостановлено до следующего цикла.")
+            last_scan_info["memory_trim"] = trim_info
+            log.error("Сканер пропущен: RAM %.1f MB достигла защитного порога (до очистки %s MB)",
+                      rss_now, rss_before_trim)
+            if alert_once("ram_guard_log", 1800):
+                log.error("RAM guard зафиксирован в админ-панели: %.1f MB; очистка: %s",
+                          rss_now, trim_info.get("cache_sizes", {}))
             return []
         if time.time() < news_blackout_until:
             if not await maybe_lift_blackout():
@@ -3450,6 +3461,11 @@ async def scan_once(send=True):
                     _rej(setup.get("reject") or "не прошёл фильтр сетапа")
 
         await asyncio.gather(*[s2(i) for i in stage1])
+        stage1_count = len(stage1)
+        stage2_count = len(stage2)
+        # Stage 2 owns its own timeframe dictionaries; Stage 1 dataframes are no longer needed.
+        stage1.clear()
+        gc.collect()
 
         sem3 = asyncio.Semaphore(2)
 
@@ -3503,6 +3519,7 @@ async def scan_once(send=True):
                     if res["verdict"] == "ENTER" and res["quality_score"] >= min_quality:
                         final.append(res)
                         analysis_cache[coin] = (time.time(), 60, res)
+                        _trim_timed_cache(analysis_cache, 50)
                         save_analysis_db(coin, res)
                     elif res["verdict"] != "ENTER":
                         analysis_wait += 1
@@ -3518,12 +3535,23 @@ async def scan_once(send=True):
                     log.exception("Ошибка построения анализа %s", coin)
                     return
 
-        await asyncio.gather(*[s3(i) for i in stage2])
+        # Never keep every candidate's 4-TF dataframe alive for the entire backtest stage.
+        while stage2:
+            batch = stage2[:2]
+            del stage2[:2]
+            await asyncio.gather(*[s3(i) for i in batch])
+            batch.clear()
+            if (_current_rss_mb() or 0) >= float(os.getenv("RAM_TRIM_MB", "390")):
+                _memory_pressure_cleanup(force=True)
         final.sort(key=lambda r: r["strength"], reverse=True)
-        last_scan_info.update(ts=int(time.time()), stage1=len(stage1), stage2=len(stage2), backtest_ok=bt_pass,
+        # Only the three publishable candidates need their generated preview image retained.
+        keep_images = 3 if send else 0
+        for extra_result in final[keep_images:]:
+            extra_result["img"] = None
+        last_scan_info.update(ts=int(time.time()), stage1=stage1_count, stage2=stage2_count, backtest_ok=bt_pass,
                               final=len(final), secs=int(time.time() - t0))
         state_touch(False)
-        log.info(f"Сканер: {len(universe)} → {len(stage1)} → {len(stage2)} → бэктест {bt_pass} → итог {len(final)}")
+        log.info(f"Сканер: {len(universe)} → {stage1_count} → {stage2_count} → бэктест {bt_pass} → итог {len(final)}")
 
         new_items = []
         if send:
@@ -3578,36 +3606,37 @@ async def scan_once(send=True):
             diagnostic = f"Найдено и опубликовано сигналов: {sent_count}"
         elif final:
             diagnostic = "Сетапы найдены, но не прошли ограничения публикации (активный сигнал, cooldown, корреляция или лимит за проход)"
-        elif not stage1:
+        elif not stage1_count:
             diagnostic = "Кандидаты не прошли первичный фильтр силы/ADX или не получены данные 4h/1d"
-        elif not stage2:
+        elif not stage2_count:
             diagnostic = "Первичные кандидаты есть, но сетапы не подтвердились на дополнительных таймфреймах/фильтрах"
         else:
             diagnostic = scan_diagnostic_summary(
                 bt_rejected=bt_rejected, analysis_errors=analysis_errors, wait_count=analysis_wait,
                 quality_rejected=quality_rejected, bt_unavailable=bt_unavailable, bt_errors=bt_errors)
-        last_scan_info.update(ts=int(time.time()), stage1=len(stage1), stage2=len(stage2), backtest_ok=bt_pass,
+        last_scan_info.update(ts=int(time.time()), stage1=stage1_count, stage2=stage2_count, backtest_ok=bt_pass,
                               universe=len(universe), final=len(final), sent=sent_count, secs=int(time.time() - t0),
+                              rss_mb=_current_rss_mb(), peak_rss_mb=_rss_mb(),
                               bt_rejected=bt_rejected, bt_unavailable=bt_unavailable, bt_errors=bt_errors,
                               bt_error_examples=bt_error_examples, analysis_errors=analysis_errors, analysis_wait=analysis_wait,
                               quality_rejected=quality_rejected, analysis_error_examples=analysis_error_examples,
                               diagnostic=diagnostic, reasons=[{"reason": k, "count": v} for k, v in top_items])
         state_touch(False)
         log.info("Сканер: %s → %s → %s → backtest %s → final %s → sent %s; %s",
-                 len(universe), len(stage1), len(stage2), bt_pass, len(final), sent_count, diagnostic)
+                 len(universe), stage1_count, stage2_count, bt_pass, len(final), sent_count, diagnostic)
         if send:
             technical_lines = ("\n\n<b>Технические ошибки:</b>\n" + "\n".join(
                 html.escape(str(e)) for e in (bt_error_examples + analysis_error_examples)[:5])
                 if bt_error_examples or analysis_error_examples else "")
             await notify_admin(f"🔍 <b>Скан завершён</b> за {last_scan_info['secs']} с\n"
-                               f"Монет: {len(universe)} → {len(stage1)} → {len(stage2)} · к анализу допущено {bt_pass} · итог {len(final)} · отправлено {sent_count}\n"
+                               f"Монет: {len(universe)} → {stage1_count} → {stage2_count} · к анализу допущено {bt_pass} · итог {len(final)} · отправлено {sent_count}\n"
                                f"🧾 Причина: {html.escape(diagnostic)}\nОтсев: {html.escape(top or '—')}" + technical_lines)
             if sent_count == 0:
                 breakdown = (f"Бэктест отклонил: {bt_rejected}; ошибок получения истории: {bt_errors}; "
                              f"ошибок анализа: {analysis_errors}; ЖДАТЬ: {analysis_wait}; "
                              f"качество ниже порога: {quality_rejected}; без истории: {bt_unavailable}.")
                 await notify_no_signal_users(diagnostic,
-                    f"Скан: {len(universe)} монет → {len(stage1)} кандидатов → {len(stage2)} сетапов → "
+                    f"Скан: {len(universe)} монет → {stage1_count} кандидатов → {stage2_count} сетапов → "
                     f"{len(final)} готовых → 0 опубликовано. {breakdown} "
                     + ("Основной отсев: " + top if top else "Фильтры рынка пока не нашли подходящих входов."))
         gc.collect()
@@ -3631,6 +3660,7 @@ def simulate_signal(x, rows, now=None):
     entry, tp1, tp2, tp3, sl = x["entry"], x["tp1"], x["tp2"], x["tp3"], x["sl1"]
     t0 = x["ts"] * 1000
     state, max_tp = "waiting", 0
+    breakeven_armed = False
     for ts, _o, h, l, _c, _v in rows:
         if ts < t0:
             continue
@@ -3644,11 +3674,16 @@ def simulate_signal(x, rows, now=None):
             continue
         if (l <= sl) if is_long else (h >= sl):
             return ("win" if max_tp >= 1 else "loss"), max_tp, 1
+        # Arm only after a full +2.5% favorable excursion; the new stop applies from the next candle.
+        if (h >= entry * 1.025) if is_long else (l <= entry * 0.975):
+            breakeven_armed = True
+        if max_tp == 1 and breakeven_armed:
+            sl = entry
         lvl = (3 if h >= tp3 else 2 if h >= tp2 else 1 if h >= tp1 else 0) if is_long else \
               (3 if l <= tp3 else 2 if l <= tp2 else 1 if l <= tp1 else 0)
         if lvl > max_tp:
             max_tp = lvl
-            sl = entry if max_tp == 1 else tp1
+            sl = tp1 if max_tp >= 2 else entry if (breakeven_armed and max_tp >= 1) else x["sl1"]
             if max_tp == 3:
                 return "win", 3, 0
     if state == "waiting":
@@ -3658,8 +3693,8 @@ def simulate_signal(x, rows, now=None):
     return "in_trade", max_tp, 0
 
 
-async def notify_signal_holders(coin, side, text, kb=None, extra_uids=()):
-    """Уведомление тем, кто получил сигнал или держит по нему позицию / сохранил."""
+async def notify_signal_holders(coin, side, text, kb=None, extra_uids=(), order_key=None):
+    """Notify signal holders once; suppress global duplicates for tracked/closed personal orders."""
     uids = set(int(x) for x in extra_uids)
     for uid, u in list(_users().items()):
         if not isinstance(u, dict):
@@ -3668,6 +3703,13 @@ async def notify_signal_holders(coin, side, text, kb=None, extra_uids=()):
             uids.add(int(uid))
     for uid in uids:
         try:
+            tracked = get_open_position(uid, coin)
+            if tracked and tracked.get("side") == side:
+                # Personal position monitor owns entry/TP/SL/close messages; avoid duplicate global copies.
+                continue
+            if order_key and order_key in _users().get(str(uid), {}).get("closed_order_keys", []):
+                # A position monitor has already closed this exact signal order for this user.
+                continue
             if not has_access(uid) or not get_user_notif_settings(uid)["pos_updates"]:
                 continue
             await _send_new(uid, text, kb or kb_nav(back=False), None)
@@ -3763,11 +3805,63 @@ async def scanner_loop():
 # =====================================================================
 # ПОЗИЦИИ, ЛИЧНАЯ СТАТИСТИКА, СОПРОВОЖДЕНИЕ
 # =====================================================================
+def _tracked_order_key(coin, res):
+    """Stable key for one signal limit order; a closed signal cannot be re-announced as a fresh order."""
+    identity = res.get("signal_id") or res.get("signal_ts") or res.get("ts") or res.get("created_at")
+    if identity is None:
+        identity = f"{float(res['entry']):.8f}"
+    raw = f"{str(coin).upper()}|{res['side']}|{identity}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _ensure_tracked_order_key(uid, coin, pos):
+    """Backfill stable IDs for positions created by older IXCLY builds."""
+    if pos.get("order_key"):
+        return pos["order_key"]
+    candidate = next((x for x in sorted(load_signal_history(), key=lambda z: z.get("ts", 0), reverse=True)
+                      if x.get("coin") == coin and x.get("side") == pos.get("side") and
+                      abs(float(x.get("entry", 0)) - float(pos.get("entry_price", 0))) /
+                      max(1e-12, float(pos.get("entry_price", 0))) <= 0.005), None)
+    if candidate:
+        key = _tracked_order_key(coin, sig_as_res(candidate))
+    else:
+        key = _tracked_order_key(coin, {"side": pos["side"], "entry": pos["entry_price"],
+                                        "created_at": pos.get("created_at", 0)})
+    pos["order_key"] = key
+    set_user_open_position(uid, coin, pos)
+    return key
+
+
+def _remember_closed_order(uid, pos):
+    key = pos.get("order_key")
+    if not key:
+        return
+    with STATE_LOCK:
+        user = STATE["users"].setdefault(str(uid), {"active": True})
+        closed = user.setdefault("closed_order_keys", [])
+        if key not in closed:
+            closed.append(key)
+            del closed[:-80]
+    state_touch()
+
+
 def open_tracked_position(uid, coin, res):
-    """Ставит сделку на сопровождение: лимитка ждёт входа, затем TP/SL/трейлинг и итог в статистику."""
+    """Create one tracked limit order; duplicate/previously closed signal orders are rejected."""
     if get_open_position(uid, coin):
         return False
+    res = dict(res)
+    if not (res.get("signal_id") or res.get("signal_ts")):
+        candidate = next((x for x in get_active_signals() if x.get("coin") == coin and
+                          x.get("side") == res.get("side") and
+                          abs(float(x.get("entry", 0)) - float(res.get("entry", 0))) / max(1e-12, float(res.get("entry", 0))) <= 0.005), None)
+        if candidate:
+            res["signal_ts"] = candidate.get("ts")
+    order_key = _tracked_order_key(coin, res)
+    closed_keys = _users().get(str(uid), {}).get("closed_order_keys", [])
+    if order_key in closed_keys:
+        return False
     set_user_open_position(uid, coin, {
+        "order_key": order_key,
         "side": res["side"], "entry_price": float(res["entry"]), "created_at": time.time(), "entered_at": None,
         "entry_source": "user" if res.get("entry_override") else "signal",
         "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
@@ -3780,6 +3874,7 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
     """Итог сделки: TP1 = 50% позиции, TP2 = 30%, остаток по цене выхода."""
     if pos.get("waiting_entry"):
         return None
+    _remember_closed_order(uid, pos)
     entry, side = pos["entry_price"], pos["side"]
     sign = 1 if side == "LONG" else -1
     pnl_at = lambda p: price_change_pct(side, entry, p)
@@ -3800,7 +3895,7 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
     r = pnl / dist if dist > 0 else 0.0
     s = get_user_risk_settings(uid)
     now = time.time()
-    rec = {"coin": coin, "side": side, "entry": entry, "exit": exit_price, "pnl": round(pnl, 2), "r": round(r, 2),
+    rec = {"coin": coin, "side": side, "entry": entry, "exit": exit_price, "order_key": pos.get("order_key"), "pnl": round(pnl, 2), "r": round(r, 2),
            "usd": round(s["deposit"] * s["risk_pct"] / 100 * r, 2),
            "result": "win" if (h1 or pnl > 0.05) else "loss" if pnl < -0.05 else "be",
            "reason": reason, "max_tp": 3 if h3 else 2 if h2 else 1 if h1 else 0,
@@ -3824,10 +3919,16 @@ def render_trade_card(rec):
 async def close_position_manual(uid, coin):
     pos = get_open_position(uid, coin)
     rec = None
+    if pos:
+        _ensure_tracked_order_key(uid, coin, pos)
+    if pos and pos.get("waiting_entry"):
+        _remember_closed_order(uid, pos)
     if pos and not pos.get("waiting_entry"):
         price = await get_simple_price(coin)
         if price:
             rec = record_trade_result(uid, coin, pos, price, "закрыто вручную")
+    if pos and not rec:
+        _remember_closed_order(uid, pos)
     set_user_open_position(uid, coin, None)
     if rec:
         await _tell(uid, render_trade_card(rec))
@@ -3907,7 +4008,8 @@ def render_mystats(uid):
 
 
 async def check_position(user_id, coin, pos):
-    """Сопровождение сделки: вход лимиткой, безубыток, TP1-3, трейлинг, предупреждения, итог."""
+    """Сопровождение сделки: вход лимиткой, безубыток +2,5%, TP1-3, трейлинг, предупреждения, итог."""
+    _ensure_tracked_order_key(user_id, coin, pos)
     if pos.get("notified_close"):
         return
     price = await get_simple_price(coin)
@@ -3930,12 +4032,16 @@ async def check_position(user_id, coin, pos):
         if sign * (price - entry) <= 0:
             pos["waiting_entry"] = False
             pos["entered_at"] = time.time()
+            notify_entry = not pos.get("entry_notified", False)
+            pos["entry_notified"] = True
             set_user_open_position(user_id, coin, pos)
-            await _tell(user_id, f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\nНаправление: <b>{side}</b>\n"
-                                 f"Цена входа: <code>{fmt(entry)}</code>\n🚀 Сделка на сопровождении.",
-                        kb_nav([[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(coin)))]], back=False)
-                        if WEBAPP_URL else None)
+            if notify_entry:
+                await _tell(user_id, f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\nНаправление: <b>{side}</b>\n"
+                                     f"Цена входа: <code>{fmt(entry)}</code>\n🚀 Сделка на сопровождении.",
+                            kb_nav([[InlineKeyboardButton(text="📈 Открыть", web_app=WebAppInfo(url=webapp_link(coin)))]], back=False)
+                            if WEBAPP_URL else None)
         elif time.time() - pos.get("created_at", time.time()) > 24 * 3600:
+            _remember_closed_order(user_id, pos)
             set_user_open_position(user_id, coin, None)
             await _tell(user_id, f"⌛ <b>Ордер отменён: {coin}</b>\nЦена не дошла до входа за 24 часа.")
         return
@@ -3946,13 +4052,27 @@ async def check_position(user_id, coin, pos):
     current_sl = pos["sl1"]
     reason, urgency, exit_price, why = None, "info", price, "закрытие"
 
-    if not pos["hit_tp1"] and pnl >= 1.5 and current_sl != entry:
-        pos["sl1"] = entry
-        current_sl = entry
-        set_user_open_position(user_id, coin, pos)
-        await _tell(user_id, f"🛡 <b>Безубыток: {coin}</b>\nЦена в плюсе на {pnl:.2f}%. Стоп перенесён на вход.")
+    # Migrate positions from older builds that moved SL to entry at TP1 (before +2.5%).
+    if (not pos.get("breakeven_moved") and not pos.get("hit_tp2") and
+            abs(float(current_sl) - float(entry)) <= max(1e-12, abs(float(entry)) * 1e-9)):
+        original_sl = float(pos.get("sl_orig", current_sl))
+        if (side == "LONG" and original_sl < entry) or (side == "SHORT" and original_sl > entry):
+            if not breakeven_trigger_reached(pnl, 2.5):
+                pos["sl1"] = current_sl = original_sl
+                set_user_open_position(user_id, coin, pos)
+            else:
+                pos["breakeven_moved"] = True
+                set_user_open_position(user_id, coin, pos)
 
-    if pos["hit_tp1"] and not pos["hit_tp3"]:
+    if breakeven_trigger_reached(pnl, 2.5) and not pos.get("breakeven_moved"):
+        if (side == "LONG" and current_sl < entry) or (side == "SHORT" and current_sl > entry):
+            pos["sl1"] = entry
+            current_sl = entry
+            pos["breakeven_moved"] = True
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🛡 <b>Защита безубытка: {coin}</b>\nПрибыль достигла +2,5% ({pnl:+.2f}%). Стоп перенесён на цену входа.")
+
+    if pos["hit_tp1"] and (pos.get("breakeven_moved") or pos.get("hit_tp2")) and not pos["hit_tp3"]:
         ch = await chandelier_stop(coin, side == "LONG")
         if ch:
             new_sl = max(ch, entry) if side == "LONG" else min(ch, entry)
@@ -3983,27 +4103,21 @@ async def check_position(user_id, coin, pos):
         pos["sl1"] = tp1
         set_user_open_position(user_id, coin, pos)
     elif sign * (price - tp1) >= 0 and not pos["hit_tp1"]:
-        reason, urgency = "✅ Достигнут TP1. Фиксируем 50%, стоп в безубыток.", "success"
+        reason, urgency = "✅ Достигнут TP1. Первая цель зафиксирована; стоп переносится в безубыток только после +2,5%.", "success"
         pos["hit_tp1"] = True
-        pos["sl1"] = entry
         set_user_open_position(user_id, coin, pos)
 
-    if not reason and not pos.get("notified_close") and time.time() - pos.get("last_warn", 0) > 3600:
-        warn = None
+    if not reason and not pos.get("notified_close") and time.time() - pos.get("last_warn", 0) > 6 * 3600:
         live = LIVE.get(coin)
-        if live and time.time() - live["ts"] < 300:
-            p1h = live["long_prob"].get("1h", 50)
-            p15 = live["long_prob"].get("15m", 50)
-            against = (lambda p: 100 - p) if side == "LONG" else (lambda p: p)
-            if against(p1h) >= 60 and against(p15) >= 58:
-                warn = "Рынок разворачивается против сделки (1h и 15m)."
-        if not warn and pos["peak_pnl"] >= 1.0 and pnl <= pos["peak_pnl"] * 0.5 and not pos["hit_tp1"]:
-            warn = f"Отдана половина прибыли (пик {pos['peak_pnl']:+.1f}%, сейчас {pnl:+.1f}%)."
-        if warn:
+        if (live and time.time() - live.get("ts", 0) < 300 and pnl <= -1.5 and
+                close_warning_confirmed(live.get("long_prob", {}), side)):
             pos["last_warn"] = time.time()
+            pos["last_warn_signature"] = "4tf_adverse"
             set_user_open_position(user_id, coin, pos)
-            await _tell(user_id, f"⚠️ <b>Рекомендую закрыть: {coin} ({side})</b>\n\n{warn}\n"
-                                 f"Сейчас: <code>{fmt(price)}</code> · PnL <b>{pnl:+.2f}%</b>")
+            await _tell(user_id, f"⚠️ <b>Повышенный риск: {coin} ({side})</b>\n\n"
+                                 "Все четыре таймфрейма (15m, 1h, 4h и 1d) подтверждают движение против позиции. "
+                                 "Это предупреждение для проверки риска, а не рекомендация автоматически закрывать сделку.\n"
+                                 f"Цена: <code>{fmt(price)}</code> · PnL <b>{pnl:+.2f}%</b>")
 
     if reason:
         text = (f"{'🏆' if urgency == 'success' else '🛑'} <b>Сопровождение: {coin} ({side})</b>\n"
@@ -4081,7 +4195,9 @@ _news_alerted = set()
 
 async def check_news_conflicts_with_signals():
     nb, link = market_bias.get("bias", 0), market_bias.get("link")
-    if nb == 0 or not link:
+    # A broad/medium headline is not enough to suggest an exit; require a critical, fresh, coin-specific event.
+    if (nb == 0 or not link or market_bias.get("severity") != "critical" or
+            int(market_bias.get("critical_score", 0) or 0) < 7 or time.time() - market_bias.get("ts", 0) > 900):
         return
     for uid_str, u in list(_users().items()):
         if not isinstance(u, dict) or not get_user_notif_settings(uid_str)["signals"]:
@@ -4094,9 +4210,10 @@ async def check_news_conflicts_with_signals():
                 continue
             _news_alerted.add((link, uid_str, coin))
             if re.search(rf"\b{re.escape(coin)}\b", f"{market_bias.get('title_ru', '')} {market_bias.get('coins', '')}".upper()):
-                await _tell(int(uid_str), f"🚨 <b>Новость касается {coin} против вашей сделки ({pos['side']})</b>\n\n"
+                await _tell(int(uid_str), f"🚨 <b>Критическая новость по {coin}</b>\n\n"
                                           f"📰 {html.escape(shorten(market_bias.get('title_ru', ''), 120))}\n"
-                                          f"Рассмотрите закрытие позиции.")
+                                          "Новость имеет противоположный рыночный фон и прямо относится к монете. "
+                                          "Проверьте источник и уровни риска; это не команда и не рекомендация закрывать позицию.")
     if len(_news_alerted) > 2000:
         _news_alerted.clear()
 
@@ -4683,7 +4800,8 @@ async def mini_dispatch(uid, u, act, d):
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
                 "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE),
                 "rss_mb": _current_rss_mb(), "peak_rss_mb": _rss_mb(),
-                "last_scan": dict(last_scan_info)}
+                "runtime_memory": _runtime_memory_snapshot() if uid in ADMIN_IDS else None,
+                "last_scan": _scan_info_for_user(uid)}
 
     if act == "risk_calc":
         try:
@@ -5005,7 +5123,9 @@ async def mini_dispatch(uid, u, act, d):
             if oc != coin and od.get("side") == res["side"] and any(oc in g and coin in g for g in CORRELATION_GROUPS):
                 return {"error": f"Уже открыт {od['side']} по {oc}: {coin} сильно коррелирует"}
         if not open_tracked_position(uid, coin, res):
-            return {"error": "Сделка по монете уже открыта"}
+            if get_open_position(uid, coin):
+                return {"error": "Сделка по монете уже открыта"}
+            return {"error": "Этот сигнал уже сопровождался и был закрыт. Дождитесь нового сигнала."}
         await _tell(uid, f"⏳ <b>Лимитный ордер: {coin} ({res['side']})</b>\nЦена входа: <code>{fmt(res['entry'])}</code>\n"
                          f"Сопровождение включено. Если цена входа отличается от вашей биржи, измените её в Mini App.")
         return {"msg": "Ордер поставлен, ждём вход"}
@@ -5335,6 +5455,7 @@ async def deliver_new_signal(item, r, title="СИГНАЛ"):
 
 def sig_as_res(x):
     return {"side": x["side"], "is_long": x["is_long"], "entry": x["entry"], "coin": x["coin"],
+            "signal_id": x.get("id"), "signal_ts": x.get("ts"),
             "tps": [x["tp1"], x["tp2"], x["tp3"]], "sls": [x["sl1"], x.get("sl2", x["sl1"])], "price": x.get("live_price", x["entry"])}
 
 
@@ -5351,7 +5472,9 @@ async def handle_signal_button(cb, data):
             if oc != coin and od["side"] == side and any(oc in g and coin in g for g in CORRELATION_GROUPS):
                 return await safe_answer(cb, f"Уже открыт {side} по {oc}: монеты коррелируют", True)
         if not open_tracked_position(uid, coin, res):
-            return await safe_answer(cb, "Сделка по монете уже открыта")
+            message = ("Сделка по монете уже открыта" if get_open_position(uid, coin)
+                       else "Этот сигнал уже закрыт. Дождитесь нового сигнала.")
+            return await safe_answer(cb, message, True)
         await safe_answer(cb, "Лимит поставлен")
         await _tell(uid, f"⏳ Сопровождение {coin} {side}: вход <code>{fmt(x['entry'])}</code>, TP1-3 и итог придут сюда.")
     else:
@@ -5402,7 +5525,8 @@ async def notify_sig_result(x, status, max_tp):
         text = f"🚫 <b>{head}: цель взята без входа</b>. Идея упущена, новых входов не ищем."
     else:
         text = f"⌛ <b>{head}: вход не исполнился за срок</b>. Идея закрыта без результата."
-    await notify_signal_holders(x["coin"], x["side"], text, kb=kb_nav(back=False), extra_uids=x.get("sent_to", []))
+    await notify_signal_holders(x["coin"], x["side"], text, kb=kb_nav(back=False), extra_uids=x.get("sent_to", []),
+                                order_key=_tracked_order_key(x["coin"], sig_as_res(x)))
 
 
 async def global_signal_monitor_loop():
@@ -5437,11 +5561,13 @@ async def global_signal_monitor_loop():
                 if prev_status == "active" and status == "in_trade":
                     await notify_signal_holders(coin, x["side"], f"🎯 <b>{coin} {x['side']}: лимит исполнен</b>\n"
                                                                  f"Вход <code>{fmt(x['entry'])}</code>. Ведём до TP1.",
-                                                kb=kb_nav(back=False), extra_uids=x.get("sent_to", []))
+                                                kb=kb_nav(back=False), extra_uids=x.get("sent_to", []),
+                                                order_key=_tracked_order_key(coin, sig_as_res(x)))
                 if max_tp > prev_tp and status == "in_trade":
                     await notify_signal_holders(coin, x["side"], f"🎯 <b>{coin} {x['side']}: достигнут TP{max_tp}</b>\n"
-                                                                 f"Стоп переносится за цену входа.",
-                                                kb=kb_nav(back=False), extra_uids=x.get("sent_to", []))
+                                                                 "Стоп переносится в безубыток только после подтверждённого движения цены на +2,5%.",
+                                                kb=kb_nav(back=False), extra_uids=x.get("sent_to", []),
+                                                order_key=_tracked_order_key(coin, sig_as_res(x)))
                 if status in ("win", "loss", "missed", "expired") and prev_status != status:
                     x["closed_ts"] = time.time()
                     x["r"] = signal_r(status, max_tp)
@@ -5463,10 +5589,12 @@ async def invalidate_signal(x, reason):
     x["r"] = 0.0
     text = (f"🚫 <b>Сигнал снят: {x['coin']} ({x['side']})</b>\n\n{reason}\n"
             f"Вход был <code>{fmt(x['entry'])}</code>. Не входите по этой идее.")
-    await notify_signal_holders(x["coin"], x["side"], text, kb=webapp_kb(x["coin"]), extra_uids=x.get("sent_to", []))
+    await notify_signal_holders(x["coin"], x["side"], text, kb=webapp_kb(x["coin"]), extra_uids=x.get("sent_to", []),
+                                order_key=_tracked_order_key(x["coin"], sig_as_res(x)))
     for uid, u in list(_users().items()):
         pos = (u.get("open_positions") or {}).get(x["coin"])
         if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
+            _remember_closed_order(int(uid), pos)
             set_user_open_position(int(uid), x["coin"], None)
 
 
@@ -5864,6 +5992,7 @@ async def hourly_rows(coin):
         return ent[1]
     rows = await fetch_history(coin, "1h", 60, min_rows=30)
     _hourly_cache[coin] = (time.time(), rows)
+    _trim_timed_cache(_hourly_cache, 80)
     return rows
 
 
@@ -6371,10 +6500,33 @@ async def main_admin_scan_report(m: types.Message):
             f"К анализу допущено: {x.get('backtest_ok', 0)} · слабый бэктест: {x.get('bt_rejected', 0)} · без истории: {x.get('bt_unavailable', 0)} · ошибок истории: {x.get('bt_errors', 0)}\n"
             f"Ошибок анализа: {x.get('analysis_errors', 0)} · ЖДАТЬ: {x.get('analysis_wait', 0)} · качество: {x.get('quality_rejected', 0)}\n"
             f"Готово: {x.get('final', 0)} · опубликовано: {x.get('sent', 0)}\n"
+            f"RAM при скане: {x.get('rss_mb') or _current_rss_mb()} MB · пик процесса: {_rss_mb()} MB\n"
+            f"Последняя очистка RAM: {html.escape(str(x.get('memory_trim') or 'не требовалась'))}\n"
             f"Причина: {html.escape(str(x.get('diagnostic', '—')))}")
     if errors:
         body += "\n\n<b>Технические ошибки:</b>\n" + "\n".join(html.escape(str(e)) for e in errors[:3])
     await m.answer(body, parse_mode="HTML")
+
+
+@dp.message(Command("ram_report"))
+async def main_admin_ram_report(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    x = _runtime_memory_snapshot()
+    caches = x.get("cache_sizes", {})
+    trim = x.get("last_trim") or {}
+    protected = x.get("protected_history", {})
+    await m.answer(
+        "🧠 <b>IXCLY: память сервера</b>\n"
+        f"RAM: {x.get('rss_mb')} MB · пик процесса: {x.get('peak_rss_mb')} MB\n"
+        f"Порог очистки: {x.get('trim_at_mb')} MB · остановки: {x.get('stop_at_mb')} MB\n"
+        f"Кэши: analysis {caches.get('analysis', 0)}, backtest {caches.get('backtest', 0)}, "
+        f"AI {caches.get('ai', 0)}, funding {caches.get('funding', 0)}, "
+        f"orderbook {caches.get('orderbook', 0)}, hourly {caches.get('hourly', 0)}, "
+        f"intelligence {caches.get('intelligence', 0)}, API {caches.get('api', 0)}\n"
+        f"Защищённые данные (не очищаются): сигналы {protected.get('signals', 0)}, "
+        f"сделки {protected.get('trade_records', 0)}, Paper-история {protected.get('paper_records', 0)}\n"
+        f"Последняя очистка: {html.escape(str(trim) if trim else 'ещё не выполнялась')}", parse_mode="HTML")
 
 
 @dp.message(Command("tickets"))
@@ -6513,6 +6665,7 @@ def admin_keyboard():
          B(text="🔍 Скан-тест", callback_data="admin:scan_test")],
         [B(text="🔧 Диагностика", callback_data="admin:diag"), B(text="💾 Бэкап", callback_data="admin:backup")],
         [B(text="📥 Восстановить", callback_data="admin:restore"), B(text="⏳ Таймеры", callback_data="admin:timers")],
+        [B(text="🧠 Память / RAM", callback_data="admin:ram_report")],
     ])
 
 
@@ -6693,9 +6846,25 @@ if admin_dp:
             sigs = await scan_once(send=False)
             await cb.message.answer(f"Итог: {len(sigs)} · " + ", ".join(s["coin"] for s in sigs[:10]) if sigs else "Сигналов нет")
         elif act == "diag":
-            await cb.message.answer(f"ccxt: {'✅' if ccxt else '❌'} · шифрование: {'✅' if cipher else '❌'}\n"
+            await cb.message.answer(f"Market data: native async HTTP · шифрование: {'✅' if cipher else '❌'}\n"
                                     f"Чатов: {len(active_chats)} · WEBAPP: {WEBAPP_URL or 'не задан'}\n"
-                                    f"Пороги: stage1 {CONF_STAGE1:.0f}, final {CONF_FINAL:.0f}")
+                                    f"Пороги: stage1 {CONF_STAGE1:.0f}, final {CONF_FINAL:.0f}\n"
+                                    f"RAM: {_current_rss_mb()} MB · пик: {_rss_mb()} MB")
+        elif act == "ram_report":
+            x = _runtime_memory_snapshot()
+            c = x.get("cache_sizes", {})
+            trim = x.get("last_trim") or {}
+            protected = x.get("protected_history", {})
+            await cb.message.answer(
+                "🧠 <b>IXCLY: память сервера</b>\n"
+                f"RAM: {x.get('rss_mb')} MB · пик процесса: {x.get('peak_rss_mb')} MB\n"
+                f"Порог очистки: {x.get('trim_at_mb')} MB · остановки: {x.get('stop_at_mb')} MB\n"
+                f"Кэши: analysis {c.get('analysis', 0)}, backtest {c.get('backtest', 0)}, AI {c.get('ai', 0)}, "
+                f"funding {c.get('funding', 0)}, orderbook {c.get('orderbook', 0)}, hourly {c.get('hourly', 0)}, "
+                f"intelligence {c.get('intelligence', 0)}, API {c.get('api', 0)}\n"
+                f"Защищённые данные: сигналы {protected.get('signals', 0)}, сделки {protected.get('trade_records', 0)}, "
+                f"Paper-история {protected.get('paper_records', 0)}\n"
+                f"Последняя очистка: {html.escape(str(trim) if trim else 'ещё не выполнялась')}", parse_mode="HTML")
         elif act == "backup":
             await cb.message.answer("💾 Бэкап отправлен." if await telegram_backup("вручную") else "Бэкап не отправлен.")
         elif act == "restore":
@@ -6725,6 +6894,91 @@ if admin_dp:
 # =====================================================================
 # ОБСЛУЖИВАНИЕ ПАМЯТИ, ЗАПУСК
 # =====================================================================
+def _trim_timed_cache(store, max_items):
+    """Bound timestamp-first caches without discarding the newest useful entries."""
+    try:
+        while len(store) > max_items:
+            oldest = min(store, key=lambda k: float((store[k][0] if isinstance(store[k], (tuple, list)) else 0) or 0))
+            store.pop(oldest, None)
+    except Exception:
+        pass
+
+
+MEMORY_TRIM_INFO = {}
+
+
+def _runtime_memory_snapshot():
+    with STATE_LOCK:
+        protected = {
+            "signals": len(STATE.get("signal_history", [])),
+            "trade_records": sum(len(u.get("trade_log", [])) for u in STATE.get("users", {}).values() if isinstance(u, dict)),
+            "paper_records": sum(len(a.get("history", [])) for u in STATE.get("paper", {}).values()
+                                  for a in (u.get("accounts", []) if isinstance(u, dict) else [])),
+        }
+    return {
+        "rss_mb": _current_rss_mb(), "peak_rss_mb": _rss_mb(),
+        "trim_at_mb": float(os.getenv("RAM_TRIM_MB", "390")),
+        "stop_at_mb": float(os.getenv("RAM_SCAN_STOP_MB", "440")),
+        "cache_sizes": {
+            "analysis": len(analysis_cache), "backtest": len(bt_cache), "ai": len(_ai_cache),
+            "funding": len(_funding_cache), "orderbook": len(_ob_cache), "hourly": len(_hourly_cache),
+            "intelligence": cleanup_intelligence.__globals__.get("CACHE_MAX", 0) and len(cleanup_intelligence.__globals__.get("_cache", {})),
+            "api": len(API_CACHE) if "API_CACHE" in globals() else 0,
+        },
+        "last_trim": dict(MEMORY_TRIM_INFO or last_scan_info.get("memory_trim") or {}),
+        "protected_history": protected,
+    }
+
+
+def _scan_info_for_user(uid):
+    diagnostic = str(last_scan_info.get("diagnostic", ""))
+    if uid not in ADMIN_IDS and is_memory_guard_reason(diagnostic):
+        return None
+    return dict(last_scan_info)
+
+
+def _memory_pressure_cleanup(force=False):
+    """Prune volatile/recomputable caches only. Never clear signal_history, trade_log, paper history, or stats."""
+    global MEMORY_TRIM_INFO
+    before = _current_rss_mb()
+    trim_at = float(os.getenv("RAM_TRIM_MB", "390"))
+    if not force and (before is None or before < trim_at):
+        return {"before_mb": before, "after_mb": before, "trimmed": False, "cache_sizes": {}}
+    now = time.time()
+    stores = (
+        (analysis_cache, 24, 600), (bt_cache, 90, 6 * 3600), (_ai_cache, 64, 1200),
+        (_funding_cache, 60, 3600), (_ob_cache, 40, 600), (_hourly_cache, 40, 600),
+    )
+    for store, max_items, ttl in stores:
+        for key, value in list(store.items()):
+            try:
+                stamp = float(value[0])
+            except Exception:
+                stamp = 0
+            if now - stamp > ttl:
+                store.pop(key, None)
+        _trim_timed_cache(store, max_items)
+    try:
+        cleanup_intelligence(now)
+    except Exception:
+        pass
+    if len(fetch_errors) > 40:
+        fetch_errors.clear()  # transient API error diagnostics only; not signal or trade history
+    if len(API_CACHE) > 120:
+        # API responses are reproducible and short-lived; retain only a bounded recent subset.
+        for key in list(API_CACHE)[:len(API_CACHE) - 120]:
+            API_CACHE.pop(key, None)
+    _release_memory()
+    after = _current_rss_mb()
+    MEMORY_TRIM_INFO = {"before_mb": before, "after_mb": after, "trimmed": True,
+                        "cache_sizes": {"analysis": len(analysis_cache), "backtest": len(bt_cache),
+                                        "ai": len(_ai_cache), "funding": len(_funding_cache),
+                                        "orderbook": len(_ob_cache), "hourly": len(_hourly_cache),
+                                        "api": len(API_CACHE)}}
+    last_scan_info["memory_trim"] = dict(MEMORY_TRIM_INFO)
+    return dict(MEMORY_TRIM_INFO)
+
+
 def _release_memory():
     gc.collect()
     try:
@@ -6760,13 +7014,16 @@ async def memory_janitor_loop():
                 for k in [k for k, t in store.items() if t < now]:
                     store.pop(k, None)
             if len(fetch_errors) > 100:
-                fetch_errors.clear()
+                fetch_errors.clear()  # transient fetch-error buffer only
             if len(nav_stack) > 1000:
-                nav_stack.clear()
-            await asyncio.to_thread(_release_memory)
+                nav_stack.clear()  # UI navigation stack only
+            if (_current_rss_mb() or 0) >= float(os.getenv("RAM_TRIM_MB", "390")):
+                await asyncio.to_thread(_memory_pressure_cleanup, True)
+            else:
+                await asyncio.to_thread(_release_memory)
         except Exception as e:
             log.warning(f"janitor: {e}")
-        await asyncio.sleep(600)
+        await asyncio.sleep(300)
 
 
 async def churn_offer_loop():
