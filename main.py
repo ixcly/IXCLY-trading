@@ -208,6 +208,7 @@ def clean_key(k):
 
 BOT_TOKEN = clean_key(os.getenv("BOT_TOKEN"))
 INPUT_BOT_TOKEN = clean_key(os.getenv("INPUT_BOT_TOKEN"))
+NEWS_CHANNEL_URL = clean_key(os.getenv("NEWS_CHANNEL_URL")) or "https://t.me/ixcly_news"
 ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
@@ -244,7 +245,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.5.0-BILLING"
+VERSION = "4.5.1-MAX-SINGLE"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -387,14 +388,14 @@ except PermissionError as _data_dir_error:
 STATE_FILE = os.path.join(_DATA_DIR, "bot_state.json")
 LEGACY_STATE_FILE = os.path.join(os.getcwd(), "bot_state.json")
 LOCAL_BACKUP_FILES = (STATE_FILE + ".bak", STATE_FILE + ".bak2")
-BACKUP_INTERVAL = max(900, int(os.getenv("IXCLY_BACKUP_INTERVAL", "21600")))  # 6 часов по умолчанию
+BACKUP_INTERVAL = max(900, int(os.getenv("IXCLY_BACKUP_INTERVAL", "900")))  # 15 минут по умолчанию
 STATE_LOCK = threading.RLock()
-STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}, "orders": {}, "payments": {}}
+STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}, "orders": {}, "payments": {}, "news_publisher_state": {}}
 state_dirty = False
 backup_dirty = False
 last_backup_ts = 0.0
 STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper", "support_tickets",
-              "orders", "payments")  # orders/payments — заказы и платежи Stars, переживают рестарт и попадают в бэкап
+              "orders", "payments", "news_publisher_state")  # бизнес-история, платежи и отметки публикаций переживают рестарт/бэкап
 
 
 def state_touch(important=True):
@@ -641,8 +642,9 @@ def set_user_open_position(user_id, coin, data):
 
 # ---------------- история сигналов и архив анализов ----------------
 def load_signal_history():
+    """Возвращает весь сохранённый архив сигналов; очистка по 30 дням скрывала историю."""
     with STATE_LOCK:
-        return [x for x in STATE["signal_history"] if time.time() - x.get("ts", 0) < 30 * 86400]
+        return list(STATE.get("signal_history", []))
 
 
 def save_signal_history(hist):
@@ -3406,8 +3408,7 @@ def get_active_signals():
 def signals_for(uid, category="Все"):
     items = get_active_signals()
     if category == "Все":
-        mode = _users().get(str(uid), {}).get("trade_mode", "balanced") if uid else "balanced"
-        return [x for x in items if x.get("type") in MODE_TYPES.get(mode, MODE_TYPES["balanced"])]
+        return items
     if category.startswith("mode:"):
         return [x for x in items if x.get("type") in MODE_TYPES.get(category[5:], ())]
     return [x for x in items if x.get("type") == category]
@@ -4109,6 +4110,24 @@ async def scanner_loop():
 # =====================================================================
 # ПОЗИЦИИ, ЛИЧНАЯ СТАТИСТИКА, СОПРОВОЖДЕНИЕ
 # =====================================================================
+def record_trade_event(uid, coin, pos, event, note="", price=None):
+    """Сохраняет журнал жизненного цикла ордера/сделки, не только итоговую статистику."""
+    now = time.time()
+    item = {
+        "ts": now, "coin": str(coin), "side": pos.get("side"), "event": str(event),
+        "entry": pos.get("entry_price"), "price": price,
+        "tp1": pos.get("tp1"), "tp2": pos.get("tp2"), "tp3": pos.get("tp3"),
+        "sl": pos.get("sl1"), "order_key": pos.get("order_key"), "note": str(note or "")[:240],
+    }
+    with STATE_LOCK:
+        user = STATE["users"].setdefault(str(uid), {"active": True})
+        events = user.setdefault("trade_events", [])
+        events.append(item)
+        user["trade_events"] = events[-500:]
+    state_touch()
+    return item
+
+
 def _tracked_order_key(coin, res):
     """Stable key for one signal limit order; a closed signal cannot be re-announced as a fresh order."""
     identity = res.get("signal_id") or res.get("signal_ts") or res.get("ts") or res.get("created_at")
@@ -4164,13 +4183,15 @@ def open_tracked_position(uid, coin, res):
     closed_keys = _users().get(str(uid), {}).get("closed_order_keys", [])
     if order_key in closed_keys:
         return False
-    set_user_open_position(uid, coin, {
+    position = {
         "order_key": order_key,
         "side": res["side"], "entry_price": float(res["entry"]), "created_at": time.time(), "entered_at": None,
         "entry_source": "user" if res.get("entry_override") else "signal",
         "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
         "sl_orig": res["sls"][0], "risk_pct": get_user_risk_settings(uid)["risk_pct"],
-        "notified_close": False, "waiting_entry": True, "peak_pnl": 0.0})
+        "notified_close": False, "waiting_entry": True, "peak_pnl": 0.0}
+    set_user_open_position(uid, coin, position)
+    record_trade_event(uid, coin, position, "limit_created", "Пользователь подтвердил вход по сигналу")
     return True
 
 
@@ -4208,6 +4229,7 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
     with STATE_LOCK:
         u = STATE["users"].setdefault(str(uid), {"active": True})
         u["trade_log"] = (u.get("trade_log", []) + [rec])[-300:]
+    record_trade_event(uid, coin, pos, "closed", reason, price=exit_price)
     state_touch()
     return rec
 
@@ -4227,6 +4249,7 @@ async def close_position_manual(uid, coin):
         _ensure_tracked_order_key(uid, coin, pos)
     if pos and pos.get("waiting_entry"):
         _remember_closed_order(uid, pos)
+        record_trade_event(uid, coin, pos, "limit_cancelled", "Пользователь отменил лимитный вход")
     if pos and not pos.get("waiting_entry"):
         price = await get_simple_price(coin)
         if price:
@@ -4318,6 +4341,10 @@ async def check_position(user_id, coin, pos):
         return
     price = await get_simple_price(coin)
     if not price:
+        cached = PRICES.get(coin) or LIVE.get(coin)
+        if cached and time.time() - float(cached.get("ts", 0) or 0) <= 90:
+            price = float(cached.get("price", 0) or 0)
+    if not price:
         return
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
@@ -4339,6 +4366,7 @@ async def check_position(user_id, coin, pos):
             notify_entry = not pos.get("entry_notified", False)
             pos["entry_notified"] = True
             set_user_open_position(user_id, coin, pos)
+            record_trade_event(user_id, coin, pos, "entry_filled", "Лимитный вход исполнен", price=price)
             if notify_entry:
                 await _tell(user_id, f"🎯 <b>Лимитный ордер сработал: {coin}</b>\n\nНаправление: <b>{side}</b>\n"
                                      f"Цена входа: <code>{fmt(entry)}</code>\n🚀 Сделка на сопровождении.",
@@ -4346,6 +4374,7 @@ async def check_position(user_id, coin, pos):
                             if WEBAPP_URL else None)
         elif time.time() - pos.get("created_at", time.time()) > 24 * 3600:
             _remember_closed_order(user_id, pos)
+            record_trade_event(user_id, coin, pos, "limit_expired", "Цена не дошла до входа за 24 часа", price=price)
             set_user_open_position(user_id, coin, None)
             await _tell(user_id, f"⌛ <b>Ордер отменён: {coin}</b>\nЦена не дошла до входа за 24 часа.")
         return
@@ -4374,6 +4403,7 @@ async def check_position(user_id, coin, pos):
             current_sl = entry
             pos["breakeven_moved"] = True
             set_user_open_position(user_id, coin, pos)
+            record_trade_event(user_id, coin, pos, "breakeven", "Стоп перенесён на цену входа", price=price)
             await _tell(user_id, f"🛡 <b>Защита безубытка: {coin}</b>\nПрибыль достигла +2,5% ({pnl:+.2f}%). Стоп перенесён на цену входа.")
 
     if pos["hit_tp1"] and (pos.get("breakeven_moved") or pos.get("hit_tp2")) and not pos["hit_tp3"]:
@@ -4384,6 +4414,7 @@ async def check_position(user_id, coin, pos):
             if better:
                 pos["sl1"] = current_sl = new_sl
                 set_user_open_position(user_id, coin, pos)
+                record_trade_event(user_id, coin, pos, "trailing_stop", "Трейлинг-стоп подтянут", price=price)
 
     if pnl <= -5.0 and not pos.get("notified_urgent"):
         pos["notified_urgent"] = True
@@ -4400,16 +4431,19 @@ async def check_position(user_id, coin, pos):
     elif sign * (price - tp3) >= 0 and not pos["hit_tp3"]:
         reason, urgency = "🏆 Достигнут TP3. Сделка полностью закрыта.", "success"
         pos["hit_tp3"] = True
+        record_trade_event(user_id, coin, pos, "tp3", "Достигнута третья цель", price=price)
         exit_price, pos["notified_close"], why = tp3, True, "TP3"
     elif sign * (price - tp2) >= 0 and not pos["hit_tp2"]:
         reason, urgency = "✅ Достигнут TP2. Стоп подтянут на TP1.", "success"
         pos["hit_tp2"] = True
         pos["sl1"] = tp1
         set_user_open_position(user_id, coin, pos)
+        record_trade_event(user_id, coin, pos, "tp2", "Достигнута вторая цель; стоп подтянут к TP1", price=price)
     elif sign * (price - tp1) >= 0 and not pos["hit_tp1"]:
         reason, urgency = "✅ Достигнут TP1. Первая цель зафиксирована; стоп переносится в безубыток только после +2,5%.", "success"
         pos["hit_tp1"] = True
         set_user_open_position(user_id, coin, pos)
+        record_trade_event(user_id, coin, pos, "tp1", "Достигнута первая цель", price=price)
 
     if not reason and not pos.get("notified_close") and time.time() - pos.get("last_warn", 0) > 6 * 3600:
         live = LIVE.get(coin)
@@ -4448,11 +4482,15 @@ async def position_monitor_loop():
     while True:
         try:
             for uid_str, u in list(_users().items()):
-                if not has_access(int(uid_str)):
+                # Уже открытая пользователем позиция сопровождается до закрытия,
+                # даже если Premium/VIP истёк после входа.
+                try:
+                    uid = int(uid_str)
+                except (TypeError, ValueError):
                     continue
                 for coin, pos in list((u.get("open_positions") or {}).items()):
                     try:
-                        await check_position(int(uid_str), coin, pos)
+                        await check_position(uid, coin, pos)
                     except Exception as e:
                         log.info(f"check_position {coin}: {e}")
                     await asyncio.sleep(0.3)
@@ -4527,6 +4565,10 @@ async def news_watcher_loop():
     await asyncio.sleep(40)
     while True:
         try:
+            if not bot_flags.get("news_enabled", True):
+                next_timers["news_watcher"] = time.time() + 600
+                await asyncio.sleep(600)
+                continue
             entries = await get_news_entries()
             if entries:
                 if last_news_link is None:
@@ -4569,24 +4611,8 @@ async def news_watcher_loop():
                                         reason=f"<i>{html.escape(shorten(title_ru, 150))}</i>\nBTC за 15 минут: {move:+.2f}%",
                                         advice="Риск временно повышен. Дождитесь стабилизации; новостной заголовок сам по себе не считается сигналом к продаже.",
                                         pause_mins=20))
-                    if bot_flags["news_enabled"] and active_chats:
-                        text, img = await prepare_news()
-                        if text:
-                            sent = 0
-                            for cid in list(active_chats):
-                                if not get_user_notif_settings(cid)["news"] or not has_access(cid):
-                                    continue
-                                try:
-                                    await _send_new(cid, text, kb_nav([[InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")]], back=False), img)
-                                    sent += 1
-                                    await asyncio.sleep(0.05)
-                                except TelegramForbiddenError:
-                                    # Пользователь заблокировал бота — не тратим запросы на него в следующих рассылках
-                                    mark_users_inactive([cid])
-                                    active_chats.discard(cid)
-                                except Exception as e:
-                                    log.info(f"news send {cid}: {e}")
-                            stats["news_sent"] += sent
+                    # Editorial news are published by the standalone IXCLY NEWS service.
+                    # Never send the legacy news feed to private chats (premium or free).
         except Exception as e:
             log.warning(f"news_watcher: {e}", exc_info=True)
         next_timers["news_watcher"] = time.time() + 600
@@ -5468,23 +5494,24 @@ async def mini_dispatch(uid, u, act, d):
     if act == "portfolio":
         return {"risk": get_user_risk_settings(uid), "open_risk": calculate_portfolio_risk(uid), "mode": uu.get("trade_mode", "balanced"),
                 "positions": _enrich_user_positions(uid), "saved": [_sig_item(s, False) for s in get_user_saved_signals(uid)],
-                "history": uu.get("trade_history", [])[-15:]}
+                "history": uu.get("trade_log", [])[-15:],
+                "events": uu.get("trade_events", [])[-30:]}
 
     if act == "mystats":
         return personal_stats(uid)
 
     if act == "stats":
-        uniq, seen = [], set()
-        for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
-            if f"{x['coin']}_{x['side']}" not in seen:
-                seen.add(f"{x['coin']}_{x['side']}")
-                uniq.append(x)
-        cnt = {s: sum(1 for x in uniq if x.get("status") == s) for s in ("win", "missed", "loss", "expired", "cancelled")}
-        cnt["active"] = len(get_active_signals())
-        lists = {s: [_sig_item(x, False) for x in uniq if x.get("status") == s][:30] for s in ("win", "missed", "loss", "expired", "cancelled")}
-        lists["active"] = [_sig_item(x) for x in get_active_signals()][:30]
+        # Полная история сигналов: не схлопываем повторные сигналы по одной монете/стороне.
+        archive = sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True)
+        statuses = ("win", "missed", "loss", "expired", "cancelled")
+        cnt = {status: sum(1 for item in archive if item.get("status") == status) for status in statuses}
+        active = get_active_signals()
+        cnt["active"] = len(active)
+        lists = {status: [_sig_item(item, False) for item in archive if item.get("status") == status][:30]
+                 for status in statuses}
+        lists["active"] = [_sig_item(item) for item in active][:30]
         closed = cnt["win"] + cnt["loss"]
-        return {"counts": cnt, "lists": lists, "total": len(uniq),
+        return {"counts": cnt, "lists": lists, "total": len(archive),
                 "wr": cnt["win"] / closed * 100 if closed else 0.0}
 
     if act == "liquidations":
@@ -5620,6 +5647,7 @@ def bot_main_keyboard():
     rows.append([InlineKeyboardButton(text="🔥 Сигналы", web_app=WebAppInfo(url=webapp_link(tab="signals")))] if WEBAPP_URL else
                 [InlineKeyboardButton(text="🔥 Сигналы", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="💎 Подписка", callback_data="sub:open")])
+    rows.append([InlineKeyboardButton(text="📰 IXCLY NEWS · Новости крипторынка", url=NEWS_CHANNEL_URL)])
     rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notif:menu")])
     rows.append([InlineKeyboardButton(text="🎓 Обучение новичка", callback_data="tutorial:start")])
     rows.append([InlineKeyboardButton(text="📘 Инструкция и риски", callback_data="guide:open")])
@@ -5629,7 +5657,9 @@ def bot_main_keyboard():
 
 
 WELCOME_BOT = ("👋 <b>IXCLY PRO</b>\n\nВся работа теперь в мини-приложении: сигналы, графики, портфель, статистика.\n"
-               "Сюда я присылаю уведомления: новые сигналы, сопровождение сделок, итоги и снятые идеи.")
+               "Сюда я присылаю уведомления: новые сигналы, сопровождение сделок, итоги и снятые идеи.\n\n"
+               f"📰 <b>Читайте IXCLY NEWS</b> — новости криптовалют России и мира, Bitcoin, GPT и аналитика: "
+               f"<a href=\"{NEWS_CHANNEL_URL}\">@ixcly_news</a>")
 
 
 # Пошаговое обучение хранит только статус/номер урока в существующем STATE пользователя.
@@ -5782,6 +5812,7 @@ async def cmd_start(m: types.Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎓 Начать обучение", callback_data="tutorial:start")],
             [InlineKeyboardButton(text="⏭ Пропустить обучение", callback_data="tutorial:skip")],
+            [InlineKeyboardButton(text="📰 IXCLY NEWS · Новости крипторынка", url=NEWS_CHANNEL_URL)],
         ])
         return await m.answer(intro, parse_mode="HTML", reply_markup=kb)
     await welcome_for(m.chat.id, m.from_user.id)
@@ -6548,6 +6579,7 @@ def paywall_kb(uid=None):
     """Тарифы для закрытого доступа (напоминания, /start без доступа)."""
     rows = [[InlineKeyboardButton(text=f"💳 {PLAN_TITLE[d]} · {price_for_user(uid, d) if uid is not None else s}⭐", callback_data=f"buy:{d}")] for d, s in PLANS.items()]
     rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:help")])
+    rows.append([InlineKeyboardButton(text="📰 IXCLY NEWS · Новости крипторынка", url=NEWS_CHANNEL_URL)])
     rows.append([InlineKeyboardButton(text="📘 Инструкция и риски", callback_data="guide:open")])
     rows.append([InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -7074,7 +7106,8 @@ async def welcome_for(chat_id, uid, edit_msg=None):
     if has_access(uid):
         return await present(chat_id, WELCOME_BOT + offer_notice, bot_main_keyboard(), edit_msg=edit_msg)
     return await present(chat_id, "🔒 <b>Доступ закрыт.</b>\nПробный период закончился или не активирован. "
-                                  "Оплатите подписку, чтобы получать сигналы и сопровождение сделок." + offer_notice,
+                         "Оплатите подписку, чтобы получать сигналы и сопровождение сделок.\n\n"
+                         f"📰 <b>Новости доступны всем:</b> подписывайтесь на <a href=\"{NEWS_CHANNEL_URL}\">IXCLY NEWS</a> — крипторынок, Bitcoin, Россия и GPT." + offer_notice,
                          paywall_kb(uid), edit_msg=edit_msg)
 
 
@@ -7626,8 +7659,8 @@ def admin_keyboard():
     B = InlineKeyboardButton
     return InlineKeyboardMarkup(inline_keyboard=[
         [B(text="📊 Статистика", callback_data="admin:stats"), B(text="👥 Пользователи", callback_data="admin:users")],
-        [B(text="📰 Новость сейчас", callback_data="admin:news_now"),
-         B(text=f"🔔 Новости: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="admin:toggle_news")],
+        [B(text="📰 Статус IXCLY NEWS", callback_data="admin:news_now"),
+         B(text=f"🧠 Риск новостей: {'ВКЛ' if bot_flags['news_enabled'] else 'ВЫКЛ'}", callback_data="admin:toggle_news")],
         [B(text=f"🚨 Сканер: {'ВКЛ' if bot_flags['alerts_enabled'] else 'ВЫКЛ'}", callback_data="admin:toggle_scan"),
          B(text="🔍 Скан-тест", callback_data="admin:scan_test")],
         [B(text="🔧 Диагностика", callback_data="admin:diag"), B(text="💾 Бэкап", callback_data="admin:backup")],
@@ -7753,7 +7786,7 @@ async def backup_status_command(m: types.Message):
             f"🕒 <b>Изменён:</b> {saved}\n"
             f"🗂 <b>Локальных копий:</b> {len(local_baks)} ({local_bak_size / 1024:.1f} KB)\n"
             f"☁️ <b>Telegram:</b> {tg_status}\n"
-            f"⏱ <b>Интервал:</b> {BACKUP_INTERVAL // 3600} ч\n"
+            f"⏱ <b>Интервал:</b> {BACKUP_INTERVAL // 60} мин\n"
             f"🔄 <b>Есть несохранённые изменения:</b> {'да' if backup_dirty else 'нет/не отмечено'}\n\n"
             "Важно: статус последнего бэкапа отслеживается в текущем процессе. После перезапуска он может отображаться как неизвестный, пока новая копия не будет подтверждена."
         )
@@ -7832,7 +7865,7 @@ if admin_dp:
             key = "news_enabled" if act == "toggle_news" else "alerts_enabled"
             bot_flags[key] = not bot_flags[key]
             state_touch()
-            await safe_answer(cb, f"{'Новости' if key == 'news_enabled' else 'Сканер'}: {'ВКЛ' if bot_flags[key] else 'ВЫКЛ'}")
+            await safe_answer(cb, f"{'Риск-анализ новостей' if key == 'news_enabled' else 'Сканер'}: {'ВКЛ' if bot_flags[key] else 'ВЫКЛ'}")
             try:
                 await cb.message.edit_reply_markup(reply_markup=admin_keyboard())
             except Exception:
@@ -7850,17 +7883,14 @@ if admin_dp:
                 for uid, u in list(_users().items())[-30:] if isinstance(u, dict)]
             await cb.message.answer("\n".join(lines), parse_mode="HTML")
         elif act == "news_now":
-            text, img = await prepare_news(force=True)
-            if not text:
-                return await cb.message.answer("Свежих новостей нет")
-            sent = 0
-            for cid in list(active_chats):
-                try:
-                    await _send_new(cid, text, None, img)
-                    sent += 1
-                except Exception:
-                    pass
-            await cb.message.answer(f"✅ Отправлено: {sent}")
+            news_token_ready = bool(clean_key(os.getenv("IXCLY_NEWS_BOT_TOKEN")))
+            await cb.message.answer(
+                "📰 <b>IXCLY NEWS</b>\n"
+                f"Канал: <a href=\"{html.escape(NEWS_CHANNEL_URL, quote=True)}\">@ixcly_news</a>\n"
+                f"Новостной бот: {'токен настроен' if news_token_ready else 'токен ещё не добавлен в Render'}\n\n"
+                "Обычные новости не рассылаются в личные сообщения IXCLY Trading. "
+                "Публикации выходят в новостном канале. Здесь остаётся только отдельный риск-анализ критических событий.",
+                parse_mode="HTML", disable_web_page_preview=True)
         elif act == "scan_test":
             await cb.message.answer("🔍 Скан без рассылки…")
             sigs = await scan_once(send=False)
@@ -8147,6 +8177,35 @@ async def price_feed_loop():
 
 
 
+async def news_publisher_loop(stop_event):
+    """Запускает отдельного Telegram-бота новостей внутри того же Render-процесса."""
+    token = clean_key(os.getenv("IXCLY_NEWS_BOT_TOKEN"))
+    if not token:
+        log.warning("IXCLY NEWS не запущен: добавьте IXCLY_NEWS_BOT_TOKEN в Environment Render")
+        return
+    os.environ.setdefault("IXCLY_NEWS_CHANNEL_ID", "@ixcly_news")
+    os.environ.setdefault("IXCLY_NEWS_CHANNEL_URL", NEWS_CHANNEL_URL)
+    os.environ.setdefault("IXCLY_NEWS_DB", os.path.join(_DATA_DIR, "ixcly_news_state.sqlite3"))
+    from ixcly_news_bot import run_publisher, export_state, import_state, set_state_callback
+    import_state(STATE.get("news_publisher_state") or {})
+    def _persist_news_state():
+        STATE["news_publisher_state"] = export_state()
+        state_touch(True)
+    set_state_callback(_persist_news_state)
+    while not stop_event.is_set():
+        try:
+            await run_publisher(stop_event)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("IXCLY NEWS publisher failed to initialize; retrying in 60 seconds")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                pass
+
+
 async def main():
     global http, news_lock, scan_lock, MAIN_LOOP, TG_SEM, ANALYZE_SEM
     MAIN_LOOP = asyncio.get_running_loop()
@@ -8226,6 +8285,10 @@ async def main():
             news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
             anomaly_scanner_loop, liquidation_stream_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
         background.append(asyncio.create_task(update_market_bias()))
+        if clean_key(os.getenv("IXCLY_NEWS_BOT_TOKEN")):
+            background.append(asyncio.create_task(news_publisher_loop(stop)))
+        else:
+            log.warning("IXCLY NEWS отключён: не задан IXCLY_NEWS_BOT_TOKEN; торговый бот продолжает работу")
 
         pollers.append(asyncio.create_task(run_polling(dp, bot, "основной бот", stop)))
         if admin_bot and admin_dp:
