@@ -980,10 +980,24 @@ async def purge_chat(chat_id, upto_id, count=100):
 
 
 async def _send_new(chat_id, text, kb, photo):
-    if TG_SEM is None:
-        return await _send_new_raw(chat_id, text, kb, photo)
-    async with TG_SEM:
-        return await _send_new_raw(chat_id, text, kb, photo)
+    """Отправка с повторами при временных сетевых ошибках Telegram."""
+    last_error = None
+    for attempt in range(3):
+        try:
+            if TG_SEM is None:
+                return await _send_new_raw(chat_id, text, kb, photo)
+            async with TG_SEM:
+                return await _send_new_raw(chat_id, text, kb, photo)
+        except TelegramRetryAfter as exc:
+            last_error = exc
+            await asyncio.sleep(min(float(getattr(exc, "retry_after", 2)) + 0.5, 15))
+        except (TelegramNetworkError, asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            last_error = exc
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+        except Exception:
+            raise
+    raise last_error or RuntimeError("Telegram delivery failed")
 
 
 async def _send_new_raw(chat_id, text, kb, photo):
@@ -3520,7 +3534,9 @@ def signal_recipients(coin, side):
     for uid, u in list(_users().items()):
         try:
             iid = int(uid)
-            if isinstance(u, dict) and u.get("active", True) and get_user_notif_settings(iid)["signals"] and has_access(iid):
+            # Новые торговые сигналы — критические события. Не скрываем их из-за
+            # пользовательского фильтра уведомлений/порога confidence.
+            if isinstance(u, dict) and u.get("active", True) and has_access(iid):
                 out.append(iid)
         except (TypeError, ValueError):
             continue
@@ -4065,6 +4081,7 @@ async def live_monitor_loop():
     while True:
         try:
             hist = load_signal_history()
+            await retry_failed_signal_deliveries(hist)
             open_coins = {c for u in _users().values() if isinstance(u, dict)
                           for c in (u.get("open_positions") or {})}
             watch = {x["coin"] for x in hist if x.get("status") in ("active", "in_trade")} | open_coins
@@ -4339,13 +4356,32 @@ async def check_position(user_id, coin, pos):
     _ensure_tracked_order_key(user_id, coin, pos)
     if pos.get("notified_close"):
         return
-    price = await get_simple_price(coin)
+    cached = PRICES.get(coin)
+    price = (float(cached.get("price", 0) or 0)
+             if cached and time.time() - float(cached.get("ts", 0) or 0) <= 25 else None)
     if not price:
-        cached = PRICES.get(coin) or LIVE.get(coin)
-        if cached and time.time() - float(cached.get("ts", 0) or 0) <= 90:
-            price = float(cached.get("price", 0) or 0)
+        live_cached = LIVE.get(coin)
+        if live_cached and time.time() - float(live_cached.get("ts", 0) or 0) <= 45:
+            price = float(live_cached.get("price", 0) or 0)
     if not price:
+        price = await get_simple_price(coin)
+    if not price:
+        # Don't pretend the position is being monitored when no fresh quote is available.
+        stale_since = float(pos.get("price_stale_since", 0) or 0)
+        if not stale_since:
+            pos["price_stale_since"] = time.time()
+            set_user_open_position(user_id, coin, pos)
+        elif time.time() - stale_since >= 60 and not pos.get("price_stale_warned"):
+            pos["price_stale_warned"] = True
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🚨 <b>Нет свежей цены для {coin}</b>\\n"
+                                 "Сопровождение временно не может проверить стопы и цели. "
+                                 "Проверьте позицию непосредственно на бирже.")
         return
+    if pos.get("price_stale_since"):
+        pos.pop("price_stale_since", None)
+        pos.pop("price_stale_warned", None)
+        set_user_open_position(user_id, coin, pos)
     side, entry = pos["side"], pos["entry_price"]
     sign = 1 if side == "LONG" else -1
     pnl = price_change_pct(side, entry, price)
@@ -4421,6 +4457,54 @@ async def check_position(user_id, coin, pos):
         set_user_open_position(user_id, coin, pos)
         await _tell(user_id, f"🚨 <b>{coin} идёт против вас:</b> {pnl:+.2f}%. Будьте готовы к стопу.")
 
+    # Ранние предупреждения по расходованию исходного риска: 50/75/90% пути к стопу.
+    stop_ref = float(pos.get("sl1") or pos.get("sl_orig") or entry)
+    stop_distance_pct = abs(entry - stop_ref) / max(abs(entry), 1e-12) * 100
+    adverse_pct = max(0.0, -pnl)
+    if stop_distance_pct > 0:
+        risk_used = adverse_pct / stop_distance_pct * 100
+        for threshold in (50, 75, 90):
+            flag = f"risk_warn_{threshold}"
+            if risk_used >= threshold and not pos.get(flag):
+                pos[flag] = True
+                set_user_open_position(user_id, coin, pos)
+                icon = "🚨" if threshold >= 90 else "⚠️"
+                await _tell(user_id, f"{icon} <b>{coin}: использовано {threshold}% расстояния до стопа</b>\\n"
+                                     f"Текущий PnL: <b>{pnl:+.2f}%</b> · цена <code>{fmt(price)}</code>\\n"
+                                     "Проверьте реальную позицию и защитные ордера на бирже.")
+    else:
+        risk_used = 0.0
+
+    # Отдельно отслеживаем ухудшение/разворот вероятностей на живых таймфреймах.
+    live_state = LIVE.get(coin) or {}
+    probs = live_state.get("long_prob") or {}
+    if probs and time.time() - float(live_state.get("ts", 0) or 0) <= 90:
+        directional = {tf: (float(v) if side == "LONG" else 100.0 - float(v))
+                       for tf, v in probs.items() if tf in ("15m", "1h", "4h")}
+        adverse_tfs = [tf for tf, value in directional.items() if value <= 40]
+        reversal = len(adverse_tfs) >= 2 and ("1h" in adverse_tfs or "4h" in adverse_tfs)
+        if reversal and not pos.get("reversal_warned"):
+            pos["reversal_warned"] = True
+            pos["reversal_warned_at"] = time.time()
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🚨 <b>Возможный разворот против {coin} ({side})</b>\\n"
+                                 f"Слабые таймфреймы: {', '.join(adverse_tfs)}. "
+                                 f"PnL: <b>{pnl:+.2f}%</b>.\\n"
+                                 "Сигнал требует повторной оценки. Проверьте стоп и реальную позицию на бирже.")
+        elif not reversal and pos.get("reversal_warned"):
+            pos["reversal_warned"] = False
+            set_user_open_position(user_id, coin, pos)
+        deterioration = len(adverse_tfs) >= 1
+        if deterioration and not pos.get("trend_deterioration_warned"):
+            pos["trend_deterioration_warned"] = True
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"⚠️ <b>Сигнал {coin} ослабевает</b>\\n"
+                                 f"Направленная вероятность ухудшилась на: {', '.join(adverse_tfs)}. "
+                                 "Проверьте ситуацию.")
+        elif not deterioration and pos.get("trend_deterioration_warned"):
+            pos["trend_deterioration_warned"] = False
+            set_user_open_position(user_id, coin, pos)
+
     tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
     if sign * (price - current_sl) <= 0:
         reason = ("🛑 Сработал трейлинг-стоп, часть прибыли зафиксирована." if current_sl != pos.get("sl_orig") and pos.get("hit_tp1")
@@ -4493,11 +4577,11 @@ async def position_monitor_loop():
                         await check_position(uid, coin, pos)
                     except Exception as e:
                         log.info(f"check_position {coin}: {e}")
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.05)
         except Exception as e:
             log.error(f"pos monitor: {e}")
-        next_timers["positions"] = time.time() + 60
-        await asyncio.sleep(60)
+        next_timers["positions"] = time.time() + 10
+        await asyncio.sleep(10)
 
 
 async def _tell(uid, text, kb=None):
@@ -5974,7 +6058,7 @@ def signal_keyboard(x):
     rows = []
     if WEBAPP_URL:
         rows.append([InlineKeyboardButton(text="📈 Открыть в приложении", web_app=WebAppInfo(url=webapp_link(x["coin"])))])
-    rows.append([InlineKeyboardButton(text="✅ Вошёл", callback_data=f"in:{s}:{x['coin']}"),
+    rows.append([InlineKeyboardButton(text="👁 Отслеживать вход", callback_data=f"in:{s}:{x['coin']}"),
                  InlineKeyboardButton(text="💾 Сохранить", callback_data=f"sv:{s}:{x['coin']}")])
     rows.append([InlineKeyboardButton(text="🗑 Скрыть", callback_data="del_msg")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5989,19 +6073,67 @@ async def deliver_new_signal(item, r, title="СИГНАЛ"):
     """Карточка сигнала (PNG) + персональная подпись каждому, кто включил сигналы и чей порог ниже силы."""
     closes = await _closes(item["coin"])
     card = await asyncio.to_thread(render_signal_card, item, closes, r.get("price") or item["entry"], title)
+    delivered, failed = 0, []
     for cid in signal_recipients(item["coin"], item["side"]):
-        u = _users().get(str(cid), {})
-        if item["strength"] < float(u.get("conf_final", CONF_FINAL)):
-            continue
         try:
             await _send_new(cid, signal_caption(item, cid, title), signal_keyboard(item), card)
-            item["sent_to"].append(cid)
+            if cid not in item["sent_to"]:
+                item["sent_to"].append(cid)
+            delivered += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            log.info(f"Ошибка отправки сигнала {cid}: {e}")
+            failed.append(cid)
+            log.warning("Не доставлен новый сигнал %s пользователю %s: %s", item["coin"], cid, e)
+    item["delivery"] = {"attempted": delivered + len(failed), "delivered": delivered,
+                        "failed": failed[:100], "retry_count": 0,
+                        "retry_after": time.time() + 30, "last_attempt": time.time()}
     state_touch()
+    if not delivered:
+        await notify_admin(f"🚨 <b>Сигнал {html.escape(item['coin'])} создан, но не доставлен ни одному пользователю.</b> "
+                           "Проверьте доступы, подписки и ошибки Telegram.")
+    elif failed:
+        await notify_admin(f"⚠️ <b>Доставка сигнала {html.escape(item['coin'])}:</b> "
+                           f"доставлено {delivered}, ошибок {len(failed)}. Запланированы повторы.")
     asyncio.create_task(send_webhook_all({"event": "new_signal", "coin": item["coin"], "side": item["side"],
                                           "entry": item["entry"], "tp1": item["tp1"], "sl1": item["sl1"]}))
+
+
+async def retry_failed_signal_deliveries(hist):
+    """Повторяет недоставленные сигналы ограниченное число раз; не блокирует основной цикл."""
+    now = time.time()
+    changed = False
+    for item in hist:
+        delivery = item.get("delivery") or {}
+        failed = list(delivery.get("failed") or [])
+        if (not failed or item.get("status") not in ("active", "in_trade")
+                or now < float(delivery.get("retry_after", 0) or 0)
+                or int(delivery.get("retry_count", 0) or 0) >= 5):
+            continue
+        remaining = []
+        for uid in failed[:30]:
+            try:
+                u = _users().get(str(uid), {})
+                if not isinstance(u, dict) or not u.get("active", True) or not has_access(int(uid)):
+                    continue
+                await _send_new(int(uid), signal_caption(item, int(uid)), signal_keyboard(item), None)
+                if int(uid) not in item.setdefault("sent_to", []):
+                    item["sent_to"].append(int(uid))
+                delivery["delivered"] = int(delivery.get("delivered", 0)) + 1
+            except Exception as exc:
+                remaining.append(uid)
+                log.warning("Повторная доставка сигнала %s пользователю %s не удалась: %s",
+                            item.get("coin"), uid, exc)
+            await asyncio.sleep(0.05)
+        delivery["failed"] = remaining
+        delivery["retry_count"] = int(delivery.get("retry_count", 0) or 0) + 1
+        delivery["retry_after"] = now + min(300, 30 * (delivery["retry_count"] + 1))
+        delivery["last_attempt"] = now
+        changed = True
+        if remaining and delivery["retry_count"] >= 5:
+            await notify_admin(f"🚨 <b>Не удалось доставить сигнал {html.escape(str(item.get('coin')))}</b> "
+                               f"{len(remaining)} пользователям после 5 повторов.")
+    if changed:
+        save_signal_history(hist)
 
 
 def sig_as_res(x):
@@ -6026,8 +6158,12 @@ async def handle_signal_button(cb, data):
             message = ("Сделка по монете уже открыта" if get_open_position(uid, coin)
                        else "Этот сигнал уже закрыт. Дождитесь нового сигнала.")
             return await safe_answer(cb, message, True)
-        await safe_answer(cb, "Лимит поставлен")
-        await _tell(uid, f"⏳ Сопровождение {coin} {side}: вход <code>{fmt(x['entry'])}</code>, TP1-3 и итог придут сюда.")
+        await safe_answer(cb, "Включено виртуальное сопровождение")
+        await _tell(uid, f"👁 <b>Виртуальное сопровождение включено: {coin} {side}</b>\\n"
+                         f"Ожидаемая цена входа: <code>{fmt(x['entry'])}</code>.\\n"
+                         "⚠️ Бот не размещает ордер на бирже и не управляет реальной позицией. "
+                         "Выставьте и проверьте ордер, стоп и цели непосредственно на своей бирже. "
+                         "Здесь отслеживается только рыночная цена.")
     else:
         await asyncio.to_thread(add_user_saved_signal, uid, coin, signal_caption(x, uid), res)
         await safe_answer(cb, "Сохранено в избранное")
@@ -6082,7 +6218,7 @@ async def notify_sig_result(x, status, max_tp):
 
 async def global_signal_monitor_loop():
     """Итоги и промежуточные события по свечам 15m: вход, TP1-3, стоп, MFE/MAE, R."""
-    await asyncio.sleep(120)
+    await asyncio.sleep(30)
     while True:
         try:
             hist = load_signal_history()
@@ -6129,7 +6265,7 @@ async def global_signal_monitor_loop():
                 save_signal_history(hist)
         except Exception as e:
             log.error(f"global_signal_monitor: {e}", exc_info=True)
-        await asyncio.sleep(120)
+        await asyncio.sleep(30)
 
 
 async def invalidate_signal(x, reason):
@@ -6145,6 +6281,13 @@ async def invalidate_signal(x, reason):
     for uid, u in list(_users().items()):
         pos = (u.get("open_positions") or {}).get(x["coin"])
         if pos and pos.get("waiting_entry") and pos["side"] == x["side"]:
+            try:
+                await _tell(int(uid), f"🚫 <b>ВАЖНО: вход по {x['coin']} ({x['side']}) отменён</b>\\n"
+                                     f"{reason}\\n"
+                                     "Ожидающий виртуальный ордер снят из сопровождения. "
+                                     "Если вы выставляли реальный лимит на бирже, отмените его там вручную.")
+            except Exception as exc:
+                log.warning("Не удалось уведомить %s об отмене %s: %s", uid, x["coin"], exc)
             _remember_closed_order(int(uid), pos)
             set_user_open_position(int(uid), x["coin"], None)
 
