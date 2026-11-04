@@ -570,3 +570,244 @@ def is_memory_guard_reason(reason):
     value = str(reason or "").strip().lower()
     return ("защитой памяти" in value or "ram guard" in value or
             "достигла защитного порога" in value or "memory guard" in value)
+
+# ---------------------------------------------------------------------------
+# IXCLY Quant Intelligence: calibrated direction, entry timing and portfolio
+# diagnostics. Deterministic and dependency-light for Render 512 MB.
+# ---------------------------------------------------------------------------
+
+def _closed_outcomes(history, limit=500):
+    rows = []
+    for item in (history or [])[-max(1, int(limit)):]:
+        if not isinstance(item, dict) or str(item.get('status', '')).lower() not in ('win', 'loss', 'be', 'closed'):
+            continue
+        try:
+            r = float(item.get('r'))
+            if math.isfinite(r):
+                rows.append((item, r))
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
+def _raw_direction_probability(item):
+    probs = item.get('long_prob') or item.get('tf_probs') or {}
+    if not isinstance(probs, dict):
+        return None
+    weights = {'1d': .30, '4h': .30, '1h': .25, '15m': .15}
+    vals = [(float(v), weights.get(str(k).lower(), .10)) for k, v in probs.items()
+            if k in weights and _num(v, -1) >= 0 and _num(v, 101) <= 100]
+    if not vals:
+        return None
+    den = sum(w for _, w in vals)
+    return sum(v*w for v, w in vals) / den if den else None
+
+
+def probability_calibration(history, raw_long_probability, side, min_sample=20):
+    """Empirical directional calibration from closed trades; never calls a score a probability without evidence."""
+    side = str(side or '').upper()
+    if side not in ('LONG', 'SHORT') or raw_long_probability is None:
+        return {'status': 'insufficient_data', 'calibrated_probability': None, 'sample': 0,
+                'note': 'Нет пригодной исходной оценки направления.'}
+    raw = _num(raw_long_probability, 50.0)
+    raw_conf = raw if side == 'LONG' else 100.0 - raw
+    samples = []
+    for item, r in _closed_outcomes(history):
+        p_long = _raw_direction_probability(item)
+        if p_long is None:
+            p_long = _num(item.get('raw_long_probability'), -1)
+        if not 0 <= p_long <= 100:
+            continue
+        historical_side = str(item.get('side') or '').upper()
+        if historical_side not in ('LONG', 'SHORT'):
+            continue
+        confidence = p_long if historical_side == 'LONG' else 100.0 - p_long
+        if abs(confidence - raw_conf) <= 10:
+            samples.append(1.0 if r > 0 else 0.0 if r < 0 else 0.5)
+    if len(samples) < min_sample:
+        return {'status': 'warming_up', 'raw_confidence': round(raw_conf, 1),
+                'calibrated_probability': None, 'sample': len(samples), 'required': min_sample,
+                'note': 'Недостаточно закрытых сопоставимых сделок; показывается только сырая оценка модели.'}
+    # Beta(2,2) smoothing prevents extreme 0/100% outputs on finite samples.
+    wins = sum(samples)
+    calibrated = (wins + 2.0) / (len(samples) + 4.0) * 100.0
+    return {'status': 'calibrated', 'raw_confidence': round(raw_conf, 1),
+            'calibrated_probability': round(calibrated, 1), 'sample': len(samples),
+            'wins_equivalent': round(wins, 1), 'note': 'Эмпирическая частота исходов в похожем диапазоне оценок; не гарантия результата.'}
+
+
+def directional_confidence(tf_data, side, history=None, min_calibration_sample=20):
+    """Combine timeframe direction with disagreement penalty and optional empirical calibration."""
+    weights = {'1d': .30, '4h': .30, '1h': .25, '15m': .15}
+    rows = [(tf, _num((tf_data or {}).get(tf, {}).get('long_prob'), -1), w)
+            for tf, w in weights.items() if isinstance((tf_data or {}).get(tf), dict)]
+    rows = [(tf, p, w) for tf, p, w in rows if 0 <= p <= 100]
+    if not rows:
+        return {'status': 'insufficient_data', 'raw_long_probability': None,
+                'directional_confidence': None, 'calibration': {'status': 'insufficient_data'}}
+    den = sum(w for _, _, w in rows)
+    raw_long = sum(p*w for _, p, w in rows) / den
+    chosen = str(side or ('LONG' if raw_long >= 50 else 'SHORT')).upper()
+    raw_conf = raw_long if chosen == 'LONG' else 100.0 - raw_long
+    aligned = sum(1 for _, p, _ in rows if (p >= 50) == (chosen == 'LONG'))
+    coverage = len(rows)
+    values = [p if chosen == 'LONG' else 100.0-p for _, p, _ in rows]
+    dispersion = (sum((v - sum(values)/len(values))**2 for v in values)/len(values))**.5 if values else 50
+    agreement = aligned / coverage * 100.0
+    # This is model confidence, not win probability. Penalize disagreement and dispersion.
+    confidence = max(0.0, min(100.0, raw_conf - max(0.0, 75.0-agreement)*.22 - max(0.0, dispersion-12.0)*.18))
+    calibration = probability_calibration(history or [], raw_long, chosen, min_calibration_sample)
+    return {'status': 'ok', 'side': chosen, 'raw_long_probability': round(raw_long, 1),
+            'raw_directional_confidence': round(raw_conf, 1), 'directional_confidence': round(confidence, 1),
+            'timeframe_agreement_pct': round(agreement, 1), 'timeframe_dispersion': round(dispersion, 1),
+            'timeframes_used': coverage, 'timeframes': {tf: round(p, 1) for tf, p, _ in rows},
+            'calibration': calibration,
+            'note': 'Directional confidence — согласованность модели. Калиброванная вероятность появляется только при достаточной выборке закрытых сделок.'}
+
+
+def entry_timing_assessment(signal, tf_data=None):
+    """Score whether the proposed entry is timely rather than merely directionally correct."""
+    s = signal or {}
+    price, entry = _num(s.get('price')), _num(s.get('entry'))
+    side = str(s.get('side') or '').upper()
+    info = (tf_data or {}).get('4h') or (tf_data or {}).get('1h') or {}
+    atr = _num(info.get('atr'))
+    score, reasons, blocked = 70.0, [], False
+    if price <= 0 or entry <= 0 or side not in ('LONG', 'SHORT'):
+        return {'status': 'insufficient_data', 'score': None, 'blocked': True,
+                'reasons': ['Нет цены или корректной точки входа.']}
+    distance_pct = abs(entry-price)/price*100.0
+    atr_pct = atr/price*100.0 if atr > 0 else None
+    if atr_pct and atr_pct > 0:
+        distance_atr = distance_pct/atr_pct
+        if distance_atr > 1.5:
+            score -= 35; blocked = True; reasons.append('Вход слишком далеко от текущей цены относительно ATR.')
+        elif distance_atr > .9:
+            score -= 20; reasons.append('Цена уже существенно ушла от расчётной зоны.')
+        elif distance_atr > .45:
+            score -= 8; reasons.append('Умеренное удаление от точки входа.')
+        else:
+            reasons.append('Точка входа находится вблизи текущей цены.')
+    elif distance_pct > 1.5:
+        score -= 25; reasons.append('Значительное расстояние от цены; ATR недоступен.')
+    anti = s.get('anti_fomo') or {}
+    if anti.get('blocked'):
+        score -= 30; blocked = True; reasons.append('Anti-FOMO обнаружил перегретое движение.')
+    elif _num(anti.get('penalty')) > 0:
+        score -= min(18, _num(anti.get('penalty'))); reasons.append('Есть признаки растянутого движения.')
+    breakout = s.get('breakout') or {}
+    state = str(breakout.get('state') or '')
+    if state.startswith('fake_'):
+        score -= 25; blocked = True; reasons.append('Обнаружен вероятный ложный пробой.')
+    elif state in ('breakout_up', 'breakout_down'):
+        reasons.append('Пробой требует подтверждения удержанием уровня.')
+    if not atr_pct:
+        score -= 5; reasons.append('ATR недоступен — оценка времени входа менее надёжна.')
+    score = round(max(0.0, min(100.0, score)), 1)
+    if score < 35: blocked = True
+    return {'status': 'ok', 'score': score, 'blocked': blocked,
+            'distance_pct': round(distance_pct, 3), 'distance_atr': round(distance_pct/atr_pct, 2) if atr_pct else None,
+            'atr_pct': round(atr_pct, 3) if atr_pct else None, 'reasons': reasons,
+            'note': 'Оценка качества момента входа, а не прогноз направления.'}
+
+
+def reversal_probability_assessment(side, tf_data=None, regime_transition=None, evidence_map=None,
+                                    early_movement=None, breakout=None):
+    """Heuristic early-warning score for adverse reversal; explicitly not a calibrated probability."""
+    side = str(side or '').upper()
+    if side not in ('LONG', 'SHORT'):
+        return {'status': 'insufficient_data', 'risk_score': None, 'level': 'unknown'}
+    weights = {'15m': .15, '1h': .25, '4h': .30, '1d': .30}
+    opposing = 0.0; coverage = 0; details = []
+    for tf, weight in weights.items():
+        row = (tf_data or {}).get(tf) or {}
+        p = _num(row.get('long_prob'), -1)
+        if not 0 <= p <= 100: continue
+        coverage += 1
+        against = 100-p if side == 'LONG' else p
+        if against >= 55:
+            opposing += weight * min(1.0, (against-50)/35)
+        details.append({'timeframe': tf, 'adverse_direction_score': round(against, 1)})
+    score = (opposing / max(sum(weights[t] for t in weights if isinstance((tf_data or {}).get(t), dict) and (tf_data or {}).get(t, {}).get('long_prob') is not None), .01))*38 if coverage else 0
+    state = (regime_transition or {}).get('state')
+    if state == 'direction_reversal_watch': score += 22
+    elif state == 'volatility_expansion': score += 8
+    conflict = _num((evidence_map or {}).get('conflict_pct'))
+    score += min(18, conflict*.18)
+    early = early_movement or {}
+    if early.get('direction') in ('LONG', 'SHORT') and early.get('direction') != side:
+        score += 12
+    if breakout and str(breakout.get('state') or '').startswith('fake_'):
+        score += 12
+    score = round(max(0.0, min(100.0, score)), 1)
+    level = 'critical' if score >= 75 else 'high' if score >= 55 else 'watch' if score >= 35 else 'low'
+    return {'status': 'ok' if coverage else 'insufficient_data', 'risk_score': score,
+            'level': level, 'opposing_timeframes': details,
+            'note': 'Эвристический риск разворота для раннего предупреждения; не вероятность будущего события.'}
+
+
+def adaptive_confidence_threshold(history, base=66.0, regime=None, min_sample=20):
+    """Raise/lower signal threshold only when closed-outcome sample is adequate."""
+    closed = _closed_outcomes(history, 500)
+    selected = [(x, r) for x, r in closed if not regime or str((x.get('market_regime') or {}).get('name', x.get('regime'))) == str(regime)]
+    sample = selected if len(selected) >= min_sample else closed
+    scope = 'regime' if sample is selected and len(selected) >= min_sample else 'all'
+    if len(sample) < min_sample:
+        return {'threshold': round(max(55.0, min(85.0, _num(base, 66))), 1),
+                'adjustment': 0, 'sample': len(sample), 'scope': 'insufficient_sample',
+                'note': f'Адаптация выключена: нужно минимум {min_sample} закрытых сделок.'}
+    wins = sum(1 for _, r in sample if r > 0)
+    win_rate = wins/len(sample)*100
+    avg_r = sum(r for _, r in sample)/len(sample)
+    delta = 8 if win_rate < 40 or avg_r < -.20 else 4 if win_rate < 48 or avg_r < 0 else -2 if win_rate >= 62 and avg_r > .25 else 0
+    threshold = max(55.0, min(85.0, _num(base, 66) + delta))
+    return {'threshold': round(threshold, 1), 'adjustment': delta, 'sample': len(sample),
+            'scope': scope, 'win_rate': round(win_rate, 1), 'avg_r': round(avg_r, 3),
+            'note': 'Порог меняется только по закрытым сделкам; автообучение не меняет стратегию без достаточной выборки.'}
+
+
+def portfolio_exposure_assessment(history, correlation_groups=None, max_same_side=2):
+    """Read-only portfolio heatmap from active/in-trade signal records; not exchange account truth."""
+    groups = correlation_groups or []
+    active = [x for x in (history or []) if isinstance(x, dict)
+              and str(x.get('status', '')).lower() in ('active', 'in_trade')]
+    rows, group_counts, side_counts = [], {}, {'LONG': 0, 'SHORT': 0}
+    for item in active:
+        coin = str(item.get('coin') or '')
+        side = str(item.get('side') or '').upper()
+        if side not in side_counts: continue
+        side_counts[side] += 1
+        group = next((f'group_{i+1}' for i, g in enumerate(groups) if coin in g), coin)
+        key = f'{group}:{side}'; group_counts[key] = group_counts.get(key, 0)+1
+        rows.append({'coin': coin, 'side': side, 'group': group,
+                     'quality': _num(item.get('quality_score')), 'status': item.get('status')})
+    crowded = [k for k, n in group_counts.items() if n > 1]
+    dominant = max(side_counts, key=side_counts.get) if active else None
+    imbalance = max(side_counts.values())/max(1, len(rows))*100 if rows else 0
+    risk_level = 'high' if len(crowded) or max(side_counts.values()) > max_same_side else 'elevated' if imbalance >= 75 and len(rows) >= 3 else 'normal'
+    return {'status': 'ok', 'active_signals': len(rows), 'side_counts': side_counts,
+            'dominant_side': dominant, 'directional_imbalance_pct': round(imbalance, 1),
+            'correlated_clusters': crowded, 'risk_level': risk_level, 'positions': rows,
+            'note': 'Снимок только по сигналам IXCLY; для фактической экспозиции биржи нужна синхронизация с account positions.'}
+
+
+def no_trade_decision(confidence, entry_timing, reversal, adaptive, min_confidence=66.0):
+    """Explicit WAIT gate with reasons; missing diagnostics do not masquerade as positive evidence."""
+    reasons = []
+    c = _num((confidence or {}).get('directional_confidence'), -1)
+    threshold = _num((adaptive or {}).get('threshold'), min_confidence)
+    if c < 0:
+        reasons.append('Недостаточно данных для оценки направления.')
+    elif c < threshold:
+        reasons.append(f'Уверенность направления {c:.1f} ниже адаптивного порога {threshold:.1f}.')
+    if (entry_timing or {}).get('blocked'):
+        reasons.extend((entry_timing or {}).get('reasons') or ['Момент входа заблокирован.'])
+    reversal_score = _num((reversal or {}).get('risk_score'), -1)
+    if reversal_score >= 75:
+        reasons.append('Критически высокий риск движения против выбранного направления.')
+    cal = (confidence or {}).get('calibration') or {}
+    if cal.get('status') == 'calibrated' and _num(cal.get('calibrated_probability'), 100) < 42:
+        reasons.append('Историческая калибровка похожих прогнозов неудовлетворительна.')
+    return {'action': 'WAIT' if reasons else 'REVIEW', 'blocked': bool(reasons),
+            'threshold': round(threshold, 1), 'reasons': list(dict.fromkeys(reasons)),
+            'note': 'REVIEW означает допуск к остальным фильтрам, а не автоматическое разрешение сделки.'}
