@@ -3939,11 +3939,8 @@ async def scan_once(send=True):
                 if send:
                     await notify_no_signal_users(last_scan_info["diagnostic"])
                 return []
-        if streak_pause():
-            _scan_paused("Защитная пауза после серии неудачных сигналов")
-            if send:
-                await notify_no_signal_users(last_scan_info["diagnostic"])
-            return []
+        # Не останавливаем сканер после серии убыточных сигналов:
+        # каждый новый сетап оценивается обычными правилами отбора.
         if await check_macro_calendar():
             _scan_paused("Пауза из-за важной макроэкономической публикации (ФРС/CPI)")
             if send:
