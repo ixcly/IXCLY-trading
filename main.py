@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v4.4 MAX COGNITIVE
+IXCLY Trading Bot v4.6 MAX QUANT INTELLIGENCE
 
 - 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
 - Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
@@ -43,7 +43,9 @@ import pandas as pd
 from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, breakeven_trigger_reached, close_warning_confirmed,
                                scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence,
                                forecast_scenarios, early_movement_assessment, liquidation_risk_assessment,
-                               signal_quality_breakdown, strategy_performance, self_audit_summary)
+                               signal_quality_breakdown, strategy_performance, self_audit_summary,
+                               directional_confidence, entry_timing_assessment, reversal_probability_assessment,
+                               adaptive_confidence_threshold, portfolio_exposure_assessment, no_trade_decision)
 from ixcly_brain import (market_fingerprint, signal_fingerprint, decision_brain, liquidity_path,
                         news_reaction_assessment, strategy_dna, counterfactual_lab, replay_signal,
                         regime_transition_assessment, signal_fragility, evidence_conflict_map, score_calibration)
@@ -245,7 +247,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.5.1-MAX-SINGLE"
+VERSION = "4.6-MAX-QUANT"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -2723,6 +2725,14 @@ def render_caption(res, uid=None):
         (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
         (1, make_strength_bar(res["strength"])),
     ]
+    _q = res.get("quant_intelligence") or {}
+    _qd = _q.get("direction") or {}
+    _qe = _q.get("entry_timing") or {}
+    _qr = _q.get("reversal_risk") or {}
+    if _qd.get("directional_confidence") is not None:
+        parts.append((2, f"🧠 Уверенность направления: <b>{_qd['directional_confidence']:.1f}%</b> · TF {(_qd.get('timeframe_agreement_pct') or 0):.0f}%"))
+    if _qe.get("score") is not None or _qr.get("risk_score") is not None:
+        parts.append((2, f"⏱ Вход {(_qe.get('score') if _qe.get('score') is not None else '—')}/100 · риск разворота {(_qr.get('risk_score') if _qr.get('risk_score') is not None else '—')}/100"))
     if res.get("fake_breakout"):
         parts.append((1, "⚠️ <b>Ложный пробой (тонкий объем)</b>"))
     parts += [
@@ -3334,6 +3344,33 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
             res["comment"] = "Decision Brain: " + res["decision_brain"].get("reason", "повышенный риск")
     except Exception as _brain_err:
         log.debug("Decision Brain analysis skipped for %s: %s", coin, _brain_err)
+    # IXCLY Quant Intelligence: independent direction confidence, entry timing,
+    # early adverse-move risk, historical calibration and explicit no-trade gate.
+    try:
+        _hist_quant = load_signal_history()
+        _side_quant = res.get("side")
+        _confidence = directional_confidence(tf_data, _side_quant, _hist_quant, min_calibration_sample=20)
+        _timing = entry_timing_assessment(res, tf_data)
+        _reversal = reversal_probability_assessment(
+            _side_quant, tf_data, res.get("regime_transition"),
+            res.get("evidence_conflict_map"), _brain_early if "_brain_early" in locals() else None,
+            res.get("breakout"))
+        _adaptive = adaptive_confidence_threshold(_hist_quant, CONF_FINAL,
+            regime=str(info.get("regime") or "") if isinstance(info.get("regime"), str) else None,
+            min_sample=20)
+        _no_trade = no_trade_decision(_confidence, _timing, _reversal, _adaptive, CONF_FINAL)
+        res["quant_intelligence"] = {"direction": _confidence, "entry_timing": _timing,
+            "reversal_risk": _reversal, "adaptive_threshold": _adaptive, "gate": _no_trade}
+        # This is an additional safety gate. Existing strategy and Decision Brain filters still apply.
+        if res.get("verdict") == "ENTER" and _no_trade.get("blocked"):
+            res["verdict"] = "WAIT"
+            res["comment"] = "Quant Intelligence: вход заблокирован — " + "; ".join(_no_trade.get("reasons", [])[:3])
+    except Exception as _quant_err:
+        log.warning("Quant Intelligence skipped for %s: %s", coin, _quant_err)
+        res["quant_intelligence"] = {"status": "error", "note": "Дополнительная оценка недоступна; решение не повышается автоматически."}
+        if res.get("verdict") == "ENTER":
+            res["verdict"] = "WAIT"
+            res["comment"] = "Дополнительная проверка риска недоступна — вход временно заблокирован."
     res["text"] = render_caption(res)
     return res
 
@@ -3889,6 +3926,11 @@ async def scan_once(send=True):
                 if abs(r["entry"] - r["price"]) / max(r["price"], 1e-12) > 0.03:
                     _rej("цена ушла от точки входа более чем на 3%")
                     continue
+                _portfolio_now = portfolio_exposure_assessment(hist, CORRELATION_GROUPS)
+                _side_count = (_portfolio_now.get("side_counts") or {}).get(r["side"], 0)
+                if _side_count >= 3:
+                    _rej("портфельный фильтр: уже слишком много однонаправленных активных сигналов")
+                    continue
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
                 if grp is not None:
                     if (grp, r["side"]) in used_groups:
@@ -3908,6 +3950,8 @@ async def scan_once(send=True):
                         "regime_transition": r.get("regime_transition"),
                         "signal_fragility": r.get("signal_fragility"),
                         "evidence_conflict_map": r.get("evidence_conflict_map"),
+                        "quant_intelligence": r.get("quant_intelligence"),
+                        "raw_long_probability": ((r.get("quant_intelligence") or {}).get("direction") or {}).get("raw_long_probability"),
                         "memory_features": {"regime": (r.get("market_regime") or {}).get("name", "unknown"),
                                              "quality": r.get("quality_score"), "atr_pct": (r.get("indicators") or {}).get("atr_pct"),
                                              "rsi": r.get("rsi"), "adx": r.get("adx"), "btc_context": r.get("btc_txt"),
@@ -5080,7 +5124,8 @@ def mini_api(act):
 
 def _sig_item(x, live=True):
     item = {k: x.get(k) for k in ("coin", "side", "type", "strength", "entry", "tp1", "tp2", "tp3", "sl1", "status", "ts",
-                                  "max_tp_hit", "cancel_reason", "live_price", "quality_score", "quality_label", "market_regime", "volume_anomaly")}
+                                  "max_tp_hit", "cancel_reason", "live_price", "quality_score", "quality_label", "market_regime", "volume_anomaly",
+                                  "quant_intelligence", "raw_long_probability")}
     item["sent"] = len(x.get("sent_to", []))
     if live and x.get("coin") in LIVE:
         lv = LIVE[x["coin"]]
@@ -5242,6 +5287,18 @@ async def ai_center_snapshot(uid, coin="BTC"):
         "news_bias": market_bias.get("bias") if isinstance(market_bias, dict) else None,
         "btc_change_pct": btc_context_move}, df) if df is not None else {"status": "insufficient_data"}
     calibration = score_calibration(hist, 8)
+    quant_direction = directional_confidence(tf_data, active_side or "LONG", hist, min_calibration_sample=20)
+    quant_entry = entry_timing_assessment(active or {"side": active_side, "price": price,
+        "entry": (active or {}).get("entry", price)}, tf_data)
+    quant_reversal = reversal_probability_assessment(active_side or "LONG", tf_data, phase_transition,
+        evidence_map, early, (active or {}).get("breakout"))
+    quant_adaptive = adaptive_confidence_threshold(hist, CONF_FINAL,
+        regime=regime.get("name") if isinstance(regime, dict) else None, min_sample=20)
+    quant_gate = no_trade_decision(quant_direction, quant_entry, quant_reversal, quant_adaptive, CONF_FINAL)
+    portfolio_heat = portfolio_exposure_assessment(hist, CORRELATION_GROUPS)
+    quant_intelligence = {"direction": quant_direction, "entry_timing": quant_entry,
+        "reversal_risk": quant_reversal, "adaptive_threshold": quant_adaptive,
+        "gate": quant_gate, "portfolio": portfolio_heat}
     result = {"coin":coin,"source":source,"price":price,"regime":regime,"volume_anomaly":vol,
             "early_movement":early,"forecast":forecast,"funding":funding,"oi_state":oi_state,
             "oi_change_pct":oi_pct,"oi_price_change_pct":oi_price_pct,"orderbook_bid_share":book,
@@ -5252,6 +5309,7 @@ async def ai_center_snapshot(uid, coin="BTC"):
             "signal_dna":brain_signal,"decision_brain":brain_decision,
             "regime_transition":phase_transition,"signal_fragility":fragility,
             "evidence_conflict_map":evidence_map,"score_calibration":calibration,
+            "quant_intelligence":quant_intelligence,"portfolio_heatmap":portfolio_heat,
             "strategy_dna":strategy_profile,"counterfactual_lab":counterfactual,
             "liquidations_1h":{"count":len(coin_liqs),"notional":round(sum(float(x.get("notional",0) or 0) for x in coin_liqs),2)},
             "system_memory":self_audit_summary(hist,30),"generated_at":time.time()}
