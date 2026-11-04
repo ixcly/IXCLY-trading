@@ -1219,7 +1219,7 @@ def trade_opportunity_ranking(candidates):
 
 
 def quant_intelligence_stack(tf_data, side='LONG', entry=None, stop=None, targets=None, history=None,
-                             funding=None, oi_change=None, orderbook_bid_share=None, news_risk=None, run_simulation=False, portfolio_history=None, leverage=None, spread_pct=None, depth_ratio=None, depth_notional=None, notional=None, cross_exchange_data=None, funding_history=None, liquidation_notional=None, average_liquidation_notional=None, cvd_data=None, macro_events=None, macro_feed_status=None, liquidation_distance_data=None):
+                             funding=None, oi_change=None, orderbook_bid_share=None, news_risk=None, run_simulation=False, portfolio_history=None, leverage=None, spread_pct=None, depth_ratio=None, depth_notional=None, notional=None, cross_exchange_data=None, funding_history=None, liquidation_notional=None, average_liquidation_notional=None, cvd_data=None, macro_events=None, macro_feed_status=None, liquidation_distance_data=None, positions=None, orderbook_snapshots=None, liquidation_events=None, signal_context=None, oi_price_change=None):
     """Bounded orchestration called by the signal pipeline; no external data is fabricated."""
     frames=(tf_data or {})
     base=frames.get('4h') or {}
@@ -1315,7 +1315,15 @@ def quant_intelligence_stack(tf_data, side='LONG', entry=None, stop=None, target
     entry_quality=limit_quality.get('score') if limit_quality.get('status')=='ok' else None
     reversal_risk=round(max(float(breakout_failure.get('failure_probability_pct',0) or 0),
                             float(reversion.get('reversion_probability_pct',0) or 0) if reversion.get('direction')!='no_extreme' else 0),1)
-    return {'status':'ok','data_quality':quality,'data_quality_by_tf':quality_by_tf,'regime_switching':regime,'kalman':kalman,'hurst':hurst,'entropy':entropy,
+    adaptive=adaptive_quant_engine(tf_data, side, base.get('price') or entry, base.get('atr'),
+        (base.get('sr') or {}).get('support'), (base.get('sr') or {}).get('resistance'),
+        cvd_data, orderbook_bid_share, oi_change, oi_price_change if oi_price_change is not None else base.get('change_pct'), funding, funding_history,
+        breakout_failure, news_risk, history, signal_context or {'ts':time.time(),'entry':entry}, positions, orderbook_snapshots, liquidation_events)
+    if adaptive.get('signal_conflicts',{}).get('severity')=='high':
+        risk_flags.append('multi_factor_signal_conflict')
+        gate='RED' if len(risk_flags)>=3 else 'YELLOW'
+        score=max(0,min(score,100-18*len(risk_flags)))
+    return {'status':'ok','adaptive_engine':adaptive,'data_quality':quality,'data_quality_by_tf':quality_by_tf,'regime_switching':regime,'kalman':kalman,'hurst':hurst,'entropy':entropy,
             'volatility_forecast':vol,'garch_volatility':garch,'distribution_shift':shift,'extreme_value_risk':tail,'mean_reversion':reversion,
             'volume_price_matrix':divergence,'fractal':fractal,'multi_horizon':horizons,'compression':compression,
             'liquidity_trap':trap,'breakout_failure':breakout_failure,'funding_convergence':funding_state,
@@ -1519,3 +1527,289 @@ def breakout_failure_probability(df):
     else: p=50.0
     return {'status':'ok','failure_probability_pct':round(p,1),'breakout_state':b.get('state'),
             'confirmation_score':round(100-p,1),'method':'OHLCV heuristic; not a calibrated classifier'}
+
+
+# =====================================================================
+# IXCLY MAX 5.2 ADAPTIVE QUANT ENGINE
+# Pure, bounded analytics. Missing inputs remain explicitly unavailable.
+# =====================================================================
+def market_regime_classifier(df):
+    """Expanded regime label with trend/range/volatility transition confidence."""
+    base = regime_switching_model(df) if df is not None else {'status':'insufficient_data'}
+    if base.get('status') != 'ok': return {**base, 'label':'unknown', 'confidence':None}
+    try:
+        close=_series(df,'close'); high=_series(df,'high'); low=_series(df,'low')
+        if len(close)<40: return {'status':'insufficient_data','label':'unknown','confidence':None}
+        ret=np.diff(np.log(np.maximum(close[-40:],1e-12)))
+        vol=float(np.std(ret)*np.sqrt(24)*100)
+        drift=float((close[-1]/close[-25]-1)*100) if close[-25] else 0.0
+        adx=None
+        if 'adx' in df:
+            try: adx=float(df['adx'].iloc[-1])
+            except Exception: pass
+        if base.get('regime')=='panic': label='panic_or_capitulation'
+        elif vol>4.0: label='high_volatility'
+        elif adx is not None and adx>=22 and abs(drift)>=1.0: label='trend_up' if drift>0 else 'trend_down'
+        elif abs(drift)<.35: label='range'
+        else: label='transition'
+        confidence=round(min(95,50+abs(drift)*8+(max(0,adx-15)*.7 if adx is not None else 0)),1)
+        return {'status':'ok','regime':base.get('regime'),'label':label,'confidence':confidence,
+                'realized_volatility_pct':round(vol,3),'drift_pct':round(drift,3),'adx':adx}
+    except Exception as e: return {'status':'error','label':'unknown','reason':str(e)[:100]}
+
+
+def signal_conflict_detector(side, factors):
+    """Count independent directional disagreements; unknown factors are ignored."""
+    votes=[]
+    for name,value in (factors or {}).items():
+        direction=None
+        if isinstance(value,str) and value.upper() in ('LONG','SHORT'): direction=value.upper()
+        elif isinstance(value,(int,float)) and np.isfinite(value): direction='LONG' if value>0 else 'SHORT' if value<0 else None
+        elif isinstance(value,dict): direction=value.get('direction') if value.get('direction') in ('LONG','SHORT') else None
+        if direction: votes.append({'factor':str(name),'direction':direction})
+    if not votes: return {'status':'insufficient_data','conflicts':[],'agreement_pct':None,'severity':'unknown'}
+    agree=sum(x['direction']==side for x in votes); disagree=len(votes)-agree
+    pct=round(agree/len(votes)*100,1)
+    severity='high' if disagree>=3 and disagree/len(votes)>=.5 else 'medium' if disagree>=2 else 'low'
+    return {'status':'ok','votes':votes,'agree':agree,'disagree':disagree,'agreement_pct':pct,
+            'severity':severity,'conflicts':[x['factor'] for x in votes if x['direction']!=side]}
+
+
+def adaptive_strategy_selector(regime, strategy_history=None):
+    """Choose strategy family by regime; historical edge only adjusts ranking with sample support."""
+    label=(regime or {}).get('label','unknown')
+    mapping={'trend_up':['Trend Following','Momentum','Breakout'], 'trend_down':['Trend Following','Momentum','Breakout'],
+             'range':['Mean Reversion','Range Trading'], 'high_volatility':['Breakout','Momentum'],
+             'panic_or_capitulation':['Wait / Risk Reduction'], 'transition':['Breakout','Mean Reversion'],
+             'unknown':['Trend Following','Mean Reversion','Breakout']}
+    candidates=mapping.get(label,mapping['unknown']); perf=strategy_history or []
+    ranked=[]
+    for name in candidates:
+        rows=[x for x in perf if str(x.get('strategy_type') or x.get('strategy') or '').lower()==name.lower() and x.get('r') is not None]
+        edge=float(np.mean([float(x['r']) for x in rows])) if len(rows)>=10 else None
+        ranked.append({'strategy':name,'sample':len(rows),'expectancy_r':round(edge,3) if edge is not None else None,
+                       'rank_score':round(edge,3) if edge is not None else None})
+    ranked.sort(key=lambda x:(x['rank_score'] is not None,x['rank_score'] or 0),reverse=True)
+    return {'status':'ok','regime':label,'selected':ranked[0]['strategy'] if ranked else 'Wait',
+            'candidates':ranked,'historical_edge_used':any(x['sample']>=10 for x in ranked)}
+
+
+def multi_timeframe_consensus(tf_data, side='LONG'):
+    """Weighted consensus across available timeframes, with explicit missing frames."""
+    weights={'1m':.5,'5m':.75,'15m':1.0,'1h':1.5,'4h':2.0,'1d':2.5}
+    votes=[]; missing=[]; total=0.0; aligned=0.0
+    for tf,w in weights.items():
+        row=(tf_data or {}).get(tf)
+        if not isinstance(row,dict): missing.append(tf); continue
+        p=row.get('long_prob')
+        if p is None: missing.append(tf); continue
+        try: p=float(p); direction='LONG' if p>=50 else 'SHORT'
+        except Exception: missing.append(tf); continue
+        total+=w; aligned+=w if direction==side else 0
+        votes.append({'timeframe':tf,'direction':direction,'long_probability':round(p,1),'weight':w})
+    if total<=0: return {'status':'insufficient_data','agreement_pct':None,'votes':votes,'missing':missing}
+    return {'status':'ok','agreement_pct':round(aligned/total*100,1),'votes':votes,'missing':missing,
+            'conflict':aligned/total<.55}
+
+
+def signal_confidence_breakdown(side, regime, tf_consensus, cvd, book_imbalance, oi_change, funding, breakout, news_risk):
+    """Transparent evidence score, not a calibrated win probability."""
+    items=[]
+    def add(name, score, weight, available=True):
+        if available and score is not None: items.append({'factor':name,'score':round(float(max(0,min(100,score))),1),'weight':weight})
+    add('timeframe_consensus',tf_consensus.get('agreement_pct') if tf_consensus.get('status')=='ok' else None,2.0,tf_consensus.get('status')=='ok')
+    cvd_delta=(cvd or {}).get('delta_pct') if isinstance(cvd,dict) and cvd.get('status')=='ok' else None
+    add('cvd',50+(float(cvd_delta)*4 if cvd_delta is not None and ((cvd_delta>=0)==(side=='LONG')) else -abs(float(cvd_delta or 0))*4),1.2,cvd_delta is not None)
+    add('orderbook',float(book_imbalance)*100 if book_imbalance is not None and side=='LONG' else (100-float(book_imbalance)*100 if book_imbalance is not None else None),.8,book_imbalance is not None)
+    add('open_interest',65 if oi_change is not None and float(oi_change)>0 else 45 if oi_change is not None else None,.6,oi_change is not None)
+    add('funding_crowding',55 if funding is not None else None,.4,funding is not None)
+    add('breakout_quality',100-float((breakout or {}).get('failure_probability_pct',50)),1.0,(breakout or {}).get('failure_probability_pct') is not None)
+    add('news_risk',100 if not news_risk or news_risk.get('severity') in ('low','none') else 50 if news_risk.get('severity')=='medium' else 15,.7,True)
+    if not items: return {'status':'insufficient_data','score':None,'factors':[],'meaning':'evidence score, not win probability'}
+    score=sum(x['score']*x['weight'] for x in items)/sum(x['weight'] for x in items)
+    return {'status':'ok','score':round(score,1),'factors':items,'coverage':len(items),'meaning':'evidence score, not calibrated win probability'}
+
+
+def dynamic_entry_optimizer(price, atr, side, support=None, resistance=None, consensus=None, max_distance_atr=.65):
+    base=entry_zone_optimizer(price,atr,side,support,resistance)
+    if base.get('status')!='ok': return base
+    zone_low=float(base.get('zone_low',price)); zone_high=float(base.get('zone_high',price))
+    gap=0.0 if zone_low<=float(price)<=zone_high else min(abs(float(price)-zone_low),abs(float(price)-zone_high))
+    distance=gap/max(float(atr or 0),1e-12)
+    allow=distance<=max_distance_atr and not (consensus or {}).get('conflict',False)
+    return {**base,'distance_atr':round(distance,3),'allow_now':bool(allow),
+            'preferred_action':'wait_for_retest' if not allow else 'entry_zone_valid',
+            'reason':'price too far from optimized zone' if distance>max_distance_atr else 'timeframe conflict' if (consensus or {}).get('conflict') else 'zone valid'}
+
+
+def signal_expiration_engine(signal, current_price=None, now=None, ttl_seconds=14400, atr=None):
+    now=float(now or time.time()); created=float((signal or {}).get('ts') or now)
+    age=max(0,now-created); reasons=[]
+    if age>ttl_seconds: reasons.append('ttl_expired')
+    planned=(signal or {}).get('entry')
+    if current_price and planned and atr and float(atr)>0 and abs(float(current_price)-float(planned))/float(atr)>1.5: reasons.append('price_dislocated')
+    if (signal or {}).get('structure_valid') is False: reasons.append('structure_invalid')
+    return {'status':'ok','valid':not reasons,'age_seconds':int(age),'ttl_seconds':int(ttl_seconds),
+            'expires_at':created+ttl_seconds,'reasons':reasons}
+
+
+def dynamic_tp_sl_optimizer(entry, atr, side, support=None, resistance=None, volatility_pct=None, risk_reward_min=1.5):
+    if not entry or not atr or float(entry)<=0 or float(atr)<=0: return {'status':'insufficient_data'}
+    mult=1.8 if volatility_pct is None else 1.4 if volatility_pct<1 else 2.0 if volatility_pct<3 else 2.6
+    stop_dist=float(atr)*mult
+    if side=='LONG': stop=float(entry)-stop_dist; target=float(entry)+max(stop_dist*risk_reward_min,float(atr)*2.2)
+    else: stop=float(entry)+stop_dist; target=float(entry)-max(stop_dist*risk_reward_min,float(atr)*2.2)
+    if side=='LONG' and support and float(support)<float(entry): stop=min(stop,float(support)-.15*float(atr))
+    if side=='SHORT' and resistance and float(resistance)>float(entry): stop=max(stop,float(resistance)+.15*float(atr))
+    risk=abs(float(entry)-stop); reward=abs(target-float(entry))
+    return {'status':'ok','entry':float(entry),'stop':stop,'target_1':target,'risk_reward':round(reward/max(risk,1e-12),2),
+            'atr_multiplier':mult,'method':'ATR + structural level','not_an_order':True}
+
+
+def strategy_tournament(history, min_trades=20):
+    groups={}
+    for row in history or []:
+        name=str(row.get('strategy_type') or row.get('strategy') or 'unknown')
+        try: r=float(row.get('r'))
+        except Exception: continue
+        if np.isfinite(r): groups.setdefault(name,[]).append(r)
+    table=[]
+    for name,vals in groups.items():
+        wins=sum(x>0 for x in vals); losses=sum(x<0 for x in vals)
+        gross_win=sum(x for x in vals if x>0); gross_loss=-sum(x for x in vals if x<0)
+        table.append({'strategy':name,'trades':len(vals),'win_rate_pct':round(wins/len(vals)*100,1),
+                      'expectancy_r':round(float(np.mean(vals)),3),'profit_factor':round(gross_win/gross_loss,2) if gross_loss else None,
+                      'eligible':len(vals)>=min_trades})
+    table.sort(key=lambda x:(x['eligible'],x['expectancy_r']),reverse=True)
+    return {'status':'ok' if table else 'insufficient_data','strategies':table,
+            'leader':next((x['strategy'] for x in table if x['eligible']),None),
+            'warning':'Paper/closed-trade statistics; leader is not automatically promoted'}
+
+
+def spoofing_suspicion_detector(snapshots, min_snapshots=4):
+    """Heuristic only: detects large displayed depth that repeatedly vanishes."""
+    rows=list(snapshots or [])[-20:]
+    if len(rows)<min_snapshots: return {'status':'insufficient_data','suspicion':None,'reason':'order-book snapshot history unavailable'}
+    ratios=[]
+    for a,b in zip(rows,rows[1:]):
+        try:
+            before=float(a.get('depth_notional')); after=float(b.get('depth_notional'))
+            if before>0: ratios.append(max(0,(before-after)/before))
+        except Exception: pass
+    if not ratios: return {'status':'insufficient_data','suspicion':None}
+    score=round(sum(x>.65 for x in ratios)/len(ratios)*100,1)
+    return {'status':'ok','suspicion_pct':score,'events':sum(x>.65 for x in ratios),
+            'label':'elevated' if score>=50 else 'normal','warning':'suspicion heuristic, not proof of spoofing'}
+
+
+def funding_anomaly_detector(funding_history):
+    vals=[]
+    for x in funding_history or []:
+        try: vals.append(float(x))
+        except Exception: pass
+    if len(vals)<4: return {'status':'insufficient_data','anomaly':None}
+    mean=float(np.mean(vals[:-1])); sd=float(np.std(vals[:-1]))
+    z=(vals[-1]-mean)/sd if sd>1e-12 else (99.0 if abs(vals[-1]-mean)>1e-12 else 0.0)
+    return {'status':'ok','latest':vals[-1],'mean':mean,'z_score':round(z,2),
+            'anomaly':abs(z)>=2.5,'direction':'crowded_longs' if vals[-1]>0 else 'crowded_shorts'}
+
+
+def oi_price_divergence_detector(oi_change, price_change):
+    if oi_change is None or price_change is None: return {'status':'insufficient_data'}
+    oi=float(oi_change); px=float(price_change)
+    divergence=(oi>0 and px<0) or (oi<0 and px>0)
+    return {'status':'ok','divergence':divergence,'oi_change_pct':oi,'price_change_pct':px,
+            'interpretation':'OI/price divergence; possible positioning conflict' if divergence else 'OI and price broadly aligned'}
+
+
+def liquidation_cluster_map(liquidation_events, price=None, bins=12):
+    """Cluster only observed liquidation prints; never invent unobserved liquidation levels."""
+    rows=[]
+    for x in liquidation_events or []:
+        try:
+            px=float(x.get('price')); notion=float(x.get('notional',0))
+            if px>0 and notion>0: rows.append((px,notion))
+        except Exception: pass
+    if len(rows)<5: return {'status':'insufficient_data','clusters':[],'reason':'too few observed liquidation prints'}
+    lo=min(x[0] for x in rows); hi=max(x[0] for x in rows)
+    if hi<=lo: return {'status':'insufficient_data','clusters':[]}
+    edges=np.linspace(lo,hi,max(3,min(30,int(bins))+1)); groups=[]
+    for a,b in zip(edges[:-1],edges[1:]):
+        val=sum(n for px,n in rows if a<=px<(b if b<hi else b+1e-12))
+        if val: groups.append({'from':float(a),'to':float(b),'observed_notional':round(val,2),'distance_pct':round(((((a+b)/2)/price)-1)*100,2) if price else None})
+    return {'status':'ok','clusters':sorted(groups,key=lambda x:x['observed_notional'],reverse=True)[:8],
+            'source':'observed liquidation prints only','sample':len(rows)}
+
+
+def portfolio_exposure_assessment(positions, correlation_matrix=None, max_positions=8):
+    rows=list(positions or []); gross=sum(abs(float(x.get('notional',x.get('size_usd',0)) or 0)) for x in rows)
+    sides={'LONG':0.0,'SHORT':0.0}; assets={}
+    for x in rows:
+        side=str(x.get('side','')).upper(); n=abs(float(x.get('notional',x.get('size_usd',0)) or 0))
+        if side in sides: sides[side]+=n
+        asset=str(x.get('coin') or x.get('symbol') or 'unknown'); assets[asset]=assets.get(asset,0)+n
+    largest=max(assets.values()) if assets else 0
+    return {'status':'ok' if rows else 'insufficient_data','positions':len(rows),'gross_notional':round(gross,2),
+            'long_notional':round(sides['LONG'],2),'short_notional':round(sides['SHORT'],2),
+            'largest_asset_share_pct':round(largest/gross*100,1) if gross else None,
+            'position_count_warning':len(rows)>max_positions,'concentration_warning':bool(gross and largest/gross>.5),
+            'correlation_adjusted':'not_available_without_position_return_series'}
+
+
+def risk_of_ruin_simulator(win_rate_pct, avg_win_r, avg_loss_r, risk_pct=1.0, target_drawdown_pct=50, simulations=1500, trades=300, seed=17):
+    try:
+        p=max(0,min(1,float(win_rate_pct)/100)); aw=max(0,float(avg_win_r)); al=max(1e-9,abs(float(avg_loss_r))); risk=max(.01,min(20,float(risk_pct)))/100
+    except Exception: return {'status':'insufficient_data'}
+    if p<=0 or aw<=0: return {'status':'invalid_inputs'}
+    rng=np.random.default_rng(seed); n=max(100,min(2500,int(simulations))); steps=max(20,min(500,int(trades)))
+    wins=rng.random((n,steps))<p
+    factors=np.where(wins,1+aw*risk,1-al*risk)
+    paths=np.cumprod(np.maximum(factors,1e-6),axis=1)
+    ruined=np.any(paths<=1-target_drawdown_pct/100,axis=1)
+    terminal=paths[:,-1]
+    return {'status':'ok','risk_of_ruin_pct':round(float(np.mean(ruined))*100,2),'median_terminal_equity':round(float(np.median(terminal)),3),
+            'assumptions':{'win_rate_pct':p*100,'avg_win_r':aw,'avg_loss_r':al,'risk_pct':risk*100,'target_drawdown_pct':target_drawdown_pct},
+            'warning':'Monte Carlo scenario, not a forecast; ignores changing edge and execution costs'}
+
+
+def system_health_assessment(data_status=None, latency_ms=None, errors=None, stale_sources=None):
+    data_status=data_status or {}; errors=int(errors or 0); stale=list(stale_sources or [])
+    missing=[k for k,v in data_status.items() if v not in ('ok','healthy','cached')]
+    score=max(0,100-15*len(missing)-10*len(stale)-min(40,errors*2)-(15 if latency_ms is not None and latency_ms>3000 else 0))
+    return {'status':'ok','health_score':score,'state':'healthy' if score>=85 else 'degraded' if score>=60 else 'critical',
+            'missing_sources':missing,'stale_sources':stale,'errors':errors,'latency_ms':latency_ms}
+
+
+def adaptive_quant_engine(tf_data, side='LONG', price=None, atr=None, support=None, resistance=None,
+                          cvd=None, book_imbalance=None, oi_change=None, price_change=None, funding=None,
+                          funding_history=None, breakout=None, news_risk=None, history=None, signal=None,
+                          positions=None, orderbook_snapshots=None, liquidation_events=None):
+    """One compact orchestration for the 5.2 adaptive modules; all outputs are evidence-labelled."""
+    df=((tf_data or {}).get('4h') or {}).get('df')
+    regime=market_regime_classifier(df)
+    consensus=multi_timeframe_consensus(tf_data,side)
+    conflicts=signal_conflict_detector(side,{'cvd':(1 if (cvd or {}).get('delta_pct',0)>0 else -1 if (cvd or {}).get('delta_pct',0)<0 else None) if (cvd or {}).get('status')=='ok' else None,
+        'orderbook':(1 if book_imbalance>.55 else -1 if book_imbalance<.45 else None) if book_imbalance is not None else None,
+        'timeframes':('LONG' if consensus.get('agreement_pct',50)>=50 else 'SHORT') if consensus.get('status')=='ok' else None})
+    conf=signal_confidence_breakdown(side,regime,consensus,cvd,book_imbalance,oi_change,funding,breakout,news_risk)
+    selector=adaptive_strategy_selector(regime,history)
+    entry=dynamic_entry_optimizer(price,atr,side,support,resistance,consensus) if price and atr else {'status':'insufficient_data'}
+    expiry=signal_expiration_engine(signal or {},price,atr=atr) if signal else {'status':'no_signal'}
+    tp_sl=dynamic_tp_sl_optimizer(price,atr,side,support,resistance) if price and atr else {'status':'insufficient_data'}
+    tournament=strategy_tournament(history)
+    funding_anomaly=funding_anomaly_detector(funding_history)
+    oi_div=oi_price_divergence_detector(oi_change,price_change)
+    spoof=spoofing_suspicion_detector(orderbook_snapshots)
+    liq_clusters=liquidation_cluster_map(liquidation_events,price)
+    exposure=portfolio_exposure_assessment(positions)
+    risk_ruin={'status':'insufficient_data'}
+    closed=[x for x in (history or []) if x.get('r') is not None]
+    if len(closed)>=30:
+        vals=[float(x['r']) for x in closed]; wins=[x for x in vals if x>0]; losses=[x for x in vals if x<0]
+        if wins and losses: risk_ruin=risk_of_ruin_simulator(len(wins)/len(vals)*100,float(np.mean(wins)),float(np.mean(losses)))
+    return {'status':'ok','market_regime_ai':regime,'multi_timeframe_consensus':consensus,
+            'signal_conflicts':conflicts,'signal_confidence_breakdown':conf,'adaptive_strategy':selector,
+            'dynamic_entry_optimizer':entry,'signal_expiration':expiry,'dynamic_tp_sl':tp_sl,
+            'strategy_tournament':tournament,'funding_anomaly':funding_anomaly,'oi_price_divergence':oi_div,
+            'spoofing_suspicion':spoof,'liquidation_clusters':liq_clusters,'portfolio_exposure':exposure,
+            'risk_of_ruin':risk_ruin,'system_health':system_health_assessment({'ohlcv':'ok' if df is not None else 'missing'})}
