@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v4.6 MAX QUANT INTELLIGENCE
+IXCLY Trading Bot v5.1 QUANTUM LIVE DATA
 
 - 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
 - Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
@@ -43,9 +43,10 @@ import pandas as pd
 from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, risk_position_size, indicator_snapshot, breakout_assessment, anti_fomo_assessment, news_risk_assessment, market_panic_assessment, scanner_rank_score, signal_memory_summary, adaptive_scanner_profile, atr_target_multipliers, atr_stop_multiplier, breakeven_trigger_reached, close_warning_confirmed,
                                scan_diagnostic_summary, is_memory_guard_reason, cleanup as cleanup_intelligence,
                                forecast_scenarios, early_movement_assessment, liquidation_risk_assessment,
-                               signal_quality_breakdown, strategy_performance, self_audit_summary,
-                               directional_confidence, entry_timing_assessment, reversal_probability_assessment,
-                               adaptive_confidence_threshold, portfolio_exposure_assessment, no_trade_decision)
+                               signal_quality_breakdown, strategy_performance, self_audit_summary, quant_intelligence_stack, portfolio_var_es, correlation_clusters,
+                               drawdown_guard, daily_loss_guard, emergency_risk_lock, trade_opportunity_ranking, portfolio_risk_dashboard, strategy_lab_report, signal_decay_assessment,
+                               multi_asset_lead_lag_engine, correlation_breakdown, market_breadth_engine, adverse_selection_detector, post_entry_validation, chasing_protection, trade_recovery_assessment, adaptive_exit_assessment, walk_forward_validation, strategy_retirement, cross_exchange_watch, risk_budget_allocator,
+                               probability_calibration_report, loss_autopsy, missed_opportunity_analysis, parameter_stability_test, parameter_sensitivity_from_history, signed_cvd_from_agg_trades, normalize_macro_calendar_events, macro_event_shield)
 from ixcly_brain import (market_fingerprint, signal_fingerprint, decision_brain, liquidity_path,
                         news_reaction_assessment, strategy_dna, counterfactual_lab, replay_signal,
                         regime_transition_assessment, signal_fragility, evidence_conflict_map, score_calibration)
@@ -215,6 +216,8 @@ ADMIN_ID = clean_key(os.getenv("ADMIN_ID"))
 GEMINI_API_KEYS = [clean_key(k) for k in os.getenv("GEMINI_API_KEYS", "").split(",") if clean_key(k)]
 GROQ_API_KEY = clean_key(os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = clean_key(os.getenv("OPENROUTER_API_KEY"))
+FINNHUB_API_KEY = clean_key(os.getenv("FINNHUB_API_KEY"))
+FINANCECALENDAR_API_KEY = clean_key(os.getenv("FINANCECALENDAR_API_KEY"))
 POLLINATIONS_KEY = clean_key(os.getenv("POLLINATIONS_KEY"))
 GEMINI_MODEL = clean_key(os.getenv("GEMINI_MODEL"))
 GROQ_MODEL = clean_key(os.getenv("GROQ_MODEL"))
@@ -247,7 +250,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "4.6-MAX-QUANT"
+VERSION = "5.1.0-QUANTUM-LIVE-DATA"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -368,7 +371,7 @@ news_blackout_kind, news_blackout_since = "misc", 0.0
 LIQUIDATIONS = []
 _liq_last_alert = {}
 _liq_lock = asyncio.Lock()
-_macro_cache = {"ts": 0.0, "events": []}
+_macro_cache = {"ts": 0.0, "events": [], "status": "not_configured", "source": "Finnhub", "blocked": False, "error": None}
 _alert_sent = {}
 
 # =====================================================================
@@ -392,12 +395,12 @@ LEGACY_STATE_FILE = os.path.join(os.getcwd(), "bot_state.json")
 LOCAL_BACKUP_FILES = (STATE_FILE + ".bak", STATE_FILE + ".bak2")
 BACKUP_INTERVAL = max(900, int(os.getenv("IXCLY_BACKUP_INTERVAL", "900")))  # 15 минут по умолчанию
 STATE_LOCK = threading.RLock()
-STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}, "orders": {}, "payments": {}, "news_publisher_state": {}}
+STATE = {"users": {}, "signal_history": [], "analysis_db": {}, "last_msgs": {}, "persist": {}, "meta": {"saved_at": 0}, "promos": {}, "ads": {}, "paper": {}, "support_tickets": {}, "orders": {}, "payments": {}, "news_publisher_state": {}, "quant_price_history": {}, "quant_observations": [], "quant_parameter_history": {}}
 state_dirty = False
 backup_dirty = False
 last_backup_ts = 0.0
 STATE_KEYS = ("users", "signal_history", "analysis_db", "last_msgs", "persist", "promos", "ads", "paper", "support_tickets",
-              "orders", "payments", "news_publisher_state")  # бизнес-история, платежи и отметки публикаций переживают рестарт/бэкап
+              "orders", "payments", "news_publisher_state", "quant_price_history", "quant_observations", "quant_parameter_history")  # durable quant data survives restarts
 
 
 def state_touch(important=True):
@@ -649,6 +652,24 @@ def load_signal_history():
         return list(STATE.get("signal_history", []))
 
 
+def quant_closed_trade_history(coin=None, limit=500):
+    """Closed user trades only; open orders/positions are excluded from model learning."""
+    rows = []
+    for uid, user in list(_users().items()):
+        if not isinstance(user, dict):
+            continue
+        for item in user.get("trade_log", []) or []:
+            if not isinstance(item, dict) or not item.get("closed_at"):
+                continue
+            if coin and str(item.get("coin", "")).upper() != str(coin).upper():
+                continue
+            row = dict(item)
+            row["status"] = "closed"
+            rows.append(row)
+    rows.sort(key=lambda x: float(x.get("closed_at", 0) or 0))
+    return rows[-max(1, min(2000, int(limit))):]
+
+
 def save_signal_history(hist):
     hist = hist[-2000:]
     for x in hist[:-150]:
@@ -692,26 +713,6 @@ def set_user_field(user_id, **fields):
     state_touch()
 
 
-def save_user_api_keys(user_id, exchange, api_key, secret_key):
-    if not cipher:
-        return False
-    set_user_field(user_id, exchange=exchange,
-                   **{f"{exchange}_api": cipher.encrypt(api_key.encode()).decode(),
-                      f"{exchange}_secret": cipher.encrypt(secret_key.encode()).decode()})
-    return True
-
-
-def get_user_api_keys(user_id, exchange=None):
-    u = _users().get(str(user_id), {})
-    if not exchange:
-        exchange = u.get("exchange", "binance")
-    api_f, sec_f = f"{exchange}_api", f"{exchange}_secret"
-    if not cipher or not u.get(api_f):
-        return None, None
-    try:
-        return cipher.decrypt(u[api_f].encode()).decode(), cipher.decrypt(u[sec_f].encode()).decode()
-    except Exception:
-        return None, None
 
 
 def safe_webhook(url):
@@ -2725,14 +2726,14 @@ def render_caption(res, uid=None):
         (1, f"📌 {res['type']} · Conf <b>{res['strength']}%</b> · {res['regime']}"),
         (1, make_strength_bar(res["strength"])),
     ]
-    _q = res.get("quant_intelligence") or {}
-    _qd = _q.get("direction") or {}
-    _qe = _q.get("entry_timing") or {}
-    _qr = _q.get("reversal_risk") or {}
-    if _qd.get("directional_confidence") is not None:
-        parts.append((2, f"🧠 Уверенность направления: <b>{_qd['directional_confidence']:.1f}%</b> · TF {(_qd.get('timeframe_agreement_pct') or 0):.0f}%"))
-    if _qe.get("score") is not None or _qr.get("risk_score") is not None:
-        parts.append((2, f"⏱ Вход {(_qe.get('score') if _qe.get('score') is not None else '—')}/100 · риск разворота {(_qr.get('risk_score') if _qr.get('risk_score') is not None else '—')}/100"))
+    _quant = res.get("quant") or {}
+    _bayes = _quant.get("bayesian_probability") or {}
+    if _bayes.get("long_pct") is not None and _bayes.get("short_pct") is not None:
+        parts.append((2, f"🧮 Bayesian LONG/SHORT: {_bayes['long_pct']:.1f}% / {_bayes['short_pct']:.1f}% · выборка {_bayes.get('closed_sample', 0)} закрытых"))
+    if _quant.get("risk_score") is not None:
+        parts.append((2, f"🛡 Risk Score: {_quant.get('risk_score')}/100 · {_quant.get('risk_state', 'YELLOW')}"))
+    if _quant.get("monte_carlo", {}).get("tp_before_sl_pct") is not None:
+        parts.append((3, f"🎲 Monte Carlo: TP раньше SL в {_quant['monte_carlo']['tp_before_sl_pct']:.1f}% сценариев (модель)"))
     if res.get("fake_breakout"):
         parts.append((1, "⚠️ <b>Ложный пробой (тонкий объем)</b>"))
     parts += [
@@ -2804,6 +2805,97 @@ async def oi_price_state(coin):
     else:
         st = None
     return st, round(oi_pct, 2), round(p_pct, 2)
+
+
+_cross_exchange_price_cache = {}
+
+
+async def cross_exchange_price_snapshot(coin):
+    """Low-frequency cross-exchange spot comparison for shortlisted signal candidates."""
+    cached = _cross_exchange_price_cache.get(coin)
+    if cached and time.time() - cached[0] < 90:
+        return cached[1]
+    selected = [x for x in EXCHANGES if x.get("name") in ("BINANCE", "BYBIT", "OKX", "MEXC")]
+    async def fetch_one(ex):
+        try:
+            rows = await _fetch_klines(ex, coin, "15m", limit=30, min_rows=5)
+            return ex["name"], float(rows[-1][4])
+        except Exception as exc:
+            log.debug("Cross exchange %s %s: %s", coin, ex.get("name"), exc)
+            return ex.get("name"), None
+    results = await asyncio.gather(*[fetch_one(ex) for ex in selected[:4]], return_exceptions=True)
+    quotes = {name: price for result in results if isinstance(result, tuple) for name, price in [result] if price and price > 0}
+    report = cross_exchange_watch(quotes, max_spread_pct=.35)
+    report["quotes"] = quotes
+    _cross_exchange_price_cache[coin] = (time.time(), report)
+    if len(_cross_exchange_price_cache) > 80:
+        for key in sorted(_cross_exchange_price_cache, key=lambda k: _cross_exchange_price_cache[k][0])[:20]:
+            _cross_exchange_price_cache.pop(key, None)
+    return report
+
+
+_cvd_cache = {}
+_cvd_request_times = []
+_cvd_lock = asyncio.Lock()
+
+
+async def fetch_futures_cvd(coin, limit=500):
+    """Signed-aggressor CVD proxy from Binance USD-M aggregate trades (public endpoint)."""
+    coin = normalize_ticker(str(coin or ""))
+    if not coin:
+        return {"status": "invalid_symbol"}
+    now = time.time()
+    cached = _cvd_cache.get(coin)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    async with _cvd_lock:
+        cached = _cvd_cache.get(coin)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        recent = [t for t in _cvd_request_times if now - t < 60]
+        _cvd_request_times[:] = recent
+        if len(recent) >= 4:
+            return {"status": "deferred_rate_budget", "source": "Binance USD-M aggTrades"}
+        _cvd_request_times.append(now)
+        try:
+            rows = await http_json("https://fapi.binance.com/fapi/v1/aggTrades",
+                params={"symbol": f"{coin}USDT", "limit": max(100, min(1000, int(limit)))}, timeout=7)
+            result = signed_cvd_from_agg_trades(rows if isinstance(rows, list) else [])
+            result["source"] = "Binance USD-M aggTrades"
+            _cvd_cache[coin] = (now, result)
+            if len(_cvd_cache) > 80:
+                for key in sorted(_cvd_cache, key=lambda k: _cvd_cache[k][0])[:20]:
+                    _cvd_cache.pop(key, None)
+            return result
+        except Exception as e:
+            result = {"status": "unavailable", "source": "Binance USD-M aggTrades", "error": str(e)[:140]}
+            _cvd_cache[coin] = (now, result)
+            return result
+
+
+async def order_book_quality_snapshot(coin, price):
+    """Best bid/ask, spread and visible near-touch depth from the cached Binance book."""
+    if not price or price <= 0:
+        return {"status":"insufficient_data"}
+    try:
+        ent = _ob_cache.get(coin)
+        if ent and time.time() - ent[0] < 30:
+            book = ent[1]
+        else:
+            book = await http_json("https://fapi.binance.com/fapi/v1/depth", params={"symbol":f"{coin}USDT","limit":100}, timeout=5)
+            _ob_cache[coin] = (time.time(), book)
+            _trim_timed_cache(_ob_cache, 80)
+        bids = [(float(p),float(q)) for p,q in book.get("bids",[]) if float(p)>0 and float(q)>0]
+        asks = [(float(p),float(q)) for p,q in book.get("asks",[]) if float(p)>0 and float(q)>0]
+        if not bids or not asks: return {"status":"insufficient_data"}
+        best_bid=max(p for p,q in bids); best_ask=min(p for p,q in asks)
+        mid=(best_bid+best_ask)/2
+        depth=sum(p*q for p,q in bids if p>=price*.995)+sum(p*q for p,q in asks if p<=price*1.005)
+        return {"status":"ok","best_bid":best_bid,"best_ask":best_ask,"spread_pct":(best_ask-best_bid)/mid*100,
+                "depth_notional":depth,"source":"Binance futures depth","ts":time.time()}
+    except Exception as exc:
+        log.debug("Order book quality %s: %s", coin, exc)
+        return {"status":"unavailable","reason":str(exc)[:120]}
 
 
 async def order_book_imbalance(coin, price):
@@ -3268,6 +3360,83 @@ async def ai_analyst(coin, setup, bt, ctx, entry, tps, sls, tf_data):
 
 
 
+def record_quant_missed_candidate(res):
+    """Store only ENTER candidates vetoed by quant gates for delayed, non-leaky counterfactual evaluation."""
+    try:
+        now = time.time(); coin = str(res.get("coin", "")).upper(); side = str(res.get("side", "")).upper()
+        entry = float(res.get("entry", 0) or 0); stop = float((res.get("sls") or [0])[0] or 0); target = float((res.get("tps") or [0])[0] or 0)
+        if not coin or side not in ("LONG", "SHORT") or min(entry, stop, target) <= 0:
+            return False
+        rows = STATE.setdefault("quant_observations", [])
+        bucket = int(now // 900)
+        if any(x.get("coin") == coin and x.get("side") == side and int(float(x.get("ts", 0) or 0) // 900) == bucket for x in rows[-100:]):
+            return False
+        rows.append({"id": f"{coin}:{side}:{int(now)}", "coin": coin, "side": side, "ts": now,
+            "entry": entry, "stop": stop, "target": target, "status": "pending", "taken": False,
+            "was_valid": False, "gate": (res.get("quant") or {}).get("risk_state"),
+            "risk_flags": list((res.get("quant") or {}).get("risk_flags") or [])[:8],
+            "strategy_score": float((res.get("quant") or {}).get("risk_score", res.get("strength", 0)) or 0)})
+        del rows[:-300]
+        state_touch(True)
+        return True
+    except Exception as e:
+        log.debug("quant missed candidate store: %s", e)
+        return False
+
+
+async def evaluate_quant_missed_observations(limit=4):
+    """Evaluate matured rejected candidates using later closed 15m candles; stop wins same-candle ties."""
+    now = time.time(); rows = STATE.setdefault("quant_observations", [])
+    pending = [x for x in rows if x.get("status") == "pending" and now - float(x.get("ts", 0) or 0) >= 4 * 3600]
+    changed = False
+    for item in pending[:max(1, min(8, int(limit)))]:
+        try:
+            frames, _source = await get_market_data_light(item["coin"], ("15m",))
+            frame = (frames.get("15m") or {}).get("df")
+            if frame is None or frame.empty:
+                continue
+            ts_key = "ts" if "ts" in frame.columns else "timestamp" if "timestamp" in frame.columns else None
+            if not ts_key:
+                continue
+            times = pd.to_numeric(frame[ts_key], errors="coerce")
+            start_ms = float(item["ts"]) * 1000
+            sample = frame.loc[times >= start_ms]
+            if sample.empty:
+                continue
+            side = item["side"]; stop = float(item["stop"]); target = float(item["target"])
+            outcome = "no_touch"; outcome_ts = None
+            for _, bar in sample.iterrows():
+                high = float(bar["high"]); low = float(bar["low"])
+                stop_hit = low <= stop if side == "LONG" else high >= stop
+                target_hit = high >= target if side == "LONG" else low <= target
+                if stop_hit and target_hit:
+                    outcome = "stop_first_same_candle"; outcome_ts = float(bar[ts_key]) / 1000; break
+                if stop_hit:
+                    outcome = "stop_first"; outcome_ts = float(bar[ts_key]) / 1000; break
+                if target_hit:
+                    outcome = "target_first"; outcome_ts = float(bar[ts_key]) / 1000; break
+            item.update(status="evaluated", outcome=outcome, outcome_ts=outcome_ts,
+                was_valid=(outcome == "target_first"), evaluated_at=now,
+                evaluation_note="Counterfactual only; no actual order or fill is implied.")
+            changed = True
+            await asyncio.sleep(0.15)
+        except Exception as e:
+            log.debug("missed opportunity eval %s: %s", item.get("coin"), e)
+    if changed:
+        state_touch(True)
+    return sum(x.get("status") == "pending" for x in rows)
+
+
+async def quant_observation_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            await evaluate_quant_missed_observations(limit=4)
+        except Exception as e:
+            log.warning("Quant observation loop: %s", e)
+        await asyncio.sleep(300)
+
+
 async def build_analysis(coin, tf_data, setup, bt, ctx, source):
     info = tf_data["4h"]
     is_long = setup["is_long"]
@@ -3295,7 +3464,7 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "is_long": is_long, "side": "LONG" if is_long else "SHORT", "verdict": verdict, "type": setup["type"],
         "strength": setup["strength"], "regime": info["regime"], "news_status": setup["news_status"],
         "btc_txt": ctx.get("btc_txt", "нет данных"), "fng": ctx.get("fng"), "price": info["price"],
-        "entry": entry, "tps": tps, "sls": sls, "risk_dist": risk_dist, "leverage": leverage,
+        "entry": entry, "tps": tps, "sls": sls, "risk_dist": risk_dist, "atr": info.get("atr"), "leverage": leverage,
         "reasons": setup["reasons"], "patterns": setup["patterns"], "notes": setup["notes"],
         "squeeze": info["squeeze"], "bt": bt, "comment": comment, "risk_lvl": risk_lvl, "engine": engine,
         "liq_x20": liq_x20, "fake_breakout": setup.get("fake_breakout", False),
@@ -3344,33 +3513,67 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
             res["comment"] = "Decision Brain: " + res["decision_brain"].get("reason", "повышенный риск")
     except Exception as _brain_err:
         log.debug("Decision Brain analysis skipped for %s: %s", coin, _brain_err)
-    # IXCLY Quant Intelligence: independent direction confidence, entry timing,
-    # early adverse-move risk, historical calibration and explicit no-trade gate.
+    # IXCLY 5.0 Quant Intelligence: run bounded independent models in the actual signal path.
+    _verdict_before_quant = res.get("verdict")
     try:
-        _hist_quant = load_signal_history()
-        _side_quant = res.get("side")
-        _confidence = directional_confidence(tf_data, _side_quant, _hist_quant, min_calibration_sample=20)
-        _timing = entry_timing_assessment(res, tf_data)
-        _reversal = reversal_probability_assessment(
-            _side_quant, tf_data, res.get("regime_transition"),
-            res.get("evidence_conflict_map"), _brain_early if "_brain_early" in locals() else None,
-            res.get("breakout"))
-        _adaptive = adaptive_confidence_threshold(_hist_quant, CONF_FINAL,
-            regime=str(info.get("regime") or "") if isinstance(info.get("regime"), str) else None,
-            min_sample=20)
-        _no_trade = no_trade_decision(_confidence, _timing, _reversal, _adaptive, CONF_FINAL)
-        res["quant_intelligence"] = {"direction": _confidence, "entry_timing": _timing,
-            "reversal_risk": _reversal, "adaptive_threshold": _adaptive, "gate": _no_trade}
-        # This is an additional safety gate. Existing strategy and Decision Brain filters still apply.
-        if res.get("verdict") == "ENTER" and _no_trade.get("blocked"):
+        _qextra = setup.get("extras", {}) if isinstance(setup, dict) else {}
+        _book_quality = await order_book_quality_snapshot(coin, float(info.get("price") or entry))
+        _liq_now = time.time()
+        _liq_recent = [x for x in LIQUIDATIONS if x.get("coin") == coin and _liq_now-float(x.get("ts",0) or 0) <= 3600]
+        _liq_baseline = [x for x in LIQUIDATIONS if x.get("coin") == coin and 3600 < _liq_now-float(x.get("ts",0) or 0) <= 25*3600]
+        _liq_notional = sum(float(x.get("notional",0) or 0) for x in _liq_recent) if _liq_recent else None
+        _liq_average = (sum(float(x.get("notional",0) or 0) for x in _liq_baseline)/24) if _liq_baseline else None
+        _cross_exchange = await cross_exchange_price_snapshot(coin) if setup.get("strength", 0) >= 78 else {"status":"deferred_for_resource_budget"}
+        _cvd_data = await fetch_futures_cvd(coin) if setup.get("strength", 0) >= 70 else {"status":"deferred_for_resource_budget","source":"Binance USD-M aggTrades"}
+        if time.time() - float(_macro_cache.get("ts", 0) or 0) > 900:
+            await check_macro_calendar()
+        _notional = (DEPOSIT * RISK_PCT / 100 / risk_dist * entry) if risk_dist > 0 else None
+        _depth_ratio = (_book_quality.get("depth_notional", 0) / _notional) if _notional and _book_quality.get("status") == "ok" else None
+        _qstack = quant_intelligence_stack(
+            tf_data, side=res.get("side", "LONG"), entry=entry, stop=(sls[0] if sls else None),
+            targets=tps, history=quant_closed_trade_history(coin, 500), funding=_qextra.get("funding"),
+            oi_change=_qextra.get("oi_change_pct", _qextra.get("oi_pct")),
+            orderbook_bid_share=_qextra.get("imbalance"), news_risk=res.get("news_risk"),
+            run_simulation=bool(setup.get("strength", 0) >= 78), leverage=leverage,
+            spread_pct=_book_quality.get("spread_pct") if _book_quality.get("status") == "ok" else None,
+            depth_ratio=_depth_ratio, depth_notional=_book_quality.get("depth_notional") if _book_quality.get("status") == "ok" else None,
+            notional=_notional, cross_exchange_data=_cross_exchange,
+            funding_history=_qextra.get("funding_history"), liquidation_notional=_liq_notional,
+            average_liquidation_notional=_liq_average, cvd_data=_cvd_data,
+            macro_events=list(_macro_cache.get("events") or []), macro_feed_status=_macro_cache.get("status"))
+        res["quant"] = _qstack
+        res["probability"] = _qstack.get("bayesian_probability")
+        res["risk_score"] = _qstack.get("risk_score")
+        res["risk_state"] = _qstack.get("risk_state")
+        res["cross_exchange"] = _qstack.get("cross_exchange")
+        # RED always blocks. YELLOW is WAIT until a fresh confirmation; do not manufacture an entry.
+        if res.get("verdict") == "ENTER" and _qstack.get("risk_state") in ("RED", "YELLOW"):
             res["verdict"] = "WAIT"
-            res["comment"] = "Quant Intelligence: вход заблокирован — " + "; ".join(_no_trade.get("reasons", [])[:3])
+            flags = ", ".join(_qstack.get("risk_flags") or []) or "недостаточно подтверждений"
+            res["comment"] = f"Quant Risk Gate {_qstack.get('risk_state')}: {flags}. Требуется повторное подтверждение. " + str(res.get("comment", ""))
+        _strategy_type = str(setup.get("type", "unknown"))[:80]
+        _strategy_history = [x for x in quant_closed_trade_history(None, 2000) if str(x.get("strategy_type", "unknown")) == _strategy_type]
+        _strategy_wf = walk_forward_validation(_strategy_history, min_trades=30)
+        _retirement = strategy_retirement({"trades":_strategy_wf.get("test",{}).get("trades",0),
+                                           "expectancy_r":_strategy_wf.get("test",{}).get("expectancy_r")}, min_trades=30)
+        res["strategy_retirement"] = {**_retirement, "walk_forward":_strategy_wf}
+        _retired = STATE.setdefault("quant_retired_strategies", {})
+        _retired_until = float((_retired.get(_strategy_type) or {}).get("until", 0) or 0)
+        if _retirement.get("status") == "retire":
+            _retired[_strategy_type] = {"until":time.time()+7*86400,"expectancy_r":_retirement.get("expectancy_r"),"sample":_retirement.get("sample")}
+            state_touch(False)
+            _retired_until = _retired[_strategy_type]["until"]
+        if _retired_until > time.time() and res.get("verdict") == "ENTER":
+            res["verdict"] = "WAIT"
+            res["comment"] = "Strategy Retirement: стратегия временно отключена из-за отрицательной OOS-эффективности. " + str(res.get("comment", ""))
     except Exception as _quant_err:
         log.warning("Quant Intelligence skipped for %s: %s", coin, _quant_err)
-        res["quant_intelligence"] = {"status": "error", "note": "Дополнительная оценка недоступна; решение не повышается автоматически."}
+        res["quant"] = {"status": "error", "reason": str(_quant_err)[:180], "risk_state": "YELLOW"}
         if res.get("verdict") == "ENTER":
             res["verdict"] = "WAIT"
-            res["comment"] = "Дополнительная проверка риска недоступна — вход временно заблокирован."
+            res["comment"] = "Quant-проверка не завершилась: вход временно не подтверждён. " + str(res.get("comment", ""))
+    if _verdict_before_quant == "ENTER" and res.get("verdict") == "WAIT" and (res.get("quant") or {}).get("risk_state") in ("RED", "YELLOW"):
+        record_quant_missed_candidate(res)
     res["text"] = render_caption(res)
     return res
 
@@ -3543,26 +3746,48 @@ async def btc_shock():
 
 
 async def check_macro_calendar():
-    """Календарь USD кэшируется на 15 минут, включая неудачные запросы."""
-    if time.time() - _macro_cache["ts"] > 900:
-        _macro_cache["ts"] = time.time()
-        try:
-            async with http.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-                                timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    _macro_cache["events"] = [e for e in await r.json(content_type=None)
-                                               if e.get("impact") == "High" and e.get("country") == "USD"]
-        except Exception as e:
-            log.warning(f"Календарь: {e}")
-    now = datetime.now(timezone.utc)
-    for ev in _macro_cache["events"]:
-        try:
-            diff = (datetime.fromisoformat(ev["date"].replace("Z", "+00:00")) - now).total_seconds()
-            if -1800 < diff < 1800:
-                return True
-        except Exception:
-            continue
-    return False
+    """High-impact calendar: FinanceCalendar first, Finnhub fallback; exact timestamps only."""
+    now = time.time()
+    if now - float(_macro_cache.get("ts", 0) or 0) <= 900:
+        return bool(_macro_cache.get("blocked"))
+    _macro_cache.update(ts=now, events=[], blocked=False, error=None)
+    today = datetime.now(timezone.utc).date()
+    relevant_countries = {"US", "EU", "GB", "UK", "JP", "CN", "CA", "AU", "CH", "DE"}
+    raw = []; source = None; stale_rows = 0
+    try:
+        if FINANCECALENDAR_API_KEY:
+            params = {"from": (today - timedelta(days=1)).isoformat(), "to": (today + timedelta(days=2)).isoformat(),
+                      "impact": "high", "country": "US,GB,EU,DE,JP,CN,CA,AU,CH", "category": "economic-indicators,central-banks-monetary-policy",
+                      "limit": 300, "format": "json"}
+            async with http.get("https://www.financecalendar.com/wp-json/fc/v1/calendar", params=params,
+                headers={"X-API-Key": FINANCECALENDAR_API_KEY}, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                payload = await resp.json(content_type=None)
+                if resp.status != 200:
+                    raise RuntimeError(f"FinanceCalendar HTTP {resp.status}")
+            raw = payload.get("events", []) if isinstance(payload, dict) else []
+            source = "FinanceCalendar"
+        elif FINNHUB_API_KEY:
+            payload = await http_json("https://finnhub.io/api/v1/calendar/economic",
+                params={"from": (today - timedelta(days=1)).isoformat(), "to": (today + timedelta(days=2)).isoformat(),
+                        "token": FINNHUB_API_KEY}, timeout=12)
+            raw = payload.get("economicCalendar", []) if isinstance(payload, dict) else []
+            source = "Finnhub"
+        else:
+            _macro_cache.update(status="not_configured", error="Set FINANCECALENDAR_API_KEY or FINNHUB_API_KEY")
+            return False
+
+        normalized = normalize_macro_calendar_events(raw if isinstance(raw, list) else [], source=source,
+            relevant_countries=relevant_countries)
+        events = normalized["events"]
+        _macro_cache.update(events=events, status="ok", source=source, error=None,
+            stale_rows=normalized["stale_rows"], untimed_rows=normalized["untimed_rows"], calendar_rows=normalized["raw_rows"])
+        shield = macro_event_shield(events, now=now, window_minutes=30, feed_status="ok")
+        _macro_cache["blocked"] = bool(shield.get("blocked"))
+        return _macro_cache["blocked"]
+    except Exception as e:
+        _macro_cache.update(status="error", error=str(e)[:180], events=[], blocked=False, source=source or "unavailable")
+        log.warning("Macro calendar unavailable: %s", e)
+        return False
 
 
 def signal_recipients(coin, side):
@@ -3926,11 +4151,6 @@ async def scan_once(send=True):
                 if abs(r["entry"] - r["price"]) / max(r["price"], 1e-12) > 0.03:
                     _rej("цена ушла от точки входа более чем на 3%")
                     continue
-                _portfolio_now = portfolio_exposure_assessment(hist, CORRELATION_GROUPS)
-                _side_count = (_portfolio_now.get("side_counts") or {}).get(r["side"], 0)
-                if _side_count >= 3:
-                    _rej("портфельный фильтр: уже слишком много однонаправленных активных сигналов")
-                    continue
                 grp = next((i for i, g in enumerate(CORRELATION_GROUPS) if r["coin"] in g), None)
                 if grp is not None:
                     if (grp, r["side"]) in used_groups:
@@ -3950,8 +4170,6 @@ async def scan_once(send=True):
                         "regime_transition": r.get("regime_transition"),
                         "signal_fragility": r.get("signal_fragility"),
                         "evidence_conflict_map": r.get("evidence_conflict_map"),
-                        "quant_intelligence": r.get("quant_intelligence"),
-                        "raw_long_probability": ((r.get("quant_intelligence") or {}).get("direction") or {}).get("raw_long_probability"),
                         "memory_features": {"regime": (r.get("market_regime") or {}).get("name", "unknown"),
                                              "quality": r.get("quality_score"), "atr_pct": (r.get("indicators") or {}).get("atr_pct"),
                                              "rsi": r.get("rsi"), "adx": r.get("adx"), "btc_context": r.get("btc_txt"),
@@ -4108,15 +4326,111 @@ async def live_refresh_coin(coin):
     except Exception as e:
         log.info(f"live {coin}: {e}")
         return None
-    live = {"ts": time.time(), "price": tf_data["4h"]["price"], "atr": tf_data["4h"]["atr"],
+    _close4h = tf_data["4h"].get("df")
+    _change24h = None
+    try:
+        _closes = _close4h["close"].astype(float).tolist()
+        if len(_closes) >= 7 and _closes[-7] > 0:
+            _change24h = round((_closes[-1] / _closes[-7] - 1) * 100, 4)
+    except Exception:
+        pass
+    live = {"ts": time.time(), "price": tf_data["4h"]["price"], "atr": tf_data["4h"]["atr"], "change_pct": _change24h,
             "long_prob": {t: round(tf_data[t]["long_prob"], 1) for t in tf_data},
             "rsi": {t: round(tf_data[t]["rsi"], 1) for t in tf_data},
             "adx": round(tf_data["4h"]["adx"], 1), "regime": tf_data["4h"]["regime"], "source": source}
     LIVE[coin] = live
+    try:
+        # One observation per 5-minute bucket makes cross-asset returns timestamp-aligned.
+        series = LIVE_PRICE_HISTORY.setdefault(coin, [])
+        bucket = int(live["ts"] // 300) * 300
+        point = (bucket, float(live["price"]))
+        if series and int(series[-1][0]) == bucket:
+            series[-1] = point
+        elif not series or bucket > int(series[-1][0]):
+            series.append(point)
+        if len(series) > 576:  # 48h at 5m resolution
+            del series[:-576]
+        if len(LIVE_PRICE_HISTORY) > 100:
+            oldest = sorted(LIVE_PRICE_HISTORY, key=lambda k: LIVE_PRICE_HISTORY[k][-1][0] if LIVE_PRICE_HISTORY.get(k) else 0)[:20]
+            for key in oldest:
+                LIVE_PRICE_HISTORY.pop(key, None)
+        _persist_quant_price_history()
+    except Exception as _history_err:
+        log.debug("quant history update %s: %s", coin, _history_err)
     return live
 
 
 LIVE = {}
+LIVE_PRICE_HISTORY = {}
+_quant_history_last_persist = 0.0
+
+def restore_quant_price_history():
+    """Restore bounded 5m close snapshots from the durable STATE store."""
+    LIVE_PRICE_HISTORY.clear()
+    raw = STATE.get("quant_price_history", {})
+    if not isinstance(raw, dict):
+        return 0
+    for coin, rows in list(raw.items())[:100]:
+        clean = []
+        for row in (rows or [])[-576:]:
+            try:
+                ts, price = int(row[0]), float(row[1])
+                if ts > 0 and np.isfinite(price) and price > 0:
+                    clean.append((ts, price))
+            except Exception:
+                continue
+        if clean:
+            LIVE_PRICE_HISTORY[str(coin).upper()] = clean
+    return len(LIVE_PRICE_HISTORY)
+
+
+def _persist_quant_price_history(force=False):
+    global _quant_history_last_persist
+    now = time.time()
+    if not force and now - _quant_history_last_persist < 300:
+        return
+    with STATE_LOCK:
+        STATE["quant_price_history"] = {c: list(rows[-576:]) for c, rows in list(LIVE_PRICE_HISTORY.items())[-100:] if rows}
+    _quant_history_last_persist = now
+    state_touch(False)
+
+
+def build_synchronized_asset_returns(max_assets=24, min_points=31):
+    """Greedily build one cohort sharing exact 5m timestamps; never align by array index."""
+    if "BTC" not in LIVE_PRICE_HISTORY:
+        return {}
+    maps = {asset: {int(ts): float(price) for ts, price in rows if price > 0}
+            for asset, rows in LIVE_PRICE_HISTORY.items()}
+    btc = maps.get("BTC", {})
+    if len(btc) < min_points + 1:
+        return {}
+    candidates = []
+    for asset, points in maps.items():
+        if asset == "BTC":
+            continue
+        common = set(btc).intersection(points)
+        if len(common) >= min_points + 1:
+            candidates.append((len(common), asset, points))
+    candidates.sort(reverse=True)
+    common = set(btc)
+    selected = []
+    for _, asset, points in candidates:
+        trial = common.intersection(points)
+        if len(trial) >= min_points + 1:
+            common = trial
+            selected.append((asset, points))
+        if len(selected) >= max(1, int(max_assets)):
+            break
+    if not selected:
+        return {}
+    timestamps = sorted(common)[-577:]
+    btc_prices = np.asarray([btc[t] for t in timestamps], dtype=float)
+    btc_returns = (np.diff(btc_prices) / np.maximum(btc_prices[:-1], 1e-12)).tolist()
+    out = {"BTC": btc_returns}
+    for asset, points in selected:
+        prices = np.asarray([points[t] for t in timestamps], dtype=float)
+        out[asset] = (np.diff(prices) / np.maximum(prices[:-1], 1e-12)).tolist()
+    return out
 
 
 async def live_monitor_loop():
@@ -4140,9 +4454,13 @@ async def live_monitor_loop():
                         continue
                     x["live_price"] = live["price"]
                     x["live_ts"] = live["ts"]
-                    if x.get("status") == "active" and time.time() - x["ts"] > SIGNAL_TTL:
-                        x["status"], changed = "expired", True
-                        continue
+                    if x.get("status") == "active":
+                        decay = signal_decay_assessment(x, current_price=live.get("price"), atr=live.get("atr"), ttl_seconds=SIGNAL_TTL)
+                        x["decay_score"] = decay.get("decay_score")
+                        if not decay.get("valid", True):
+                            await invalidate_signal(x, "Сигнал потерял актуальность: " + ", ".join(decay.get("reasons") or ["условия изменились"]))
+                            changed = True
+                            continue
                     reason = live_check_signal(x, live)
                     if reason:
                         await invalidate_signal(x, reason)
@@ -4230,10 +4548,66 @@ def _remember_closed_order(uid, pos):
 
 
 def open_tracked_position(uid, coin, res):
-    """Create one tracked limit order; duplicate/previously closed signal orders are rejected."""
+    """Create one virtual tracked limit order with strict portfolio-risk caps."""
     if get_open_position(uid, coin):
         return False
     res = dict(res)
+    if res.get("verdict") and res.get("verdict") != "ENTER":
+        return False
+    if res.get("risk_state") and res.get("risk_state") != "GREEN":
+        return False
+    if res.get("stale") or res.get("price_only"):
+        return False
+    if res.get("ts") and time.time() - float(res.get("ts", 0) or 0) > 300:
+        return False
+    side = str(res.get("side", "")).upper()
+    try:
+        entry = float(res.get("entry")); stops = [float(x) for x in (res.get("sls") or [])]
+        targets = [float(x) for x in (res.get("tps") or [])]
+    except (TypeError, ValueError):
+        return False
+    if side not in ("LONG", "SHORT") or not np.isfinite(entry) or entry <= 0 or len(stops) < 1 or len(targets) != 3:
+        return False
+    stop = stops[0]
+    if not np.isfinite(stop) or (side == "LONG" and stop >= entry) or (side == "SHORT" and stop <= entry):
+        return False
+    if any(not np.isfinite(x) or (x <= entry if side == "LONG" else x >= entry) for x in targets):
+        return False
+    _current_price = float(res.get("price") or 0)
+    _atr = float(res.get("atr") or 0)
+    if _current_price > 0 and _atr > 0:
+        _chase = chasing_protection(_current_price, entry, _atr, side)
+        if _chase.get("status") == "ok" and not _chase.get("allow"):
+            return False
+    user_state = _users().get(str(uid), {}) if isinstance(_users().get(str(uid), {}), dict) else {}
+    open_now = list((user_state.get("open_positions") or {}).values())
+    risk_settings = get_user_risk_settings(uid)
+    _closed_log = [x for x in (user_state.get("trade_log", []) or []) if x.get("closed_at")]
+    _equity_now = next((float(x.get("equity_after")) for x in reversed(_closed_log) if x.get("equity_after")), float(risk_settings.get("deposit", DEPOSIT)))
+    _day_start = time.time() - 86400
+    _day_losses = [float(x.get("usd", 0) or 0) for x in _closed_log if float(x.get("closed_at", 0) or 0) >= _day_start]
+    _daily_guard = daily_loss_guard(_day_losses, _equity_now, float(user_state.get("max_daily_loss_pct", 3.0) or 3.0)) if _day_losses else {"locked":False}
+    _equity_curve = [float(x.get("equity_after")) for x in _closed_log if x.get("equity_after")]
+    _drawdown = drawdown_guard(_equity_curve, float(user_state.get("max_drawdown_pct", 12.0) or 12.0)) if len(_equity_curve) >= 3 else {"locked":False}
+    if emergency_risk_lock(None, _drawdown, _daily_guard, None, True).get("locked"):
+        return False
+    requested_risk = float(res.get("risk_pct") or risk_settings.get("risk_pct", RISK_PCT))
+    max_total = float(user_state.get("max_open_risk_pct", 5.0) or 5.0)
+    total_open = sum(max(0.0, float(x.get("risk_pct", 0) or 0)) for x in open_now)
+    same_side = sum(max(0.0, float(x.get("risk_pct", 0) or 0)) for x in open_now if str(x.get("side", "")).upper() == side)
+    group_risk = sum(max(0.0, float(x.get("risk_pct", 0) or 0)) for x in open_now
+                     if str(x.get("side", "")).upper() == side and any(coin in group and x.get("coin") in group for group in CORRELATION_GROUPS))
+    remaining_budget = min(max_total-total_open, max_total*.65-same_side, max_total*.50-group_risk)
+    if remaining_budget <= 0:
+        log.info("Tracked position rejected by risk cap uid=%s coin=%s total=%.2f same_side=%.2f group=%.2f", uid, coin, total_open, same_side, group_risk)
+        return False
+    allocation = risk_budget_allocator(float(risk_settings.get("deposit", DEPOSIT)),
+        [{"coin":coin,"quality":float(res.get("strength",50) or 50),"correlation_penalty":1.0 if group_risk else 0.0}],
+        total_risk_pct=remaining_budget)
+    allocated = float((allocation.get("allocations") or [{}])[0].get("risk_pct", 0) or 0)
+    requested_risk = min(requested_risk, allocated)
+    if requested_risk <= 0:
+        return False
     if not (res.get("signal_id") or res.get("signal_ts")):
         candidate = next((x for x in get_active_signals() if x.get("coin") == coin and
                           x.get("side") == res.get("side") and
@@ -4244,12 +4618,25 @@ def open_tracked_position(uid, coin, res):
     closed_keys = _users().get(str(uid), {}).get("closed_order_keys", [])
     if order_key in closed_keys:
         return False
+    _prob_data = res.get("probability") or (res.get("quant") or {}).get("bayesian_probability") or {}
+    _predicted_probability = (_prob_data.get("long_pct" if side == "LONG" else "short_pct") / 100.0
+                              if isinstance(_prob_data, dict) and isinstance(_prob_data.get("long_pct" if side == "LONG" else "short_pct"), (int, float)) else None)
     position = {
         "order_key": order_key,
-        "side": res["side"], "entry_price": float(res["entry"]), "created_at": time.time(), "entered_at": None,
+        "side": side, "entry_price": entry, "created_at": time.time(), "entered_at": None,
+        "position_mode": "virtual_tracked", "risk_pct": requested_risk,
+        "risk_budget_requested_pct": float(res.get("risk_pct") or risk_settings.get("risk_pct", RISK_PCT)),
+        "risk_budget_allocated_pct": requested_risk,
+        "strategy_type": str(res.get("type", "unknown"))[:80],
+        "strategy_score": float((res.get("quant") or {}).get("risk_score", res.get("strength", 0)) or 0),
+        "quant_parameters": {"risk_state": (res.get("quant") or {}).get("risk_state"),
+            "risk_score": (res.get("quant") or {}).get("risk_score"),
+            "entry_quality": (res.get("quant") or {}).get("entry_quality_score"),
+            "model_confidence": (res.get("quant") or {}).get("model_confidence")},
+        "predicted_probability": _predicted_probability,
         "entry_source": "user" if res.get("entry_override") else "signal",
-        "tp1": res["tps"][0], "tp2": res["tps"][1], "tp3": res["tps"][2], "sl1": res["sls"][0], "sl2": res["sls"][1],
-        "sl_orig": res["sls"][0], "risk_pct": get_user_risk_settings(uid)["risk_pct"],
+        "tp1": targets[0], "tp2": targets[1], "tp3": targets[2], "sl1": stops[0], "sl2": stops[1] if len(stops) > 1 else stops[0],
+        "sl_orig": stops[0],
         "notified_close": False, "waiting_entry": True, "peak_pnl": 0.0}
     set_user_open_position(uid, coin, position)
     record_trade_event(uid, coin, position, "limit_created", "Пользователь подтвердил вход по сигналу")
@@ -4284,12 +4671,22 @@ def record_trade_result(uid, coin, pos, exit_price, reason):
     rec = {"coin": coin, "side": side, "entry": entry, "exit": exit_price, "order_key": pos.get("order_key"), "pnl": round(pnl, 2), "r": round(r, 2),
            "usd": round(s["deposit"] * s["risk_pct"] / 100 * r, 2),
            "result": "win" if (h1 or pnl > 0.05) else "loss" if pnl < -0.05 else "be",
-           "reason": reason, "max_tp": 3 if h3 else 2 if h2 else 1 if h1 else 0,
+           "reason": reason, "strategy_type": pos.get("strategy_type", "unknown"), "max_tp": 3 if h3 else 2 if h2 else 1 if h1 else 0,
            "peak": round(pos.get("peak_pnl", 0.0), 2), "opened_at": pos.get("entered_at", now), "closed_at": now,
+           "predicted_probability": pos.get("predicted_probability"),
+           "strategy_score": pos.get("strategy_score"),
+           "quant_parameters": pos.get("quant_parameters"),
+           "adverse_selection": pos.get("adverse_selection"),
+           "post_fill_move_pct": pos.get("post_fill_move_pct"),
            "hold_h": round((now - pos.get("entered_at", now)) / 3600, 1)}
     with STATE_LOCK:
         u = STATE["users"].setdefault(str(uid), {"active": True})
-        u["trade_log"] = (u.get("trade_log", []) + [rec])[-300:]
+        prior_log = list(u.get("trade_log", []) or [])
+        prior_usd = sum(float(x.get("usd", 0) or 0) for x in prior_log)
+        rec["equity_before"] = round(float(s["deposit"]) + prior_usd, 2)
+        rec["equity_after"] = round(rec["equity_before"] + float(rec["usd"]), 2)
+        rec["portfolio_return_pct"] = round(float(rec["usd"]) / max(1e-9, rec["equity_before"]) * 100, 5)
+        u["trade_log"] = (prior_log + [rec])[-300:]
     record_trade_event(uid, coin, pos, "closed", reason, price=exit_price)
     state_touch()
     return rec
@@ -4430,6 +4827,25 @@ async def check_position(user_id, coin, pos):
     sign = 1 if side == "LONG" else -1
     pnl = price_change_pct(side, entry, price)
 
+    # Measure adverse selection on virtual fills after fixed observation windows.
+    if not pos.get("waiting_entry") and pos.get("entered_at"):
+        elapsed = time.time() - float(pos.get("entered_at") or time.time())
+        if elapsed >= 60 and not pos.get("post_entry_validated"):
+            validation = post_entry_validation(entry, price, pos.get("sl_orig", pos.get("sl1")), side)
+            pos["post_entry_validated"] = True
+            pos["post_entry_validation"] = validation
+            set_user_open_position(user_id, coin, pos)
+            record_trade_event(user_id, coin, pos, "post_entry_validation", str(validation.get("status")), price=price)
+        if elapsed >= 300 and not pos.get("adverse_selection_assessed"):
+            adverse = adverse_selection_detector(entry, price, side)
+            pos["adverse_selection_assessed"] = True
+            pos["adverse_selection"] = bool(adverse.get("adverse"))
+            pos["post_fill_move_pct"] = adverse.get("post_fill_move_pct")
+            set_user_open_position(user_id, coin, pos)
+            record_trade_event(user_id, coin, pos, "adverse_selection_review", str(adverse.get("post_fill_move_pct")), price=price)
+            if adverse.get("adverse") and abs(float(adverse.get("post_fill_move_pct", 0) or 0)) >= .35:
+                await _tell(user_id, f"⚠️ <b>Проверка качества входа {coin}</b>\nПосле виртуального исполнения цена сместилась против позиции на {abs(float(adverse.get('post_fill_move_pct'))):.2f}%. Проверьте исполнение и актуальность сценария.")
+
     if pos.get("waiting_entry"):
         newer = next((x for x in get_active_signals() if x["coin"] == coin and x["side"] == side
                       and abs(x["entry"] - entry) / entry > 0.003), None)
@@ -4548,6 +4964,25 @@ async def check_position(user_id, coin, pos):
         elif not deterioration and pos.get("trend_deterioration_warned"):
             pos["trend_deterioration_warned"] = False
             set_user_open_position(user_id, coin, pos)
+        directional_values = list(directional.values())
+        momentum_score = float(np.mean(directional_values)) if directional_values else None
+        exit_eval = adaptive_exit_assessment(pos, price, momentum_score, structure_valid=not reversal)
+        recovery_eval = trade_recovery_assessment(pos, price, structure_valid=not reversal, side_prob=momentum_score)
+        pos["adaptive_exit_state"] = exit_eval.get("action")
+        pos["recovery_state"] = recovery_eval.get("status")
+        if exit_eval.get("action") == "review_full_exit" and not pos.get("critical_exit_warned"):
+            pos["critical_exit_warned"] = True
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🔴 <b>Критический риск разворота: {coin} ({side})</b>\nПервоначальная структура выглядит разрушенной. Немедленно переоцените риск и рассмотрите закрытие позиции согласно своему торговому плану. Бот не закрывает реальную биржевую позицию.")
+        elif exit_eval.get("action") == "consider_partial_profit" and not pos.get("partial_profit_warned"):
+            pos["partial_profit_warned"] = True
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🟠 <b>Ослабление импульса: {coin}</b>\nПозиция в прибыли, импульс ослабевает. Рассмотрите частичную фиксацию согласно своему плану.")
+        elif exit_eval.get("action") == "hold_to_plan" and (pos.get("critical_exit_warned") or pos.get("partial_profit_warned")):
+            pos["critical_exit_warned"] = False
+            pos["partial_profit_warned"] = False
+            set_user_open_position(user_id, coin, pos)
+            await _tell(user_id, f"🟢 <b>Риск по {coin} снизился</b>\nНаправленные таймфреймы восстановились. Предыдущая оценка риска ослаблена; продолжайте следовать торговому плану.")
 
     tp1, tp2, tp3 = pos["tp1"], pos["tp2"], pos["tp3"]
     if sign * (price - current_sl) <= 0:
@@ -5124,8 +5559,7 @@ def mini_api(act):
 
 def _sig_item(x, live=True):
     item = {k: x.get(k) for k in ("coin", "side", "type", "strength", "entry", "tp1", "tp2", "tp3", "sl1", "status", "ts",
-                                  "max_tp_hit", "cancel_reason", "live_price", "quality_score", "quality_label", "market_regime", "volume_anomaly",
-                                  "quant_intelligence", "raw_long_probability")}
+                                  "max_tp_hit", "cancel_reason", "live_price", "quality_score", "quality_label", "market_regime", "volume_anomaly")}
     item["sent"] = len(x.get("sent_to", []))
     if live and x.get("coin") in LIVE:
         lv = LIVE[x["coin"]]
@@ -5237,7 +5671,8 @@ _ai_center_cache = {}
 async def ai_center_snapshot(uid, coin="BTC"):
     """One bounded snapshot assembled from existing feeds; no parallel scanner."""
     coin = normalize_ticker(str(coin or "BTC")) or "BTC"
-    cached = _ai_center_cache.get(coin)
+    cache_key = (str(uid), coin)
+    cached = _ai_center_cache.get(cache_key)
     if cached and time.time() - cached[0] < 60:
         return cached[1]
     try:
@@ -5245,12 +5680,14 @@ async def ai_center_snapshot(uid, coin="BTC"):
     except Exception:
         tf_data, source = {}, None
     funding = await get_funding(coin)
+    funding_history = await funding_trend(coin)
     oi_state, oi_pct, oi_price_pct = await oi_price_state(coin)
     price = None
     info = tf_data.get("4h") or tf_data.get("1h") or {}
     try: price = float(info.get("price") or info["df"]["close"].iloc[-1])
     except Exception: price = await get_simple_price(coin)
     book = await order_book_imbalance(coin, price) if price else None
+    book_quality = await order_book_quality_snapshot(coin, price) if price else {"status":"insufficient_data"}
     df = info.get("df")
     regime = market_regime(df) if df is not None else {"name":"unknown","volatility":"unknown"}
     vol = volume_anomaly(df) if df is not None else None
@@ -5287,21 +5724,54 @@ async def ai_center_snapshot(uid, coin="BTC"):
         "news_bias": market_bias.get("bias") if isinstance(market_bias, dict) else None,
         "btc_change_pct": btc_context_move}, df) if df is not None else {"status": "insufficient_data"}
     calibration = score_calibration(hist, 8)
-    quant_direction = directional_confidence(tf_data, active_side or "LONG", hist, min_calibration_sample=20)
-    quant_entry = entry_timing_assessment(active or {"side": active_side, "price": price,
-        "entry": (active or {}).get("entry", price)}, tf_data)
-    quant_reversal = reversal_probability_assessment(active_side or "LONG", tf_data, phase_transition,
-        evidence_map, early, (active or {}).get("breakout"))
-    quant_adaptive = adaptive_confidence_threshold(hist, CONF_FINAL,
-        regime=regime.get("name") if isinstance(regime, dict) else None, min_sample=20)
-    quant_gate = no_trade_decision(quant_direction, quant_entry, quant_reversal, quant_adaptive, CONF_FINAL)
-    portfolio_heat = portfolio_exposure_assessment(hist, CORRELATION_GROUPS)
-    quant_intelligence = {"direction": quant_direction, "entry_timing": quant_entry,
-        "reversal_risk": quant_reversal, "adaptive_threshold": quant_adaptive,
-        "gate": quant_gate, "portfolio": portfolio_heat}
+    _closed_quant_history = quant_closed_trade_history(None, 2000)
+    probability_calibration = probability_calibration_report(_closed_quant_history, min_sample=20)
+    _loss_rows = [loss_autopsy(x) for x in _closed_quant_history if float(x.get("r", 0) or 0) < 0]
+    loss_autopsy_report = {"status": "ok" if _loss_rows else "insufficient_data", "losses": len(_loss_rows), "recent": _loss_rows[-10:]}
+    _user_quant = _users().get(str(uid), {}) if isinstance(_users().get(str(uid), {}), dict) else {}
+    _user_trade_log = list(_user_quant.get("trade_log", []) or [])
+    _user_positions = list((_user_quant.get("open_positions", {}) or {}).values())
+    _exchange_risk = {"status":"disabled_by_design"}
+    _liq_distance_data = None
+    try:
+        _cvd_snapshot = await fetch_futures_cvd(coin)
+        if time.time() - float(_macro_cache.get("ts", 0) or 0) > 900:
+            await check_macro_calendar()
+        quant_view = quant_intelligence_stack(tf_data, side=(active or {}).get("side", "LONG"),
+            entry=(active or {}).get("entry"), stop=((active or {}).get("sls") or [None])[0],
+            targets=(active or {}).get("tps"), history=quant_closed_trade_history(coin, 500), funding=funding, oi_change=oi_pct,
+            orderbook_bid_share=book, news_risk=news_risk, run_simulation=False, portfolio_history=_user_trade_log,
+            leverage=(active or {}).get("leverage"), funding_history=funding_history,
+            spread_pct=book_quality.get("spread_pct") if book_quality.get("status") == "ok" else None,
+            depth_notional=book_quality.get("depth_notional") if book_quality.get("status") == "ok" else None,
+            liquidation_notional=sum(float(x.get("notional",0) or 0) for x in coin_liqs) if coin_liqs else None,
+            cvd_data=_cvd_snapshot, macro_events=list(_macro_cache.get("events") or []),
+            macro_feed_status=_macro_cache.get("status"), liquidation_distance_data=_liq_distance_data)
+    except Exception as _qerr:
+        log.debug("AI center quant snapshot %s: %s", coin, _qerr)
+        quant_view = {"status":"error","risk_state":"YELLOW","reason":str(_qerr)[:160]}
+    try:
+        _asset_returns = build_synchronized_asset_returns(max_assets=24, min_points=31)
+        quant_view["market_breadth"] = market_breadth_engine({k: v.get("change_pct") for k, v in LIVE.items() if isinstance(v, dict) and v.get("change_pct") is not None})
+        quant_view["multi_asset_lead_lag"] = multi_asset_lead_lag_engine(_asset_returns, "BTC")
+        quant_view["correlation_clusters"] = correlation_clusters(_asset_returns)
+        if coin in _asset_returns and "BTC" in _asset_returns:
+            quant_view["correlation_breakdown"] = correlation_breakdown({"asset":_asset_returns[coin], "BTC":_asset_returns["BTC"]}, "BTC")
+        else:
+            quant_view["correlation_breakdown"] = {"status":"insufficient_data","reason":"BTC/asset synchronized history unavailable"}
+    except Exception as _corr_err:
+        quant_view["multi_asset_lead_lag"] = {"status":"error"}
+        quant_view["correlation_clusters"] = {"status":"error"}
+        quant_view["correlation_breakdown"] = {"status":"error"}
+    try:
+        portfolio_dashboard = portfolio_risk_dashboard(_user_positions, _user_trade_log, get_user_risk_settings(uid).get("deposit"))
+        strategy_lab = strategy_lab_report(_user_trade_log)
+    except Exception as _portfolio_err:
+        log.debug("Quant portfolio dashboard %s: %s", uid, _portfolio_err)
+        portfolio_dashboard, strategy_lab = {"status":"error"}, {"status":"error"}
     result = {"coin":coin,"source":source,"price":price,"regime":regime,"volume_anomaly":vol,
             "early_movement":early,"forecast":forecast,"funding":funding,"oi_state":oi_state,
-            "oi_change_pct":oi_pct,"oi_price_change_pct":oi_price_pct,"orderbook_bid_share":book,
+            "oi_change_pct":oi_pct,"oi_price_change_pct":oi_price_pct,"orderbook_bid_share":book,"orderbook_quality":book_quality,
             "crowding_risk":crowd,"news_risk":news_risk,"news":{"title":market_bias.get("title_ru"),
             "bias":market_bias.get("bias"),"severity":market_bias.get("severity"),"ts":market_bias.get("ts")},
             "active_signal":active_payload,"quality":quality,"memory":mem,
@@ -5309,11 +5779,15 @@ async def ai_center_snapshot(uid, coin="BTC"):
             "signal_dna":brain_signal,"decision_brain":brain_decision,
             "regime_transition":phase_transition,"signal_fragility":fragility,
             "evidence_conflict_map":evidence_map,"score_calibration":calibration,
-            "quant_intelligence":quant_intelligence,"portfolio_heatmap":portfolio_heat,
             "strategy_dna":strategy_profile,"counterfactual_lab":counterfactual,
             "liquidations_1h":{"count":len(coin_liqs),"notional":round(sum(float(x.get("notional",0) or 0) for x in coin_liqs),2)},
-            "system_memory":self_audit_summary(hist,30),"generated_at":time.time()}
-    _ai_center_cache[coin] = (time.time(), result)
+            "system_memory":self_audit_summary(hist,30),"quant":quant_view,
+            "probability_calibration":probability_calibration, "loss_autopsy":loss_autopsy_report,
+            "parameter_stability":parameter_sensitivity_from_history(_closed_quant_history),
+            "missed_opportunities":missed_opportunity_analysis(STATE.get("quant_observations", [])),
+            "macro_calendar":{"status":_macro_cache.get("status"),"source":_macro_cache.get("source"),"blocked":_macro_cache.get("blocked"),"events":list(_macro_cache.get("events") or [])[:10],"stale_rows":_macro_cache.get("stale_rows",0),"calendar_rows":_macro_cache.get("calendar_rows",0),"attribution_url":"https://www.financecalendar.com" if _macro_cache.get("source")=="FinanceCalendar" else None},
+            "portfolio_risk":portfolio_dashboard,"strategy_lab":strategy_lab,"generated_at":time.time()}
+    _ai_center_cache[cache_key] = (time.time(), result)
     if len(_ai_center_cache) > 24:
         oldest = sorted(_ai_center_cache.items(), key=lambda kv: kv[1][0])[:8]
         for key, _ in oldest: _ai_center_cache.pop(key, None)
@@ -5381,6 +5855,7 @@ async def mini_dispatch(uid, u, act, d):
             heat.append({"coin": coin, "price": item.get("price"), "change_pct": item.get("change_pct"),
                          "long_prob": item.get("long_prob")})
         heat.sort(key=lambda x: abs(_safe_float(x.get("change_pct"))), reverse=True)
+        breadth = market_breadth_engine({x["coin"]: x.get("change_pct") for x in heat if x.get("change_pct") is not None})
         # Общий режим берём только из реального BTC OHLC-анализа.
         # Не подменяем его новостным bias и не выводим техническое "unknown" пользователю.
         btc_cached = analysis_cache.get("BTC")
@@ -5401,7 +5876,7 @@ async def mini_dispatch(uid, u, act, d):
                 "signals": [{"coin": x.get("coin"), "side": x.get("side"), "quality": x.get("quality_score"),
                              "grade": x.get("quality_label"), "regime": x.get("market_regime"),
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
-                "heatmap": heat[:20], "cache_items": len(analysis_cache), "live_items": len(LIVE),
+                "heatmap": heat[:20], "market_breadth": breadth, "cache_items": len(analysis_cache), "live_items": len(LIVE),
                 "rss_mb": _current_rss_mb(), "peak_rss_mb": _rss_mb(),
                 "runtime_memory": _runtime_memory_snapshot() if uid in ADMIN_IDS else None,
                 "last_scan": _scan_info_for_user(uid)}
@@ -5601,11 +6076,18 @@ async def mini_dispatch(uid, u, act, d):
             stop = d.get("stop", (res.get("sls") or [None])[0])
             targets = d.get("targets") or res.get("tps") or []
             if isinstance(targets, str): targets = [x.strip() for x in targets.split(",") if x.strip()]
+            _paper_price = float(res.get("price") or entry)
+            _paper_book = await order_book_quality_snapshot(coin, _paper_price)
+            _execution_context = ({"spread_pct":_paper_book.get("spread_pct"),
+                                  "depth_notional":_paper_book.get("depth_notional"),
+                                  "max_participation":.10}
+                                 if _paper_book.get("status") == "ok" else None)
             with STATE_LOCK:
                 pos = paper_open_position(STATE.setdefault("paper", {}), uid, coin, res.get("side"), entry, stop, targets,
-                                          d.get("risk_pct"), d.get("account_id"))
+                                          d.get("risk_pct"), d.get("account_id"), execution_context=_execution_context)
                 state_touch()
-            return {"msg": f"Paper-позиция {coin} открыта виртуально", "position": pos}
+            _fill_msg = (f"частичное виртуальное исполнение {pos.get('fill_ratio_pct',0):.1f}%" if pos.get("fill_status") == "partial" else "виртуальное исполнение")
+            return {"msg": f"Paper-позиция {coin}: {_fill_msg}", "position": pos}
         except ValueError as e:
             return {"error": str(e)}
 
@@ -5694,8 +6176,10 @@ async def mini_dispatch(uid, u, act, d):
         if not res or res.get("price_only"):
             return {"error": "Нет данных по монете"}
         await asyncio.to_thread(add_user_saved_signal, uid, coin, render_caption(res, uid), res)
-        open_tracked_position(uid, coin, res)
-        return {"msg": f"{coin} сохранён и поставлен на сопровождение"}
+        tracked = open_tracked_position(uid, coin, res)
+        if tracked:
+            return {"msg": f"{coin} сохранён; виртуальное сопровождение включено"}
+        return {"msg": f"{coin} сохранён в избранное, но сопровождение не включено: сигнал не прошёл проверку входа или лимит риска"}
 
     if act == "fav_del" and coin:
         await asyncio.to_thread(del_user_saved_signal, uid, coin)
@@ -5733,7 +6217,7 @@ async def mini_dispatch(uid, u, act, d):
         if not open_tracked_position(uid, coin, res):
             if get_open_position(uid, coin):
                 return {"error": "Сделка по монете уже открыта"}
-            return {"error": "Этот сигнал уже сопровождался и был закрыт. Дождитесь нового сигнала."}
+            return {"error": "Вход отклонён: сигнал устарел, риск не GREEN, лимит портфеля превышен или сигнал уже закрывался. Обновите анализ и проверьте риск."}
         await _tell(uid, f"⏳ <b>Лимитный ордер: {coin} ({res['side']})</b>\nЦена входа: <code>{fmt(res['entry'])}</code>\n"
                          f"Сопровождение включено. Если цена входа отличается от вашей биржи, измените её в Mini App.")
         return {"msg": "Ордер поставлен, ждём вход"}
@@ -6214,7 +6698,7 @@ async def handle_signal_button(cb, data):
                 return await safe_answer(cb, f"Уже открыт {side} по {oc}: монеты коррелируют", True)
         if not open_tracked_position(uid, coin, res):
             message = ("Сделка по монете уже открыта" if get_open_position(uid, coin)
-                       else "Этот сигнал уже закрыт. Дождитесь нового сигнала.")
+                       else "Вход отклонён: сигнал устарел, риск не GREEN или лимит портфеля превышен.")
             return await safe_answer(cb, message, True)
         await safe_answer(cb, "Включено виртуальное сопровождение")
         await _tell(uid, f"👁 <b>Виртуальное сопровождение включено: {coin} {side}</b>\\n"
@@ -8416,6 +8900,7 @@ async def main():
     ANALYZE_SEM = asyncio.Semaphore(3)
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers={"User-Agent": "IXCLY/3.1"})
     load_state_file()
+    restore_quant_price_history()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -8471,6 +8956,8 @@ async def main():
         restored = await telegram_restore()
         if restored:
             log.info(f"✅ Состояние восстановлено из бэкапа, пользователей: {restored}")
+        restored_quant = restore_quant_price_history()
+        log.info("Quant market history restored: %s assets", restored_quant)
         load_active_chats()
         normalize_signals()
         for _uid in list(_users()):
@@ -8484,7 +8971,7 @@ async def main():
         background = [asyncio.create_task(c()) for c in (
             scanner_loop, live_monitor_loop, price_feed_loop, global_signal_monitor_loop, position_monitor_loop,
             news_watcher_loop, price_alerts_loop, morning_briefing_loop, daily_digest_loop, daily_call_loop,
-            anomaly_scanner_loop, liquidation_stream_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop)]
+            anomaly_scanner_loop, liquidation_stream_loop, state_flush_loop, access_reminder_loop, churn_offer_loop, backup_loop, heartbeat_loop, memory_janitor_loop, quant_observation_loop)]
         background.append(asyncio.create_task(update_market_bias()))
         if clean_key(os.getenv("IXCLY_NEWS_BOT_TOKEN")):
             background.append(asyncio.create_task(news_publisher_loop(stop)))
@@ -8506,6 +8993,7 @@ async def main():
             t.cancel()
         await asyncio.gather(*pollers, return_exceptions=True)
         try:
+            _persist_quant_price_history(force=True)
             await asyncio.wait_for(telegram_backup("перед остановкой"), timeout=15)
         except Exception:
             await asyncio.to_thread(flush_state)
