@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IXCLY Trading Bot v5.1 QUANTUM LIVE DATA
+IXCLY Trading Bot v5.2 ADAPTIVE QUANT ENGINE
 
 - 20+ индикаторов, свечные паттерны, 4 таймфрейма, бэктест, ИИ-аналитик
 - Единый экран: фото + подпись в ОДНОМ сообщении, везде кнопка «Назад»
@@ -250,7 +250,7 @@ def make_cipher():
 
 cipher = make_cipher()
 
-VERSION = "5.1.0-QUANTUM-LIVE-DATA"
+VERSION = "5.2.0-ADAPTIVE-QUANT-ENGINE"
 runtime = {"main_bot": "?", "admin_bot": "не запущен"}
 POLL_START_DELAY = int(os.getenv("POLL_START_DELAY", "45" if os.getenv("RENDER") else "0"))
 
@@ -2835,6 +2835,7 @@ async def cross_exchange_price_snapshot(coin):
 
 
 _cvd_cache = {}
+_ob_snapshot_history = {}
 _cvd_request_times = []
 _cvd_lock = asyncio.Lock()
 
@@ -2891,6 +2892,11 @@ async def order_book_quality_snapshot(coin, price):
         best_bid=max(p for p,q in bids); best_ask=min(p for p,q in asks)
         mid=(best_bid+best_ask)/2
         depth=sum(p*q for p,q in bids if p>=price*.995)+sum(p*q for p,q in asks if p<=price*1.005)
+        _sample={"ts":time.time(),"depth_notional":float(depth)}
+        _hist=_ob_snapshot_history.setdefault(coin,[]); _hist.append(_sample)
+        if len(_hist)>20: del _hist[:-20]
+        if len(_ob_snapshot_history)>100:
+            for _k in list(_ob_snapshot_history)[:20]: _ob_snapshot_history.pop(_k,None)
         return {"status":"ok","best_bid":best_bid,"best_ask":best_ask,"spread_pct":(best_ask-best_bid)/mid*100,
                 "depth_notional":depth,"source":"Binance futures depth","ts":time.time()}
     except Exception as exc:
@@ -3540,7 +3546,11 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
             notional=_notional, cross_exchange_data=_cross_exchange,
             funding_history=_qextra.get("funding_history"), liquidation_notional=_liq_notional,
             average_liquidation_notional=_liq_average, cvd_data=_cvd_data,
-            macro_events=list(_macro_cache.get("events") or []), macro_feed_status=_macro_cache.get("status"))
+            macro_events=list(_macro_cache.get("events") or []), macro_feed_status=_macro_cache.get("status"),
+            orderbook_snapshots=list(_ob_snapshot_history.get(coin, [])),
+            liquidation_events=[x for x in LIQUIDATIONS if x.get("coin")==coin and time.time()-float(x.get("ts",0) or 0)<86400],
+            signal_context={"ts":res.get("ts"),"entry":entry,"structure_valid":bool(setup.get("valid"))},
+            oi_price_change=_qextra.get("price_pct"))
         res["quant"] = _qstack
         res["probability"] = _qstack.get("bayesian_probability")
         res["risk_score"] = _qstack.get("risk_score")
@@ -5746,7 +5756,10 @@ async def ai_center_snapshot(uid, coin="BTC"):
             depth_notional=book_quality.get("depth_notional") if book_quality.get("status") == "ok" else None,
             liquidation_notional=sum(float(x.get("notional",0) or 0) for x in coin_liqs) if coin_liqs else None,
             cvd_data=_cvd_snapshot, macro_events=list(_macro_cache.get("events") or []),
-            macro_feed_status=_macro_cache.get("status"), liquidation_distance_data=_liq_distance_data)
+            macro_feed_status=_macro_cache.get("status"), liquidation_distance_data=_liq_distance_data,
+            positions=_user_positions, orderbook_snapshots=list(_ob_snapshot_history.get(coin, [])),
+            liquidation_events=[x for x in LIQUIDATIONS if x.get("coin")==coin and time.time()-float(x.get("ts",0) or 0)<86400],
+            signal_context=active or None, oi_price_change=oi_price_pct)
     except Exception as _qerr:
         log.debug("AI center quant snapshot %s: %s", coin, _qerr)
         quant_view = {"status":"error","risk_state":"YELLOW","reason":str(_qerr)[:160]}
