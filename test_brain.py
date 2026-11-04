@@ -57,7 +57,3 @@ class BrainTests(unittest.TestCase):
         x = brain.replay_signal(sig, rows)
         self.assertEqual(x["result"], "stop")
         self.assertTrue(x["entered"])
-
-
-if __name__ == "__main__":
-    unittest.main()
