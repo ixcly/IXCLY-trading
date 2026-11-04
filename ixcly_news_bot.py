@@ -23,13 +23,13 @@ import feedparser
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 from PIL import Image, ImageDraw, ImageFont
+from ixcly_news import assess_crypto_news
 
 BOT_TOKEN = os.getenv("IXCLY_NEWS_BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("IXCLY_NEWS_CHANNEL_ID", "@ixcly_news").strip()
 CHANNEL_URL = os.getenv("IXCLY_NEWS_CHANNEL_URL", "https://t.me/ixcly_news").strip()
 DB_PATH = os.getenv("IXCLY_NEWS_DB", "ixcly_news_state.sqlite3")
 POLL_SECONDS = max(300, int(os.getenv("IXCLY_NEWS_POLL_SECONDS", "900")))
-DAILY_LIMIT = min(8, max(5, int(os.getenv("IXCLY_NEWS_DAILY_LIMIT", "8"))))
 LOCAL_TZ = timezone(timedelta(hours=int(os.getenv("IXCLY_NEWS_TZ_OFFSET", "2"))))
 MIN_ARTICLE_CHARS = 110
 MAX_AGE_HOURS = 36
@@ -63,18 +63,15 @@ FEEDS = {
         "https://bits.media/rss/news/",
         "https://www.rbc.ru/crypto/rss",
     ],
-    "ai": [
-        "https://openai.com/news/rss.xml",
-        "https://techcrunch.com/category/artificial-intelligence/feed/",
-        "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-    ],
 }
 
 CATEGORY_RULES = {
-    "🇷🇺 Криптовалюты в России": ("russia", ("росси", "рф", "цб", "центробанк", "госдум", "майнинг", "налог", "закон", "рубл", "санкц")),
-    "🤖 GPT и искусственный интеллект": ("ai", ("openai", "chatgpt", "gpt-", "gpt ", " искусственн", "artificial intelligence", " ai ", "нейросет", "модель ии")),
-    "₿ Bitcoin и рынок": ("crypto", ("bitcoin", "биткоин", "btc", "ethereum", "эфир", "криптовалют", "crypto", "etf", "бирж", "defi", "stablecoin")),
+    "₿ Bitcoin и макроэкономика": ("crypto", ("bitcoin", "биткоин", "btc", "halving", "майнинг", "резерв", "reserve")),
+    "🏦 Биржи, ETF и институционалы": ("crypto", ("binance", "coinbase", "exchange", "бирж", "etf", "spot fund", "institutional", "институцион", "custody", "listing", "листинг")),
+    "🧩 Альткоины и DeFi": ("crypto", ("ethereum", "эфир", "solana", "defi", "stablecoin", "стейблкоин", "token", "токен", "altcoin", "альткоин", "layer 2")),
+    "⚖️ Регулирование и безопасность": ("crypto", ("sec", "cftc", "регулирован", "регулятор", "закон", "взлом", "hack", "exploit", "уязвим", "санкц", "lawsuit", "суд", "ликвидац")),
 }
+
 
 
 def _clean(value: str, limit: int = 5000) -> str:
@@ -108,11 +105,11 @@ def _published(entry) -> float:
 
 def _category(title: str, summary: str, feed_group: str) -> str:
     hay = f" {title} {summary} ".lower()
-    if feed_group == "ai" or any(k in hay for k in CATEGORY_RULES["🤖 GPT и искусственный интеллект"][1]):
-        return "🤖 GPT и искусственный интеллект"
-    if feed_group == "russia" or any(k in hay for k in CATEGORY_RULES["🇷🇺 Криптовалюты в России"][1]):
-        return "🇷🇺 Криптовалюты в России"
-    return "₿ Bitcoin и рынок"
+    for category, (_, terms) in CATEGORY_RULES.items():
+        if any(k in hay for k in terms):
+            return category
+    return "₿ Bitcoin и макроэкономика"
+
 
 
 def _extract_image(entry) -> str:
@@ -173,17 +170,9 @@ def _already_posted(fp: str) -> bool:
 
 
 def _can_publish_news() -> bool:
-    """Keep a measured pace: no more than one breaking-news post per 90 minutes."""
-    day = datetime.now(LOCAL_TZ).date().isoformat()
-    with _db() as con:
-        row = con.execute("SELECT MAX(posted_at) FROM posted WHERE substr(posted_at,1,10)=?", (day,)).fetchone()
-    if not row or not row[0]:
-        return True
-    try:
-        last = datetime.fromisoformat(row[0])
-        return (datetime.now(LOCAL_TZ) - last).total_seconds() >= 90 * 60
-    except Exception:
-        return True
+    """Legacy compatibility hook; quality score and dedupe now control publication."""
+    return True
+
 
 
 def _today_count() -> int:
@@ -311,12 +300,22 @@ async def collect_news(session: aiohttp.ClientSession):
     results = await asyncio.gather(*jobs, return_exceptions=True)
     items = [item for result in results if isinstance(result, list) for item in result]
     items.sort(key=lambda x: x["published"], reverse=True)
-    unique, seen = [], set()
+    unique, seen, title_tokens = [], set(), []
     for item in items:
         key = item["fingerprint"]
         if key in seen or _already_posted(key):
             continue
         seen.add(key)
+        quality = assess_crypto_news(item["title"], item["summary"], item.get("domain", ""))
+        if not quality["publish"]:
+            LOG.info("Editorial filter rejected (%s/100): %s", quality["score"], item["title"])
+            continue
+        tokens = _tokens(item["title"])
+        if any(tokens and len(tokens & old) / max(1, min(len(tokens), len(old))) >= .72 for old in title_tokens):
+            LOG.info("Near-duplicate rejected: %s", item["title"])
+            continue
+        title_tokens.append(tokens)
+        item["editorial"] = quality
         haystack = (item["title"] + " " + item["summary"]).lower()
         if any(term in haystack for term in HIGH_IMPACT_TERMS) and not _has_independent_confirmation(item, items):
             LOG.info("Skipping uncorroborated high-impact claim: %s", item["title"])
@@ -336,13 +335,22 @@ async def collect_news(session: aiohttp.ClientSession):
 
 def _format_news(item: dict) -> str:
     title = html.escape(item["title"])
-    summary = html.escape(item["summary"][:560].rsplit(" ", 1)[0])
-    published = datetime.fromtimestamp(item["published"], timezone.utc).strftime("%d.%m.%Y %H:%M UTC") if item["published"] else "Сегодня"
-    text = (f"{item['category']}\n\n<b>{title}</b>\n\n{summary}\n\n"
-            f"<i>🕒 {published}</i>\n\n"
+    summary = html.escape(item["summary"][:500].rsplit(" ", 1)[0])
+    published = datetime.fromtimestamp(item["published"], LOCAL_TZ).strftime("%d.%m.%Y %H:%M") if item["published"] else "Сегодня"
+    assets = sorted(set(re.findall(r"\b(?:BTC|ETH|SOL|XRP|BNB|ADA|DOGE|TON|AVAX|LINK|DOT|LTC|TRX|USDT|USDC)\b", (item.get("title_original", "") + " " + item.get("summary_original", "")).upper())))
+    asset_text = ", ".join(assets) if assets else "Конкретные активы не выделены источником"
+    source = html.escape(item.get("link", ""), quote=True)
+    text = (f"<b>₿ {title}</b>\n\n"
+            f"🧩 <b>Что произошло</b>\n{summary}\n\n"
+            f"📊 <b>Почему это важно</b>\nСобытие относится к криптовалютному рынку; фактический эффект будет зависеть от подтверждения информации и реакции рынка.\n\n"
+            f"🪙 <b>Какие активы затронуты</b>\n{html.escape(asset_text)}\n\n"
+            f"⚡ <b>Что отслеживать дальше</b>\nОфициальные обновления по событию, подтверждение независимыми источниками, динамику цены и объёма затронутых активов.\n\n"
+            f"🔎 <b>Источник</b>\n<a href=\"{source}\">Оригинальная публикация</a>\n"
+            f"<i>Опубликовано: {published} (местное время)</i>\n\n"
             "━━━━━━━━━━━━━━\n"
             f"📲 <a href=\"{html.escape(CHANNEL_URL, quote=True)}\">Подписаться на IXCLY NEWS</a>")
     return text
+
 
 
 def make_cover(title: str, category: str) -> bytes:
@@ -415,9 +423,8 @@ async def publish(bot: Bot, session: aiohttp.ClientSession, text: str, title: st
 
 
 async def publish_news_batch(bot: Bot, session: aiohttp.ClientSession):
-    count = _today_count()
-    now_hour = datetime.now(timezone.utc).hour
-    if count >= DAILY_LIMIT or not (7 <= now_hour <= 22) or not _can_publish_news():
+    now_hour = datetime.now(LOCAL_TZ).hour
+    if not (7 <= now_hour <= 23):
         return 0
     items = await collect_news(session)
     # Balanced feed: limit each pass to avoid flooding, and rotate categories where possible.
@@ -475,7 +482,7 @@ async def _btc_technical_snapshot(session: aiohttp.ClientSession):
 
 async def btc_outlook(bot: Bot, session: aiohttp.ClientSession):
     """Scenario-based context, not a price target or certainty claim."""
-    if _routine_done("btc") or _today_count() >= DAILY_LIMIT:
+    if _routine_done("btc"):
         return
     try:
         async with session.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -515,7 +522,7 @@ async def btc_outlook(bot: Bot, session: aiohttp.ClientSession):
 
 async def btc_longterm_outlook(bot: Bot, session: aiohttp.ClientSession):
     """Weekly structural outlook for 2027–2030; deliberately avoids invented price targets."""
-    if _routine_done("longterm") or _today_count() >= DAILY_LIMIT:
+    if _routine_done("longterm"):
         return
     text = (
         "🔭 <b>BITCOIN 2027–2030: ЧТО МОЖЕТ ОПРЕДЕЛИТЬ СЛЕДУЮЩИЕ ГОДЫ</b>\n\n"
@@ -533,7 +540,7 @@ async def btc_longterm_outlook(bot: Bot, session: aiohttp.ClientSession):
 
 
 async def daily_digest(bot: Bot, session: aiohttp.ClientSession):
-    if _routine_done("recap") or _today_count() >= DAILY_LIMIT:
+    if _routine_done("recap"):
         return
     posts = _today_posts()
     if not posts:
