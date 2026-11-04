@@ -3660,7 +3660,9 @@ def get_active_signals():
     active, seen = [], set()
     for x in sorted(load_signal_history(), key=lambda k: k.get("ts", 0), reverse=True):
         key = f"{x['coin']}_{x['side']}"
-        if x.get("status") not in ("active", "in_trade") or key in seen:
+        # "in_trade" is an already-open / tracked position, not a fresh signal.
+        # Keep the Signals feed strictly for actionable, unfilled active signals.
+        if x.get("status") != "active" or key in seen:
             continue
         if x.get("status") == "active" and now - x.get("ts", 0) > SIGNAL_TTL:
             continue
@@ -5295,8 +5297,22 @@ async def drop_waiting_signals(coin, res):
     except (TypeError, ValueError):
         current_price = 0.0
     for x in hist:
-        if x.get("coin") != coin or x.get("status") != "active":
+        if x.get("coin") != coin:
             continue
+        status = str(x.get("status") or "").lower()
+        if status not in ("active", "in_trade"):
+            continue
+        # Never cancel a genuinely opened position. "in_trade" is invalidated
+        # only while its linked position is still waiting for a limit entry.
+        if status == "in_trade":
+            waiting = any(
+                str((u.get("open_positions") or {}).get(coin, {}).get("side") or "").upper()
+                == str(x.get("side") or "").upper()
+                and bool((u.get("open_positions") or {}).get(coin, {}).get("waiting_entry"))
+                for u in _users().values() if isinstance(u, dict)
+            )
+            if not waiting:
+                continue
         reason = None
         if fresh_verdict != "ENTER":
             reason = f"Новый анализ: рекомендация «ЖДАТЬ». {shorten(res.get('comment', ''), 160)}"
@@ -5659,7 +5675,15 @@ async def coin_payload(uid, coin, force=False):
     # One source of truth: a fresh WAIT/opposite-side/overextended analysis
     # invalidates an unfilled active signal before the coin card is rendered.
     if not res.get("price_only") and not res.get("stale"):
-        await drop_waiting_signals(coin, res)
+        removed = await drop_waiting_signals(coin, res)
+        if removed:
+            # Do not let a cached detail response continue to advertise a signal
+            # that was just invalidated by this very analysis.
+            res = dict(res)
+            res["signal_active"] = False
+            res["signal_consistent"] = False
+            res["verdict"] = "WAIT"
+            res["comment"] = "Сигнал снят: свежий анализ больше не подтверждает вход."
 
     remember_res(uid, coin, res)
     if res.get("price_only"):
@@ -5707,7 +5731,11 @@ async def coin_payload(uid, coin, force=False):
     orig_sl = (pos_now or {}).get("sl_orig") or (sig_now or {}).get("sl1")
     out["current_sl"] = cur_sl
     out["trailing"] = bool(cur_sl and orig_sl and abs(cur_sl - orig_sl) > 1e-12)
-    out["signal_active"] = any(x["coin"] == coin for x in get_active_signals())
+    # Only a currently actionable, unfilled signal earns the "в сигналах" badge.
+    out["signal_active"] = any(
+        x["coin"] == coin and x.get("status") == "active"
+        for x in get_active_signals()
+    )
     out["corr"] = None
     out["correlation"] = await correlation_snapshot(coin)
     for oc, od in get_user_open_positions(uid).items():
