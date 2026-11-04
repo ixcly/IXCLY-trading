@@ -135,3 +135,55 @@ class IntelligenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class QuantIntelligenceTests(unittest.TestCase):
+    def test_directional_confidence_penalizes_timeframe_disagreement(self):
+        aligned = {k: {'long_prob': v} for k, v in {'1d': 75, '4h': 72, '1h': 70, '15m': 68}.items()}
+        mixed = {k: {'long_prob': v} for k, v in {'1d': 75, '4h': 72, '1h': 30, '15m': 25}.items()}
+        a = ix.directional_confidence(aligned, 'LONG')
+        b = ix.directional_confidence(mixed, 'LONG')
+        self.assertGreater(a['directional_confidence'], b['directional_confidence'])
+        self.assertEqual(a['timeframes_used'], 4)
+
+    def test_probability_calibration_requires_sample(self):
+        hist = [{'status': 'win', 'r': 1, 'side': 'LONG', 'tf_probs': {'1d': 70, '4h': 70, '1h': 70, '15m': 70}} for _ in range(5)]
+        out = ix.probability_calibration(hist, 70, 'LONG', min_sample=10)
+        self.assertEqual(out['status'], 'warming_up')
+        self.assertIsNone(out['calibrated_probability'])
+
+    def test_probability_calibration_uses_closed_outcomes_only(self):
+        hist = [{'status': 'win', 'r': 1, 'side': 'LONG', 'tf_probs': {'1d': 70, '4h': 70, '1h': 70, '15m': 70}} for _ in range(12)]
+        hist += [{'status': 'active', 'r': 100, 'side': 'LONG', 'tf_probs': {'1d': 70, '4h': 70, '1h': 70, '15m': 70}}]
+        out = ix.probability_calibration(hist, 70, 'LONG', min_sample=10)
+        self.assertEqual(out['status'], 'calibrated')
+        self.assertEqual(out['sample'], 12)
+        self.assertLess(out['calibrated_probability'], 100)
+
+    def test_entry_timing_blocks_far_entry(self):
+        signal = {'price': 100, 'entry': 110, 'side': 'LONG'}
+        tf = {'4h': {'atr': 1.0}}
+        out = ix.entry_timing_assessment(signal, tf)
+        self.assertTrue(out['blocked'])
+        self.assertLessEqual(out['score'], 35)
+
+    def test_reversal_risk_increases_with_opposing_evidence(self):
+        tf = {k: {'long_prob': v} for k, v in {'15m': 20, '1h': 25, '4h': 35, '1d': 40}.items()}
+        out = ix.reversal_probability_assessment('LONG', tf, {'state': 'direction_reversal_watch'}, {'conflict_pct': 80})
+        self.assertGreaterEqual(out['risk_score'], 55)
+        self.assertIn(out['level'], ('high', 'critical'))
+
+    def test_adaptive_threshold_needs_minimum_sample(self):
+        hist = [{'status': 'loss', 'r': -1} for _ in range(8)]
+        self.assertEqual(ix.adaptive_confidence_threshold(hist, 66, min_sample=20)['adjustment'], 0)
+
+    def test_portfolio_exposure_detects_same_side_crowding(self):
+        hist = [{'coin': c, 'side': 'SHORT', 'status': 'in_trade'} for c in ('BTC', 'ETH', 'SOL')]
+        out = ix.portfolio_exposure_assessment(hist)
+        self.assertEqual(out['side_counts']['SHORT'], 3)
+        self.assertEqual(out['risk_level'], 'high')
+
+    def test_no_trade_gate_blocks_weak_confidence(self):
+        out = ix.no_trade_decision({'directional_confidence': 54}, {'blocked': False},
+                                   {'risk_score': 20}, {'threshold': 66})
+        self.assertTrue(out['blocked'])
+        self.assertEqual(out['action'], 'WAIT')
