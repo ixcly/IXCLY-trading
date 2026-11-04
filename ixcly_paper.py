@@ -96,7 +96,7 @@ def select_account(store, uid, account_id):
     return str(account_id)
 
 
-def open_position(store, uid, coin, side, entry, stop, targets, risk_pct=None, account_id=None, fee_pct=None, slippage_pct=None):
+def open_position(store, uid, coin, side, entry, stop, targets, risk_pct=None, account_id=None, fee_pct=None, slippage_pct=None, execution_context=None):
     user, acc = _get_account(store, uid, account_id)
     coin = str(coin).upper().strip()
     side = str(side).upper().strip()
@@ -122,12 +122,31 @@ def open_position(store, uid, coin, side, entry, stop, targets, risk_pct=None, a
     notional = qty * e
     if notional > float(acc['equity']) * 10:
         raise ValueError('Слишком большой размер позиции относительно виртуального капитала')
-    entry_exec = e * (1 + slip / 100 if side == 'LONG' else 1 - slip / 100)
-    entry_fee = notional * fee / 100
+    fill_report = None
+    if isinstance(execution_context, dict):
+        fill_report = simulate_order_execution(
+            side, qty, e, order_type='LIMIT', maker_fee_pct=fee, taker_fee_pct=fee,
+            spread_pct=execution_context.get('spread_pct'),
+            depth_notional=execution_context.get('depth_notional'),
+            latency_ms=execution_context.get('latency_ms'),
+            available_notional=execution_context.get('depth_notional'),
+            max_participation=execution_context.get('max_participation', .10))
+        if fill_report.get('filled_qty', 0) <= 0:
+            raise ValueError('Недостаточно видимой ликвидности для виртуального исполнения')
+        qty = float(fill_report['filled_qty'])
+        notional = qty * e
+        entry_exec = float(fill_report['execution_price']) * (1 + slip / 100 if side == 'LONG' else 1 - slip / 100)
+    else:
+        entry_exec = e * (1 + slip / 100 if side == 'LONG' else 1 - slip / 100)
+    entry_fee = abs(qty * entry_exec) * fee / 100
     acc['balance'] -= entry_fee
     pos = {'coin': coin, 'side': side, 'entry': entry_exec, 'signal_entry': e, 'stop': sl,
            'targets': tps, 'qty': qty, 'notional': notional, 'risk_pct': risk,
            'risk_cash': risk_cash, 'entry_fee': entry_fee, 'fee_pct': fee, 'slippage_pct': slip,
+           'fill_status': (fill_report or {}).get('status', 'assumed_full'),
+           'fill_ratio_pct': (fill_report or {}).get('fill_ratio_pct', 100.0),
+           'remaining_qty': (fill_report or {}).get('remaining_qty', 0.0),
+           'execution_model': fill_report or {'status':'legacy_simplified','note':'No live order-book context supplied'},
            'opened_at': time.time(), 'account_id': acc['id'], 'unrealized_pnl': 0.0}
     acc['positions'][coin] = pos
     acc['updated_at'] = time.time()
@@ -179,3 +198,66 @@ def reset_account(store, uid, account_id=None, deposit=None):
     idx = user['accounts'].index(acc)
     user['accounts'][idx] = fresh
     return copy.deepcopy(fresh)
+
+
+def simulate_order_execution(side, quantity, reference_price, order_type='LIMIT',
+                             maker_fee_pct=0.02, taker_fee_pct=0.06,
+                             spread_pct=None, depth_notional=None, latency_ms=None,
+                             available_notional=None, max_participation=0.10):
+    """Conservative paper fill model. Missing book/latency inputs remain explicitly unknown."""
+    side = str(side).upper()
+    if side not in ('LONG', 'SHORT'):
+        raise ValueError('Некорректная сторона исполнения')
+    qty = _num(quantity, 'количество', 1e-12, 1e15)
+    px = _num(reference_price, 'цена', 1e-12, 1e15)
+    maker = str(order_type).upper() == 'LIMIT'
+    fee = _num(maker_fee_pct if maker else taker_fee_pct, 'комиссия', 0, 2)
+    if spread_pct is not None:
+        spread = _num(spread_pct, 'спред', 0, 20)
+    else:
+        spread = None
+    notional = qty * px
+    fill_ratio = 1.0
+    if available_notional is not None:
+        available = _num(available_notional, 'доступная ликвидность', 0, 1e18)
+        fill_ratio = min(1.0, available / max(notional, 1e-12) * max(0.01, min(1.0, max_participation)))
+    filled_qty = qty * fill_ratio
+    if filled_qty <= 0:
+        return {'status': 'unfilled', 'filled_qty': 0.0, 'remaining_qty': qty, 'fee_pct': fee,
+                'spread_pct': spread, 'latency_ms': latency_ms, 'data_quality': 'partial_inputs'}
+    # Half-spread plus conservative depth impact. Do not invent a latency penalty without measured latency.
+    impact_pct = 0.0
+    if depth_notional is not None:
+        depth = _num(depth_notional, 'глубина стакана', 1e-12, 1e18)
+        impact_pct = min(1.0, (filled_qty * px / depth) ** 0.5 * 0.10)
+    cost_pct = (spread / 2 if spread is not None else 0.0) + impact_pct
+    if latency_ms is not None:
+        latency_ms = _num(latency_ms, 'задержка', 0, 600000)
+    # Conservative adverse direction: buy pays up, sell receives less.
+    direction = 1 if side == 'LONG' else -1
+    exec_px = px * (1 + direction * cost_pct / 100)
+    return {'status': 'filled' if fill_ratio >= .999 else 'partial', 'requested_qty': qty,
+            'filled_qty': filled_qty, 'remaining_qty': max(0.0, qty-filled_qty),
+            'fill_ratio_pct': round(fill_ratio*100, 2), 'reference_price': px,
+            'execution_price': exec_px, 'fee_pct': fee, 'estimated_fee': filled_qty*exec_px*fee/100,
+            'spread_pct': spread, 'impact_pct': round(impact_pct, 5), 'latency_ms': latency_ms,
+            'data_quality': 'measured_inputs' if spread is not None and depth_notional is not None and latency_ms is not None else 'partial_inputs',
+            'note': 'Paper simulation only; not a confirmed exchange fill.'}
+
+
+def conservative_candle_exit(side, stop, target, candle_high, candle_low):
+    """If stop and target are both touched in one OHLC candle, assume stop first."""
+    side = str(side).upper()
+    if side == 'LONG':
+        stop_hit = candle_low <= stop
+        target_hit = candle_high >= target
+    elif side == 'SHORT':
+        stop_hit = candle_high >= stop
+        target_hit = candle_low <= target
+    else:
+        raise ValueError('Некорректная сторона')
+    if stop_hit:
+        return {'status': 'stop', 'price': float(stop), 'ambiguous': bool(target_hit), 'conservative': True}
+    if target_hit:
+        return {'status': 'target', 'price': float(target), 'ambiguous': False, 'conservative': True}
+    return {'status': 'open', 'price': None, 'ambiguous': False, 'conservative': True}
