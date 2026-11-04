@@ -4104,6 +4104,12 @@ async def scan_once(send=True):
                     res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
                                              else "C" if res["quality_score"] >= 62 else "D")
                     min_quality = float(os.getenv("MIN_SIGNAL_QUALITY", "62"))
+                    # Reconcile every fresh scan: WAIT, opposite side, low quality or lost entry.
+                    reconcile_res = dict(res)
+                    if res["verdict"] == "ENTER" and res["quality_score"] < min_quality:
+                        reconcile_res["verdict"] = "WAIT"
+                        reconcile_res["comment"] = f"Качество сигнала {res['quality_score']:.0f}/100 ниже порога {min_quality:.0f}."
+                    await drop_waiting_signals(coin, reconcile_res)
                     if res["verdict"] == "ENTER" and res["quality_score"] >= min_quality:
                         final.append(res)
                         analysis_cache[coin] = (time.time(), 60, res)
@@ -5277,14 +5283,31 @@ refresh_job = {"running": False, "done": 0, "total": 0, "removed": 0, "ts": 0.0}
 
 
 async def drop_waiting_signals(coin, res):
-    """Если анализ монеты сейчас даёт «ЖДАТЬ» — сигнал по ней снимается с уведомлением."""
-    if res.get("price_only") or res.get("verdict") != "WAIT" or res.get("stale"):
+    """Reconcile published unfilled signals against a fresh analysis; stale cards never stay active."""
+    if res.get("price_only") or res.get("stale"):
         return 0
     n = 0
     hist = load_signal_history()
+    fresh_side = str(res.get("side") or ("LONG" if res.get("is_long") else "SHORT")).upper()
+    fresh_verdict = str(res.get("verdict") or "WAIT").upper()
+    try:
+        current_price = float(res.get("price") or 0)
+    except (TypeError, ValueError):
+        current_price = 0.0
     for x in hist:
-        if x["coin"] == coin and x.get("status") == "active":
-            await invalidate_signal(x, f"Обновлённый анализ: рекомендация «ЖДАТЬ». {html.escape(shorten(res.get('comment', ''), 160))}")
+        if x.get("coin") != coin or x.get("status") != "active":
+            continue
+        reason = None
+        if fresh_verdict != "ENTER":
+            reason = f"Новый анализ: рекомендация «ЖДАТЬ». {shorten(res.get('comment', ''), 160)}"
+        elif fresh_side in ("LONG", "SHORT") and fresh_side != x.get("side"):
+            reason = f"Новое направление анализа изменилось на {fresh_side}; прежний {x.get('side')} больше не подтверждён."
+        elif current_price > 0 and float(x.get("entry") or 0) > 0:
+            drift = abs(current_price - float(x["entry"])) / current_price
+            if drift > 0.03:
+                reason = f"Цена ушла от опубликованного входа на {drift * 100:.2f}% — вход потерян, догонять движение нельзя."
+        if reason:
+            await invalidate_signal(x, reason)
             n += 1
     if n:
         save_signal_history(hist)
@@ -5632,6 +5655,12 @@ async def coin_payload(uid, coin, force=False):
         res, err = await analyze_coin(coin, uid=uid, force=force)
     if err:
         return {"error": strip_tags(err)[:300]}
+
+    # One source of truth: a fresh WAIT/opposite-side/overextended analysis
+    # invalidates an unfilled active signal before the coin card is rendered.
+    if not res.get("price_only") and not res.get("stale"):
+        await drop_waiting_signals(coin, res)
+
     remember_res(uid, coin, res)
     if res.get("price_only"):
         return {"price_only": True, "price": res["price"], "coin": coin}
@@ -5654,6 +5683,26 @@ async def coin_payload(uid, coin, force=False):
         out["risk_dist"] = effective_risk
         out["pos_usdt"] = out["risk_usdt"] / effective_risk * float(out["entry"]) if effective_risk > 0 else 0.0
     sig_now = next((x for x in get_active_signals() if x["coin"] == coin), None)
+    # The detail card must describe the same signal record as the signals list.
+    # A fresh analysis may enrich diagnostics, but cannot silently replace the
+    # side, confidence or entry levels of an already-published signal.
+    if sig_now and not pos_now:
+        out["side"] = sig_now.get("side", out.get("side"))
+        out["is_long"] = out["side"] == "LONG"
+        out["verdict"] = "ENTER" if sig_now.get("status") == "active" else "WAIT"
+        out["strength"] = sig_now.get("strength", out.get("strength"))
+        out["type"] = sig_now.get("type", out.get("type"))
+        out["entry"] = sig_now.get("entry", out.get("entry"))
+        out["tps"] = [sig_now.get("tp1"), sig_now.get("tp2"), sig_now.get("tp3")]
+        out["sls"] = [sig_now.get("sl1"), sig_now.get("sl2")]
+        out["signal_ts"] = sig_now.get("ts")
+        out["signal_status"] = sig_now.get("status")
+        out["signal_consistent"] = True
+        out["comment"] = ("Показаны параметры действующего сигнала из общего списка."
+                          if sig_now.get("status") == "active" else
+                          "Сигнал уже сопровождается; повторно входить по нему нельзя.")
+    else:
+        out["signal_consistent"] = not bool(sig_now)
     cur_sl = (pos_now or {}).get("sl1") or (sig_now or {}).get("sl1")
     orig_sl = (pos_now or {}).get("sl_orig") or (sig_now or {}).get("sl1")
     out["current_sl"] = cur_sl
