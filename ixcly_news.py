@@ -226,3 +226,28 @@ def cap_critical_score(score, level: str) -> int:
     if level == "partial":
         return min(score, 4)
     return score
+
+
+def assess_crypto_news(title: str, summary: str, domain: str = "") -> dict:
+    """Editorial relevance/quality gate for crypto news; no unsupported impact claims."""
+    text = f"{title or ''} {summary or ''}".lower()
+    crypto_terms = (
+        "bitcoin", "биткоин", "btc", "ethereum", "эфир", "crypto", "криптовалют", "крипторын",
+        "binance", "coinbase", "exchange", "бирж", "etf", "defi", "stablecoin", "стейблкоин",
+        "token", "токен", "altcoin", "альткоин", "open interest", "funding rate", "ликвидац",
+        "liquidation", "token unlock", "разблокиров", "on-chain", "ончейн", "whale", "кит",
+        "майнинг", "mining", "digital asset", "цифров актив", "wallet", "кошелёк", "sec", "cftc",
+        "solana", "xrp", "bnb", "usdt", "usdc", "hack", "взлом", "exploit", "reserve", "резерв",
+    )
+    excluded = ("celebrity", "знаменит", "football", "футбол", "chatgpt", "нейросет", "artificial intelligence", "искусственный интеллект")
+    trusted = ("coindesk.com", "cointelegraph.com", "decrypt.co", "cryptoslate.com", "bitcoinmagazine.com",
+               "blockworks.co", "forklog.com", "bits.media", "theblock.co", "reuters.com", "bloomberg.com")
+    matches = sorted({term for term in crypto_terms if term in text})
+    trusted_source = any(domain == d or str(domain).endswith("." + d) for d in trusted)
+    score = min(5, len(matches)) * 12 + (20 if trusted_source else 0) + (10 if len(summary or "") >= 350 else 0)
+    unrelated = any(term in text for term in excluded)
+    if unrelated and not matches:
+        score -= 50
+    score = max(0, min(100, score))
+    return {"score": score, "crypto_relevant": bool(matches), "relevant_terms": matches[:8],
+            "source_trusted": trusted_source, "publish": bool(matches) and score >= 38}
