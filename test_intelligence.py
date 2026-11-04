@@ -278,3 +278,60 @@ class QuantumIntelligenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class AdaptiveQuant52Tests(unittest.TestCase):
+    def test_conflict_detector_ignores_unknown_and_counts_votes(self):
+        out = ix.signal_conflict_detector('LONG', {'cvd':'SHORT','trend':'LONG','unknown':None})
+        self.assertEqual(out['status'], 'ok')
+        self.assertEqual(out['disagree'], 1)
+
+    def test_multi_timeframe_consensus_reports_missing(self):
+        out = ix.multi_timeframe_consensus({'15m':{'long_prob':80},'4h':{'long_prob':30}}, 'LONG')
+        self.assertEqual(out['status'], 'ok')
+        self.assertIn('1h', out['missing'])
+        self.assertTrue(out['conflict'])
+
+    def test_dynamic_entry_optimizer_has_zone_and_wait_state(self):
+        out = ix.dynamic_entry_optimizer(100, 2, 'LONG')
+        self.assertEqual(out['status'], 'ok')
+        self.assertIn('allow_now', out)
+        self.assertIn('zone_low', out)
+
+    def test_dynamic_tp_sl_is_directional(self):
+        long = ix.dynamic_tp_sl_optimizer(100, 2, 'LONG')
+        short = ix.dynamic_tp_sl_optimizer(100, 2, 'SHORT')
+        self.assertLess(long['stop'], 100)
+        self.assertGreater(long['target_1'], 100)
+        self.assertGreater(short['stop'], 100)
+        self.assertLess(short['target_1'], 100)
+
+    def test_strategy_tournament_requires_minimum_sample(self):
+        rows=[{'strategy_type':'Trend Following','r':1.0} for _ in range(25)]
+        out=ix.strategy_tournament(rows)
+        self.assertEqual(out['leader'], 'Trend Following')
+
+    def test_funding_anomaly_requires_history(self):
+        self.assertEqual(ix.funding_anomaly_detector([.001])['status'], 'insufficient_data')
+        out=ix.funding_anomaly_detector([.001,.001,.001,.02])
+        self.assertTrue(out['anomaly'])
+
+    def test_liquidation_clusters_never_infer_without_observed_prints(self):
+        out=ix.liquidation_cluster_map([{'price':100,'notional':50}], 100)
+        self.assertEqual(out['status'], 'insufficient_data')
+
+    def test_risk_of_ruin_is_bounded(self):
+        out=ix.risk_of_ruin_simulator(55, 1.5, 1.0, simulations=100, trades=50)
+        self.assertGreaterEqual(out['risk_of_ruin_pct'], 0)
+        self.assertLessEqual(out['risk_of_ruin_pct'], 100)
+
+    def test_adaptive_quant_engine_returns_full_module_set(self):
+        close=np.linspace(100,130,100)
+        df=pd.DataFrame({'open':close-.2,'high':close+1,'low':close-1,'close':close,'volume':np.linspace(1000,1800,100),'atr':np.full(100,1.5),'adx':np.full(100,25.)})
+        tf={k:{'df':df.copy(),'long_prob':65,'price':130.0,'atr':1.5,'sr':{}} for k in ('15m','1h','4h','1d')}
+        out=ix.adaptive_quant_engine(tf, 'LONG', 130.0, 1.5, history=[{'r':.5,'strategy_type':'Trend Following'} for _ in range(25)])
+        self.assertEqual(out['status'], 'ok')
+        for key in ('market_regime_ai','multi_timeframe_consensus','signal_conflicts','signal_confidence_breakdown',
+                    'adaptive_strategy','dynamic_entry_optimizer','signal_expiration','dynamic_tp_sl',
+                    'strategy_tournament','funding_anomaly','oi_price_divergence','spoofing_suspicion',
+                    'liquidation_clusters','portfolio_exposure','risk_of_ruin','system_health'):
+            self.assertIn(key, out)
