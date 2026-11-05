@@ -101,6 +101,27 @@ input:focus{border-color:var(--ac);box-shadow:0 0 0 3px rgba(139,124,255,.12)}
 .pay-wait{text-align:center;padding:6px 0 10px}
 .pay-note{margin-top:8px;padding:10px 12px;border-radius:12px;background:rgba(139,124,255,.1);border:1px solid rgba(139,124,255,.3);font-size:12.5px;line-height:1.45}
 .pay-note.err{background:rgba(255,102,141,.08);border-color:rgba(255,102,141,.35)}
+ 
+:root{color-scheme:dark;--bg:#050708;--c:#101416;--c2:#171e20;--ln:rgba(142,171,166,.18);--t:#edf5f2;--m:#8b9a96;--up:#35d6ad;--dn:#ff657a;--ac:#35d6ad;--y:#e8c77a}
+html{background:#050708}
+body{background:radial-gradient(620px 300px at 100% -8%,rgba(40,120,103,.13),transparent 68%),linear-gradient(180deg,#080c0d 0%,#050708 65%);color:var(--t)}
+h1 span{background:linear-gradient(100deg,#47e0b6,#a2e8d3);-webkit-background-clip:text;background-clip:text;color:transparent}
+.card,.sig{background:linear-gradient(145deg,#121819,#0b1011);border-color:rgba(142,171,166,.17);box-shadow:0 12px 30px rgba(0,0,0,.28)}
+.btn{background:linear-gradient(105deg,#35d6ad,#75d9bd);color:#03110d;box-shadow:0 7px 18px rgba(53,214,173,.10)}
+.btn.s{background:#151d1e;border-color:rgba(142,171,166,.2);color:#e8f2ee}
+input{background:#111819;border-color:rgba(142,171,166,.22)}
+input:focus{border-color:#35d6ad;box-shadow:0 0 0 3px rgba(53,214,173,.1)}
+.pill{background:#182121;border-color:rgba(142,171,166,.18);color:#b8c9c2}
+.fb{background:#131a1b;border-color:rgba(142,171,166,.17)}
+.fb.on{background:linear-gradient(130deg,#35d6ad,#8de0c6);color:#04110d}
+.fb.on b{color:#04110d}
+.bar{background:#202a29}.bar i{background:linear-gradient(90deg,#35d6ad,#8de0c6)}
+.stk{background:linear-gradient(#080c0d 72%,rgba(8,12,13,.88))}
+.tb{background:rgba(5,8,8,.96);border-top-color:rgba(142,171,166,.18)}
+.tb b.on{background:rgba(53,214,173,.09);color:#45dfb8}
+#toast{background:#17201f;border-color:rgba(53,214,173,.42)}
+#sheet{background:#101718;border-color:rgba(142,171,166,.2)}
+.ad-hero{border-color:rgba(53,214,173,.22)}
 </style></head><body>
 <div id="toast"></div>
 <div id="sheet-bg" onclick="closeSheet()"></div>
@@ -332,8 +353,8 @@ ${riskCard()}
 <div class="g" style="margin-top:10px"><button class="btn s" onclick="go('tutorial')">🎓 Обучение</button><button class="btn" onclick="go('sub')">💎 Подписка</button></div>`};
 
 /* ---------- Сигналы ---------- */
-function sigRow(x){const p=x.live_price;const quality=x.quality_score!=null?`<span class="pill">Q ${Number(x.quality_score).toFixed(0)} · ${esc(x.quality_label||'—')}</span>`:'';const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
-return `<div class="sig lst" onclick="go('coin','${x.coin}')"><div style="flex:1"><div class="row" style="justify-content:flex-start;gap:8px"><b>${x.coin}</b>${side(x.side)}<span class="pill">${TI[x.type]||''} ${x.strength||0}%</span>${quality}</div>
+function sigRow(x){const p=x.live_price;const phase=x.signal_phase==='EARLY SHORT'?`<span class="tag S">EARLY SHORT</span>`:'';const quality=x.quality_score!=null?`<span class="pill">Q ${Number(x.quality_score).toFixed(0)} · ${esc(x.quality_label||'—')}</span>`:'';const live=x.live_age!=null?`<small><span class="live"></span>${x.live_age<60?'сейчас':x.live_age+' с назад'} · ${f(p)}${x.dist_pct!=null?' ('+(x.dist_pct>0?'+':'')+x.dist_pct+'%)':''}</small>`:'';
+return `<div class="sig lst" onclick="go('coin','${x.coin}')"><div style="flex:1"><div class="row" style="justify-content:flex-start;gap:8px"><b>${x.coin}</b>${side(x.side)}${phase}<span class="pill">${TI[x.type]||''} ${x.strength||0}%</span>${quality}</div>
 <small class="num">Вход ${f(x.entry)} · TP1 ${f(x.tp1)} · SL ${f(x.sl1)}</small><div>${live}</div></div><span class="m" style="font-size:20px">›</span></div>`}
 function sq(){const v=($('#q').value||'').toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/USDT$/,'');if(v)go('coin',v)}
 
