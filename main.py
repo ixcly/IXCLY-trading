@@ -3081,8 +3081,29 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
     info = tf_data["4h"]
     h1 = tf_data.get("1h")
     reject = ""
+    # Быстрый разворотный SHORT: не требуем, чтобы дневка уже полностью
+    # развернулась, если 1h и 15m подтверждают сильный импульс продавцов.
+    # Это ранний режим, а не обход проверок качества/риска.
+    m15 = tf_data.get("15m")
+    early_short = bool(
+        not is_long
+        and h1 and m15
+        and float(h1.get("long_prob", 50)) <= 35
+        and float(m15.get("long_prob", 50)) <= 32
+        and float(h1.get("adx", 0) or 0) >= 16
+        and float(info.get("adx", 0) or 0) >= 12
+        and float(p4) <= 55
+        and float(p1d) <= 68
+    )
+    if early_short:
+        notes.append("EARLY SHORT: сильный медвежий импульс 1h+15m; дневной тренд ещё может запаздывать")
     if (p4 >= 50) != is_long or (p1d >= 50) != is_long:
-        reject = "4h и 1d смотрят в разные стороны"
+        if early_short:
+            # Старший ТФ остаётся контекстом риска, но не блокирует резкий
+            # подтверждённый младшими ТФ импульс автоматически.
+            notes.append("Старшие ТФ расходятся: ранний SHORT требует уменьшенного риска и ретеста")
+        else:
+            reject = "4h и 1d смотрят в разные стороны"
     agree = sum(1 for t in tfs if cs(tf_data[t]["long_prob"]) >= 55)
     squeeze4 = bool(info.get("squeeze"))
     atr_cap = 0.09 if squeeze4 else 0.06  # высокий ATR после сжатия — ещё не перегрев
@@ -3319,7 +3340,9 @@ async def evaluate_setup(coin, tf_data, ctx, funding=None, scan=False, onchain_c
                 "oi_change_pct": oi_pct, "btc15": btc15, "market_panic": panic,
                 "news_risk": news_risk, "anti_fomo": anti_fomo, "breakout": breakout,
                 "indicators": indicators, "tf_consensus": f"{agree}/{len(tfs)}",
-                "session": sess_name, "traps": {k: v for k, v in traps.items() if k != "levels"}})
+                "session": sess_name, "traps": {k: v for k, v in traps.items() if k != "levels"},
+                "signal_phase": "EARLY SHORT" if early_short else ("CONFIRMED" if not reject else "WAIT"),
+                "early_short": early_short})
     return out
 
 
@@ -3480,6 +3503,8 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
         "funding_rate": setup.get("extras", {}).get("funding"),
         "oi_change_pct": setup.get("extras", {}).get("oi_change_pct"),
         "tf_consensus": setup.get("extras", {}).get("tf_consensus"),
+        "signal_phase": setup.get("extras", {}).get("signal_phase", "CONFIRMED"),
+        "early_short": bool(setup.get("extras", {}).get("early_short")),
         "news_risk": setup.get("extras", {}).get("news_risk", {}),
         "market_panic": setup.get("extras", {}).get("market_panic", {}),
         "anti_fomo": setup.get("extras", {}).get("anti_fomo", {}),
@@ -4030,9 +4055,8 @@ async def scan_once(send=True):
 
         async def s2(item):
             sc, tf2, _ = item
-            if coin_recently_lost(sc):
-                _rej("недавний убыток по монете")
-                return
+            # Повторный сетап по монете после убытка не блокируется:
+            # каждое новое направление проходит обычные проверки с нуля.
             async with sem:
                 tf_data = dict(tf2)
                 try:
@@ -4178,7 +4202,8 @@ async def scan_once(send=True):
                         "tp3": r["tps"][2], "sl1": r["sls"][0], "sl2": r["sls"][1], "status": "active",
                         "max_tp_hit": 0, "hit_sl": 0, "price": r["price"], "sent_to": [], "is_long": r["is_long"],
                         "tf_probs": r.get("tf_probs") or {}, "text": r["text"], "quality_score": r.get("quality_score"),
-                        "quality_label": r.get("quality_label"), "market_regime": r.get("market_regime"),
+                        "quality_label": r.get("quality_label"), "signal_phase": r.get("signal_phase", "CONFIRMED"),
+                        "market_regime": r.get("market_regime"),
                         "volume_anomaly": r.get("volume_anomaly"),
                         "market_fingerprint": (r.get("market_fingerprint") or {}).get("features", {}),
                         "signal_dna": r.get("signal_dna"), "decision_brain": r.get("decision_brain"),
