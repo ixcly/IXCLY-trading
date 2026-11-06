@@ -3611,7 +3611,7 @@ async def build_analysis(coin, tf_data, setup, bt, ctx, source):
             res["verdict"] = "WAIT"
             res["comment"] = "Strategy Retirement: стратегия временно отключена из-за отрицательной OOS-эффективности. " + str(res.get("comment", ""))
     except Exception as _quant_err:
-        log.warning("Quant Intelligence skipped for %s: %s", coin, _quant_err)
+        log.exception("Quant Intelligence skipped for %s: %s", coin, _quant_err)
         res["quant"] = {"status": "error", "reason": str(_quant_err)[:180], "risk_state": "YELLOW"}
         if res.get("verdict") == "ENTER":
             res["verdict"] = "WAIT"
