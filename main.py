@@ -50,6 +50,7 @@ from ixcly_intelligence import (score_signal, market_regime, volume_anomaly, ris
 from ixcly_brain import (market_fingerprint, signal_fingerprint, decision_brain, liquidity_path,
                         news_reaction_assessment, strategy_dna, counterfactual_lab, replay_signal,
                         regime_transition_assessment, signal_fragility, evidence_conflict_map, score_calibration)
+from ixcly_precision import precision_report
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -4129,6 +4130,12 @@ async def scan_once(send=True):
                     primary_df = primary_tf.get("df") if isinstance(primary_tf, dict) else None
                     res["market_regime"] = market_regime(primary_df)
                     res["volume_anomaly"] = volume_anomaly(primary_df)
+                    # Precision Lab adds independent, observable diagnostics; it does not
+                    # invent win probabilities or suppress otherwise valid signals.
+                    res["precision_lab"] = precision_report(
+                        primary_df, res,
+                        fee_bps=float(os.getenv("IXCLY_FEE_BPS", "10")),
+                        slippage_bps=float(os.getenv("IXCLY_SLIPPAGE_BPS", "5")))
                     res["quality_score"] = score_signal(res)
                     res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
                                              else "C" if res["quality_score"] >= 62 else "D")
@@ -4211,6 +4218,7 @@ async def scan_once(send=True):
                         "quality_label": r.get("quality_label"), "signal_phase": r.get("signal_phase", "CONFIRMED"),
                         "market_regime": r.get("market_regime"),
                         "volume_anomaly": r.get("volume_anomaly"),
+                        "precision_lab": r.get("precision_lab"),
                         "market_fingerprint": (r.get("market_fingerprint") or {}).get("features", {}),
                         "signal_dna": r.get("signal_dna"), "decision_brain": r.get("decision_brain"),
                         "regime_transition": r.get("regime_transition"),
@@ -5988,18 +5996,15 @@ async def mini_dispatch(uid, u, act, d):
         regime_code = btc_regime.get("name") if isinstance(btc_regime, dict) else None
         regime_names = {"uptrend": "Бычий тренд", "downtrend": "Медвежий тренд", "range": "Боковик"}
         regime_label = regime_names.get(regime_code, "Нет данных")
-        closed_history = load_signal_history()
-        memory = signal_memory_summary(closed_history, 120)
-        profile = adaptive_scanner_profile(closed_history, CONF_FINAL, regime=regime_code)
-        # Фактическая калибровка качества на закрытых сделках, без выдуманных вероятностей.
-        calibration = score_calibration(closed_history, min_sample=20)
+        memory = signal_memory_summary(load_signal_history(), 120)
+        profile = adaptive_scanner_profile(load_signal_history(), CONF_FINAL, regime=regime_code)
         ctx_now = await get_context()
         panic = market_panic_assessment(await btc_move_15m(), ctx_now.get("btc_atr_pct", 0))
         return {"regime": regime_label, "market": market_bias.get("title_ru", "Нет данных"),
                 "news_risk": {"severity": market_bias.get("severity", "low"),
                               "critical_score": market_bias.get("critical_score", 0),
                               "coins": market_bias.get("coins", "")},
-                "memory": memory, "adaptive": profile, "calibration": calibration, "market_panic": panic, "ranking": scanner_ranking[:50],
+                "memory": memory, "adaptive": profile, "market_panic": panic, "ranking": scanner_ranking[:50],
                 "signals": [{"coin": x.get("coin"), "side": x.get("side"), "quality": x.get("quality_score"),
                              "grade": x.get("quality_label"), "regime": x.get("market_regime"),
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
