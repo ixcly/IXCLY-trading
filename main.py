@@ -5988,15 +5988,18 @@ async def mini_dispatch(uid, u, act, d):
         regime_code = btc_regime.get("name") if isinstance(btc_regime, dict) else None
         regime_names = {"uptrend": "Бычий тренд", "downtrend": "Медвежий тренд", "range": "Боковик"}
         regime_label = regime_names.get(regime_code, "Нет данных")
-        memory = signal_memory_summary(load_signal_history(), 120)
-        profile = adaptive_scanner_profile(load_signal_history(), CONF_FINAL, regime=regime_code)
+        closed_history = load_signal_history()
+        memory = signal_memory_summary(closed_history, 120)
+        profile = adaptive_scanner_profile(closed_history, CONF_FINAL, regime=regime_code)
+        # Фактическая калибровка качества на закрытых сделках, без выдуманных вероятностей.
+        calibration = score_calibration(closed_history, min_sample=20)
         ctx_now = await get_context()
         panic = market_panic_assessment(await btc_move_15m(), ctx_now.get("btc_atr_pct", 0))
         return {"regime": regime_label, "market": market_bias.get("title_ru", "Нет данных"),
                 "news_risk": {"severity": market_bias.get("severity", "low"),
                               "critical_score": market_bias.get("critical_score", 0),
                               "coins": market_bias.get("coins", "")},
-                "memory": memory, "adaptive": profile, "market_panic": panic, "ranking": scanner_ranking[:50],
+                "memory": memory, "adaptive": profile, "calibration": calibration, "market_panic": panic, "ranking": scanner_ranking[:50],
                 "signals": [{"coin": x.get("coin"), "side": x.get("side"), "quality": x.get("quality_score"),
                              "grade": x.get("quality_label"), "regime": x.get("market_regime"),
                              "volume_anomaly": x.get("volume_anomaly")} for x in active],
