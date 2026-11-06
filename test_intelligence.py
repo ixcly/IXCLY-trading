@@ -276,6 +276,27 @@ class QuantumIntelligenceTests(unittest.TestCase):
         self.assertEqual(out["untimed_rows"], 1)
         self.assertEqual(out["stale_rows"], 1)
 
+class ExpirationConsistencyTests(unittest.TestCase):
+    """signal_expiration_engine не должен расходиться с signal_decay_assessment, которую реально использует бот."""
+
+    def test_same_ttl_and_dislocation_thresholds(self):
+        now = 1_000_000.0
+        sig = {'ts': now - 6 * 3600, 'entry': 100.0}
+        self.assertTrue(ix.signal_expiration_engine(sig, 100, now=now, atr=1)['valid'])
+        # 2.0 ATR от входа: decay и expiration обязаны дать один и тот же вердикт
+        self.assertEqual(ix.signal_expiration_engine(sig, 102, now=now, atr=1)['valid'],
+                         ix.signal_decay_assessment(sig, 102, now=now, atr=1)['valid'])
+        self.assertFalse(ix.signal_expiration_engine(sig, 103, now=now, atr=1)['valid'])
+
+    def test_age_expired_and_structure_invalid(self):
+        now = 1_000_000.0
+        old = ix.signal_expiration_engine({'ts': now - 13 * 3600, 'entry': 100.0}, 100, now=now, atr=1)
+        self.assertFalse(old['valid'])
+        self.assertIn('age_expired', old['reasons'])
+        broken = ix.signal_expiration_engine({'ts': now, 'entry': 100.0, 'structure_valid': False}, 100, now=now, atr=1)
+        self.assertIn('structure_invalid', broken['reasons'])
+
+
 if __name__ == '__main__':
     unittest.main()
 
