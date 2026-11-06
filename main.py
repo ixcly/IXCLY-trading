@@ -3000,11 +3000,9 @@ def session_info(now_msk):
     return "Европа + США", 2
 
 
-async def chandelier_stop(coin, is_long):
-    """Chandelier Exit: максимум (минимум) 22 часовых свечей минус (плюс) 3 ATR."""
-    rows = await hourly_rows(coin)
-    if not rows:
-        return None
+def _chandelier_from_rows(rows, is_long):
+    """Синхронная pandas-математика Chandelier Exit (вызывается через asyncio.to_thread,
+    чтобы не блокировать event loop на каждой открытой позиции при каждом цикле мониторинга)."""
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
     prev = df["close"].shift()
     tr = pd.concat([df["high"] - df["low"], (df["high"] - prev).abs(), (df["low"] - prev).abs()], axis=1).max(axis=1)
@@ -3014,6 +3012,14 @@ async def chandelier_stop(coin, is_long):
     if is_long:
         return float(df["high"].tail(22).max() - 3 * atr)
     return float(df["low"].tail(22).min() + 3 * atr)
+
+
+async def chandelier_stop(coin, is_long):
+    """Chandelier Exit: максимум (минимум) 22 часовых свечей минус (плюс) 3 ATR."""
+    rows = await hourly_rows(coin)
+    if not rows:
+        return None
+    return await asyncio.to_thread(_chandelier_from_rows, rows, is_long)
 
 
 def weekly_trend(tf_data):
@@ -5654,6 +5660,23 @@ def _enrich_user_positions(uid):
     return out
 
 
+def _correlation_from_closes(coin, symbols, closes):
+    returns = {c: pd.Series(pd.Series(v).pct_change().dropna().tail(48).to_numpy()) for c, v in closes.items()}
+    out = {}
+    base = returns.get(coin)
+    if base is not None:
+        for c in symbols:
+            if c == coin or c not in returns:
+                continue
+            n = min(len(base), len(returns[c]))
+            if n >= 20:
+                a, b = base.iloc[-n:], returns[c].iloc[-n:]
+                corr = float(a.corr(b))
+                if np.isfinite(corr):
+                    out[c] = round(corr, 2)
+    return out
+
+
 async def correlation_snapshot(coin, peers=None):
     """Оценка 1h корреляции доходностей к BTC и ближайшей тематической монете."""
     peers = list(peers or [])
@@ -5662,24 +5685,13 @@ async def correlation_snapshot(coin, peers=None):
     symbols = list(dict.fromkeys([coin, peer, "BTC"]))[:3]
     try:
         frames = await asyncio.gather(*[get_market_data_light(c, ("1h",)) for c in symbols])
-        returns = {}
+        closes = {}
         for c, item in zip(symbols, frames):
             df = item[0].get("1h", {}).get("df") if item and item[0] else None
             if df is not None and len(df) >= 30:
-                returns[c] = pd.Series(df["close"].astype(float).pct_change().dropna().tail(48).to_numpy())
-        out = {}
-        base = returns.get(coin)
-        if base is not None:
-            for c in symbols:
-                if c == coin or c not in returns:
-                    continue
-                n = min(len(base), len(returns[c]))
-                if n >= 20:
-                    a, b = base.iloc[-n:], returns[c].iloc[-n:]
-                    corr = float(a.corr(b))
-                    if np.isfinite(corr):
-                        out[c] = round(corr, 2)
-        return out
+                closes[c] = df["close"].astype(float).to_numpy().copy()  # копия: поток не держит ссылку на общий df
+        # pct_change/corr — синхронная pandas-математика, выносим из event loop
+        return await asyncio.to_thread(_correlation_from_closes, coin, symbols, closes)
     except Exception as e:
         log.debug("correlation %s: %s", coin, e)
         return {}
