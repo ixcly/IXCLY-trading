@@ -270,9 +270,12 @@ SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))  # сканер кажд�
 SIGNAL_COOLDOWN = 6 * 3600
 
 # --- Mini App ---
-_wu = clean_key(os.getenv("WEBAPP_URL")) or (
-    os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") if os.getenv("RENDER_EXTERNAL_URL") else None)
-WEBAPP_URL = (_wu.rstrip("/") if _wu.rstrip("/").endswith("/app") else _wu.rstrip("/") + "/app") if _wu else None
+# IXCLY VPS Mini App: never fall back to the suspended Render deployment.
+# This single canonical URL is used for new /start, signal, and chat-menu buttons.
+WEBAPP_URL = "https://ixcly-trade.servehalflife.com/app"
+_configured_webapp_url = clean_key(os.getenv("WEBAPP_URL"))
+if _configured_webapp_url and _configured_webapp_url.rstrip("/") != WEBAPP_URL:
+    logging.warning("Ignoring stale WEBAPP_URL=%s; using VPS Mini App %s", _configured_webapp_url, WEBAPP_URL)
 MAIN_LOOP = None
 MODE_TYPES = {"aggressive": ("Краткосрочный", "Среднесрочный"), "balanced": ("Среднесрочный", "Долгосрочный"),
               "conservative": ("Долгосрочный",)}
