@@ -51,6 +51,8 @@ from ixcly_brain import (market_fingerprint, signal_fingerprint, decision_brain,
                         news_reaction_assessment, strategy_dna, counterfactual_lab, replay_signal,
                         regime_transition_assessment, signal_fragility, evidence_conflict_map, score_calibration)
 from ixcly_precision import precision_report
+from ixcly_price_map import price_map
+from ixcly_quant_suite import quant_suite
 import ixcly_paper as _paper_engine
 paper_snapshot = _paper_engine.snapshot
 paper_create_account = _paper_engine.create_account
@@ -4136,6 +4138,9 @@ async def scan_once(send=True):
                         primary_df, res,
                         fee_bps=float(os.getenv("IXCLY_FEE_BPS", "10")),
                         slippage_bps=float(os.getenv("IXCLY_SLIPPAGE_BPS", "5")))
+                    # Historical scenario bands, not a point-price promise.
+                    res["price_map"] = price_map(primary_df, res.get("side", "LONG"))
+                    res["quant_suite"] = quant_suite(primary_df, res.get("side", "LONG"))
                     res["quality_score"] = score_signal(res)
                     res["quality_label"] = ("A" if res["quality_score"] >= 82 else "B" if res["quality_score"] >= 72
                                              else "C" if res["quality_score"] >= 62 else "D")
@@ -4219,6 +4224,8 @@ async def scan_once(send=True):
                         "market_regime": r.get("market_regime"),
                         "volume_anomaly": r.get("volume_anomaly"),
                         "precision_lab": r.get("precision_lab"),
+                        "price_map": r.get("price_map"),
+                        "quant_suite": r.get("quant_suite"),
                         "market_fingerprint": (r.get("market_fingerprint") or {}).get("features", {}),
                         "signal_dna": r.get("signal_dna"), "decision_brain": r.get("decision_brain"),
                         "regime_transition": r.get("regime_transition"),
