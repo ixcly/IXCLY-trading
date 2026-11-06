@@ -977,11 +977,27 @@ def daily_loss_guard(closed_pnl, equity, limit_pct=3):
 
 
 def leverage_risk_engine(leverage, stop_distance_pct, maintenance_margin_pct=None):
-    if not leverage or not stop_distance_pct or leverage<=0 or stop_distance_pct<=0: return {'status':'insufficient_data'}
-    loss_pct=float(leverage)*float(stop_distance_pct)
-    liq_buffer=None if maintenance_margin_pct is None else max(0,100/float(leverage)-float(maintenance_margin_pct))
-    return {'status':'ok','equity_loss_at_stop_pct':round(loss_pct,3),'estimated_liquidation_buffer_pct':round(liq_buffer,3) if liq_buffer is not None else None,
-            'warning':loss_pct>=25 or liq_buffer is not None and stop_distance_pct>=liq_buffer}
+    """Only calculate leverage risk for an actual numeric leverage value.
+
+    UI recommendations such as 'x5-x10 (Средняя волатильность)' are ranges,
+    not a selected leverage; using either endpoint would invent exposure.
+    """
+    try:
+        lev = float(leverage)
+        stop_pct = float(stop_distance_pct)
+        maintenance = (float(maintenance_margin_pct)
+                       if maintenance_margin_pct is not None else None)
+    except (TypeError, ValueError, OverflowError):
+        return {'status': 'insufficient_data', 'reason': 'numeric leverage/stop inputs unavailable'}
+    if not all(math.isfinite(v) for v in (lev, stop_pct)) or lev <= 0 or stop_pct <= 0:
+        return {'status': 'insufficient_data', 'reason': 'invalid leverage/stop inputs'}
+    if maintenance is not None and not math.isfinite(maintenance):
+        maintenance = None
+    loss_pct = lev * stop_pct
+    liq_buffer = None if maintenance is None else max(0, 100 / lev - maintenance)
+    return {'status': 'ok', 'equity_loss_at_stop_pct': round(loss_pct, 3),
+            'estimated_liquidation_buffer_pct': round(liq_buffer, 3) if liq_buffer is not None else None,
+            'warning': loss_pct >= 25 or (liq_buffer is not None and stop_pct >= liq_buffer)}
 
 
 def liquidation_distance(entry, mark, side, leverage, maintenance_margin_rate=None):
