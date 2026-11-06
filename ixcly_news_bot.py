@@ -314,7 +314,6 @@ async def collect_news(session: aiohttp.ClientSession):
         if any(tokens and len(tokens & old) / max(1, min(len(tokens), len(old))) >= .72 for old in title_tokens):
             LOG.info("Near-duplicate rejected: %s", item["title"])
             continue
-        title_tokens.append(tokens)
         item["editorial"] = quality
         haystack = (item["title"] + " " + item["summary"]).lower()
         if any(term in haystack for term in HIGH_IMPACT_TERMS) and not _has_independent_confirmation(item, items):
@@ -325,6 +324,7 @@ async def collect_news(session: aiohttp.ClientSession):
         # Never publish an English-only fallback or a translation failure as a Russian post.
         if not title_ru or not summary_ru or len(summary_ru) < MIN_ARTICLE_CHARS:
             continue
+        title_tokens.append(tokens)
         item["title_original"] = item["title"]
         item["summary_original"] = item["summary"]
         item["title"] = title_ru
@@ -334,23 +334,25 @@ async def collect_news(session: aiohttp.ClientSession):
 
 
 def _format_news(item: dict) -> str:
-    title = html.escape(item["title"])
-    summary = html.escape(item["summary"][:500].rsplit(" ", 1)[0])
-    published = datetime.fromtimestamp(item["published"], LOCAL_TZ).strftime("%d.%m.%Y %H:%M") if item["published"] else "Сегодня"
+    """Fact-first news post. Avoids fabricated market effects and filler."""
+    title = html.escape(_clean(item.get("title", ""), 210))
+    raw_summary = _clean(item.get("summary", ""), 1200)
+    # Keep summary readable within Telegram message; no claim of automatic verification.
+    sentences = re.split(r"(?<=[.!?])\s+", raw_summary)
+    excerpt = " ".join(sentences[:3])[:680].strip()
+    if not excerpt:
+        excerpt = raw_summary[:450]
+    summary = html.escape(excerpt)
     assets = sorted(set(re.findall(r"\b(?:BTC|ETH|SOL|XRP|BNB|ADA|DOGE|TON|AVAX|LINK|DOT|LTC|TRX|USDT|USDC)\b", (item.get("title_original", "") + " " + item.get("summary_original", "")).upper())))
-    asset_text = ", ".join(assets) if assets else "Конкретные активы не выделены источником"
+    asset_line = "\n🪙 <b>Активы:</b> " + html.escape(", ".join(assets)) if assets else ""
+    # This is editorial metadata, not a market movement forecast.
+    category = html.escape(item.get("category", ""))
     source = html.escape(item.get("link", ""), quote=True)
-    text = (f"<b>₿ {title}</b>\n\n"
-            f"🧩 <b>Что произошло</b>\n{summary}\n\n"
-            f"📊 <b>Почему это важно</b>\nСобытие относится к криптовалютному рынку; фактический эффект будет зависеть от подтверждения информации и реакции рынка.\n\n"
-            f"🪙 <b>Какие активы затронуты</b>\n{html.escape(asset_text)}\n\n"
-            f"⚡ <b>Что отслеживать дальше</b>\nОфициальные обновления по событию, подтверждение независимыми источниками, динамику цены и объёма затронутых активов.\n\n"
-            f"🔎 <b>Источник</b>\n<a href=\"{source}\">Оригинальная публикация</a>\n"
-            f"<i>Опубликовано: {published} (местное время)</i>\n\n"
-            "━━━━━━━━━━━━━━\n"
-            f"📲 <a href=\"{html.escape(CHANNEL_URL, quote=True)}\">Подписаться на IXCLY NEWS</a>")
-    return text
-
+    footer = f'<a href="{html.escape(CHANNEL_URL, quote=True)}">IXCLY NEWS — подписаться</a>'
+    return (f"<b>{title}</b>\n\n{summary}\n\n"
+            f"📂 {category}{asset_line}\n"
+            f'🔗 <a href="{source}">Читать оригинал</a>\n\n'
+            f"━━━━━━━━━━━━━━\n{footer}")
 
 
 def make_cover(title: str, category: str) -> bytes:
@@ -407,7 +409,7 @@ async def publish(bot: Bot, session: aiohttp.ClientSession, text: str, title: st
     # Ensure every publication ends with the same channel subscription link.
     footer = ("━━━━━━━━━━━━━━\n"
               f"📲 <a href=\"{html.escape(CHANNEL_URL, quote=True)}\">Подписаться на IXCLY NEWS</a>")
-    if "Подписаться на IXCLY NEWS" not in text:
+    if "IXCLY NEWS — подписаться" not in text:
         text = text.rstrip() + "\n\n" + footer
     photo = await _download_image(session, image_url) if image_url else None
     if not photo:
@@ -429,6 +431,7 @@ async def publish_news_batch(bot: Bot, session: aiohttp.ClientSession):
     items = await collect_news(session)
     # Balanced feed: limit each pass to avoid flooding, and rotate categories where possible.
     chosen, categories = [], set()
+    items.sort(key=lambda item: (item.get("editorial", {}).get("score", 0), item.get("published", 0)), reverse=True)
     for item in items:
         if item["category"] not in categories or not chosen:
             chosen.append(item); categories.add(item["category"])
