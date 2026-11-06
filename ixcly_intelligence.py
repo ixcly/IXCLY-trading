@@ -1642,15 +1642,17 @@ def dynamic_entry_optimizer(price, atr, side, support=None, resistance=None, con
             'reason':'price too far from optimized zone' if distance>max_distance_atr else 'timeframe conflict' if (consensus or {}).get('conflict') else 'zone valid'}
 
 
-def signal_expiration_engine(signal, current_price=None, now=None, ttl_seconds=14400, atr=None):
-    now=float(now or time.time()); created=float((signal or {}).get('ts') or now)
-    age=max(0,now-created); reasons=[]
-    if age>ttl_seconds: reasons.append('ttl_expired')
-    planned=(signal or {}).get('entry')
-    if current_price and planned and atr and float(atr)>0 and abs(float(current_price)-float(planned))/float(atr)>1.5: reasons.append('price_dislocated')
-    if (signal or {}).get('structure_valid') is False: reasons.append('structure_invalid')
-    return {'status':'ok','valid':not reasons,'age_seconds':int(age),'ttl_seconds':int(ttl_seconds),
-            'expires_at':created+ttl_seconds,'reasons':reasons}
+def signal_expiration_engine(signal, current_price=None, now=None, ttl_seconds=43200, atr=None):
+    """Срок жизни сигнала для советующего слоя. Делегирует signal_decay_assessment, чтобы
+    пороги (TTL 12ч, уход цены >2.5 ATR) совпадали с реальной логикой бота, а не расходились с ней."""
+    now = float(now or time.time())
+    created = float((signal or {}).get('ts') or now)
+    d = signal_decay_assessment(signal or {'ts': now}, current_price=current_price, now=now, ttl_seconds=ttl_seconds, atr=atr)
+    reasons = list(d.get('reasons', []))
+    if (signal or {}).get('structure_valid') is False:
+        reasons.append('structure_invalid')
+    return {'status': 'ok', 'valid': not reasons and d.get('valid', True), 'age_seconds': int(d.get('age_seconds', 0) or 0),
+            'ttl_seconds': int(ttl_seconds), 'expires_at': created + ttl_seconds, 'reasons': reasons}
 
 
 def dynamic_tp_sl_optimizer(entry, atr, side, support=None, resistance=None, volatility_pct=None, risk_reward_min=1.5):
